@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "note": "立绘组件表：一张底图 + 若干覆盖层。想加表情/腮红，只要往 shell/master 放张同尺寸透明 PNG，再在这里加一行，不用改代码。",
+  "canvas": [384, 576],
+  "regions": [
+    { "name": "head", "rect": [44, 8, 296, 196] },
+    { "name": "face", "rect": [96, 92, 192, 96] },
+    { "name": "body", "rect": [36, 204, 312, 372] }
+  ],
+  "mouth": { "src": "talk.png", "interval": "talk" },
+  "faces": {
+    "normal": { "base": "surface0.png" },
+    "happy": { "base": "surface1.png" },
+    "sad": { "base": "surface2.png" },
+    "surprise": { "base": "surface3.png" },
+    "sleepy": { "base": "surface2.png", "fallback": true },
+    "think": { "base": "surface0.png", "fallback": true }
+  },
+  "aliases": {
+    "normal": "normal",
+    "happy": "happy",
+    "sad": "sad",
+    "surprise": "surprise",
+    "sleepy": "sleepy",
+    "think": "think"
+  }
+}

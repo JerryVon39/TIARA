@@ -1,0 +1,39 @@
+{
+  "total": 2,
+  "limit": 50,
+  "offset": 0,
+  "data": [
+    {
+      "subject_id": 400602,
+      "subject_type": 2,
+      "type": 3,
+      "rate": 8,
+      "ep_status": 18,
+      "vol_status": 0,
+      "updated_at": "2026-11-03T12:00:00+08:00",
+      "subject": {
+        "id": 400602,
+        "name": "藥屋少女的呢喃 第二季",
+        "name_cn": "药屋少女的呢喃 第二季",
+        "eps": 24,
+        "air_date": "2025-01-10"
+      }
+    },
+    {
+      "subject_id": 500001,
+      "subject_type": 2,
+      "type": 3,
+      "rate": 0,
+      "ep_status": 2,
+      "vol_status": 0,
+      "updated_at": "2026-11-04T01:00:00+08:00",
+      "subject": {
+        "id": 500001,
+        "name": "NEW SAMPLE",
+        "name_cn": "某部刚开播的新番",
+        "eps": 12,
+        "air_date": "2026-10-20"
+      }
+    }
+  ]
+}
