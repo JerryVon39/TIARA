@@ -158,6 +158,12 @@ namespace UkagakaBangumi
         string _lastBootDate = "";
         double _savedLeft = double.MinValue, _savedTop = double.MinValue;
         readonly HashSet<string> _reminded = new HashSet<string>();
+        public sealed class ReminderSnooze
+        {
+            public string Name { get; set; }
+            public long At { get; set; }
+        }
+        readonly Dictionary<string, ReminderSnooze> _snoozed = new Dictionary<string, ReminderSnooze>();
 
         // 透明像素穿透：WM_NCHITTEST 需要一张 alpha 蒙版
         byte[] _alpha;
@@ -3436,6 +3442,11 @@ namespace UkagakaBangumi
                     var arr = rv as object[];
                     if (arr != null) { _reminded.Clear(); foreach (var o in arr) { string s1 = Str(o); if (!string.IsNullOrEmpty(s1)) _reminded.Add(s1); } }
                 }
+                if (d.TryGetValue("snoozed", out rv) && rv != null)
+                {
+                    var snoozes = ser.ConvertToType<Dictionary<string, ReminderSnooze>>(rv);
+                    foreach (var entry in snoozes) if (entry.Value != null) _snoozed[entry.Key] = entry.Value;
+                }
                 if (d.TryGetValue("pet_scale", out v))
                 {
                     double sc;
@@ -3520,6 +3531,7 @@ namespace UkagakaBangumi
                     sb.Append("\"").Append((k ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"")).Append("\"");
                 }
                 sb.Append("]");
+                sb.Append(",\"snoozed\":").Append(new JavaScriptSerializer().Serialize(_snoozed));
                 // 用户态变量（好感/心情/今日互动次数）——对应传统伪春菜的 yaya_variable.cfg
                 sb.Append(",\"vars\":{");
                 bool firstU = true;
@@ -3674,8 +3686,19 @@ namespace UkagakaBangumi
             {
                 string file = Path.Combine(_root, "data", "library.json");
                 using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (var reader = new StreamReader(stream, Encoding.UTF8))
                 {
+                    string expected = V("library_sha256", "");
+                    if (expected.Length > 0)
+                    {
+                        using (var sha = System.Security.Cryptography.SHA256.Create())
+                        {
+                            string actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                            if (expected != actual) return null;
+                            stream.Position = 0;
+                        }
+                    }
+                    using (var reader = new StreamReader(stream, Encoding.UTF8))
+                    {
                     var library = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(reader.ReadToEnd());
                     var ids = new HashSet<string>(StringComparer.Ordinal);
                     object value;
@@ -3684,12 +3707,62 @@ namespace UkagakaBangumi
                     foreach (object item in rows)
                     {
                         var row = item as Dictionary<string, object>;
-                        if (row != null && row.TryGetValue("id", out value)) ids.Add(Str(value));
+                        object muted, ended;
+                        if (row != null && (!row.TryGetValue("reminder_muted", out muted) || !object.Equals(muted, true)) &&
+                            (!row.TryGetValue("schedule_ended", out ended) || !object.Equals(ended, true)) &&
+                            row.TryGetValue("id", out value)) ids.Add(Str(value));
                     }
                     return ids;
+                    }
                 }
             }
             catch (Exception e) { Log("watching check failed: " + e.Message); return null; }
+        }
+
+        Dictionary<string, object> ReadReminderSettings()
+        {
+            try
+            {
+                string file = Path.Combine(_root, "data", "settings.json");
+                using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(reader.ReadToEnd());
+            }
+            catch { return null; }
+        }
+
+        static bool ReminderQuiet(Dictionary<string, object> settings, long at)
+        {
+            object startText, endText;
+            TimeSpan start, end;
+            if (settings == null || !settings.TryGetValue("quiet_start", out startText) || !settings.TryGetValue("quiet_end", out endText) ||
+                !TimeSpan.TryParseExact(Str(startText), @"hh\:mm", CultureInfo.InvariantCulture, out start) ||
+                !TimeSpan.TryParseExact(Str(endText), @"hh\:mm", CultureInfo.InvariantCulture, out end) || start == end) return false;
+            TimeSpan time = new DateTime(1970, 1, 1).AddSeconds(at).AddHours(8).TimeOfDay;
+            return start < end ? time >= start && time < end : time >= start || time < end;
+        }
+
+        bool CheckSnoozes(long now)
+        {
+            foreach (var entry in new List<KeyValuePair<string, ReminderSnooze>>(_snoozed))
+            {
+                if (entry.Value.At > now) continue;
+                var active = ReadActiveWatchIds();
+                if (active == null) return false;
+                _snoozed.Remove(entry.Key);
+                SaveState();
+                var settings = ReadReminderSettings();
+                if (!active.Contains(entry.Key) || now - entry.Value.At > 90 ||
+                    ReminderQuiet(settings, now) || ReminderQuiet(settings, entry.Value.At)) continue;
+                string message = entry.Value.Name + " 已经开播了。";
+                SayWithChoices(new Line(message, 1),
+                    new Choice("记一话", delegate { BumpShow(entry.Key, entry.Value.Name, 1); }),
+                    new Choice("知道了", delegate { }));
+                Notify("TIARA · " + entry.Value.Name, message);
+                Hop();
+                return true;
+            }
+            return false;
         }
 
         /// <summary>到点提醒：开播后 90 秒内说一次；刚启动的两分钟里放宽到 6 小时（关机期间错过的也能补上）</summary>
@@ -3698,6 +3771,7 @@ namespace UkagakaBangumi
             string date = V("date", "");
             int count = I("count");
             long now = UnixNow();
+            if (CheckSnoozes(now)) return;
             long grace = (DateTime.Now - _born).TotalSeconds < 120 ? 6 * 3600 : 90;
             HashSet<string> active = null;
             for (int i = 1; i <= count; i++)
@@ -3705,13 +3779,15 @@ namespace UkagakaBangumi
                 long at;
                 if (!long.TryParse(V("show" + i + "_unix", ""), out at) || at <= 0) continue;
                 if (now < at || now > at + grace) continue;
-                string key = date + "|" + V("show" + i + "_name", "");
-                if (_reminded.Contains(key)) continue;
                 string sid = V("show" + i + "_id", "");
+                string key = date + "|" + sid + "|" + at;
+                if (_reminded.Contains(key) || _reminded.Contains(date + "|" + V("show" + i + "_name", ""))) continue;
                 // The library write can precede snapshot regeneration. Confirm before notifying.
                 if (active == null) active = ReadActiveWatchIds();
                 if (active == null) return;
                 if (string.IsNullOrEmpty(sid) || !active.Contains(sid)) continue;
+                var settings = ReadReminderSettings();
+                if (ReminderQuiet(settings, now) || ReminderQuiet(settings, at)) continue;
                 _reminded.Add(key);
                 SaveState();
                 var ctx = new Dictionary<string, string>();
@@ -3727,6 +3803,11 @@ namespace UkagakaBangumi
                 Line l = PickFrom("remind", ctx, 3, fb);
                 SayWithChoices(l,
                     new Choice("记一话", delegate { BumpShow(sid, sname, 1); }),
+                    new Choice("15 分钟后提醒", delegate
+                    {
+                        _snoozed[sid] = new ReminderSnooze { Name = sname, At = UnixNow() + 15 * 60 };
+                        SaveState();
+                    }),
                     new Choice("在看", delegate { Say(new Line("好，那我不催了。", 1), true); }));
                 Notify("TIARA · " + ctx["name_cn"], fb);
                 Hop();
@@ -3843,27 +3924,8 @@ namespace UkagakaBangumi
 
         void SyncBangumi(bool confirmed)
         {
-            if (_selfTest) { Log("selftest: SyncBangumi dry-run（只读，不跑 node）"); return; }
-            Say(PickFrom("syncWait", null, 2, "我去 Bangumi 问一下最新的放送表。"));
-            // node 同步 15-30 s，放后台线程跑；否则这段时间桌宠完全不响应
-            RunNodeAsync("tools/sync_bangumi.mjs", 30000, "sync", delegate (bool ok)
-            {
-                if (ok) RefreshData(false);
-                Say(PickFrom(ok ? "syncOk" : "syncFail", null, ok ? 1 : 2,
-                    ok ? "同步回来了，番组表是最新的。" : "同步没成功，还是用本地这份。"));
-                Post(ok ? "OnSyncDone" : "OnSyncFail", ok ? "manual" : "manual");
-                if (!ok)
-                {
-                    // 失败时先想歪一次（以为是没网络），再给两条路
-                    SayWithChoices(PickFrom("misreadGuess", null, 2, "……是不是你那个 token 又删了。"),
-                        new Choice(M("choice_retry", "再试一次"), delegate { HideChoices(); SyncBangumi(true); }),
-                        new Choice(M("choice_later", "算了"), delegate
-                        {
-                            HideChoices();
-                            Say(PickFrom("soft", null, 1, "……那就不勉强。"), true);
-                        }));
-                }
-            });
+            if (_selfTest) { Log("selftest: SyncBangumi dry-run"); return; }
+            OpenWebPanel("?sync=1");
         }
 
         /// <summary>开机顺手同步一次：缓存超过 12 小时才真的去问网络，失败就不吭声</summary>
@@ -4165,9 +4227,14 @@ namespace UkagakaBangumi
 
         void OpenWebPanel()
         {
+            OpenWebPanel("");
+        }
+
+        void OpenWebPanel(string query)
+        {
             UsePanel(delegate (int port)
             {
-                string url = "http://127.0.0.1:" + port + "/";
+                string url = "http://127.0.0.1:" + port + "/" + query;
                 try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
                 catch (Exception ex) { Log("open panel failed " + ex.Message); Say(new Line("浏览器没能打开。地址是 " + url, 2), true); }
             }, true);

@@ -17,7 +17,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildToday, timeline, summarize, cstParts, reminders, timeOfDay, actualSchedule } from '../lib/today.mjs';
+import { createHash } from 'node:crypto';
+import { buildToday, timeline, summarize, cstParts, reminders, timeOfDay, actualSchedule, scheduledWeek } from '../lib/today.mjs';
+import { remainingEpisodes } from '../lib/watch-start.mjs';
 import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -53,7 +55,8 @@ async function readSettings() {
 }
 
 async function main() {
-  const lib = actualSchedule(JSON.parse(await fs.readFile(path.join(ROOT, 'data', 'library.json'), 'utf8')));
+  const raw = await fs.readFile(path.join(ROOT, 'data', 'library.json'));
+  const lib = actualSchedule(JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, '')));
   const settings = await readSettings();
 
   const now = dateArg ? dateFromArg(dateArg) : new Date();
@@ -79,6 +82,7 @@ async function main() {
 
   L.push('# 番组管家 · 今日数据（由 tools/build_today.mjs 生成，勿手改）');
   put('generated_at', now.toISOString());
+  put('library_sha256', createHash('sha256').update(raw).digest('hex'));
   put('date', t.date);
   put('weekday', t.weekday);
   put('weekday_cn', t.weekday_cn);
@@ -132,11 +136,11 @@ async function main() {
   t.catchup.forEach((s, i) => {
     put(`catchup${i + 1}_id`, s.id);
     put(`catchup${i + 1}_name`, s.name_cn || s.name);
-    put(`catchup${i + 1}_eps`, s.eps - s.ep_status);
+    put(`catchup${i + 1}_eps`, remainingEpisodes(s, s.eps));
   });
 
   // 整周排片（今天的之外，桌宠「接下来」用；面板另有实时视图）
-  const week = lib.weekday ?? {};
+  const week = Object.fromEntries(scheduledWeek(lib, now).map(day => [day.weekday, day.rows]));
   const { displayClock } = await import('../lib/today.mjs');
   const mineIds = new Set((lib.watching || []).map((w) => String(w.id)));
   for (let d = 1; d <= 7; d++) {

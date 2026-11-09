@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 // faces.json 的校验：正常包要过，缺图/尺寸不符/区域越界/别名悬空都要被抓到。
 // 用临时目录造 PNG 头（只写 IHDR 需要的字节），不依赖任何图像库。
 import { test } from 'node:test';
@@ -129,7 +128,7 @@ test('没有 regions 只 warn 不 error', () => {
   assert.ok(res.warns.some((w) => w.includes('26%')), res.warns.join('; '));
 });
 
-test('仓库里真实的 faces.json 通过', { skip: !existsSync('shell/master/surface0.png') && '源码版需自行添加立绘' }, () => {
+test('仓库里真实的 faces.json 通过', () => {
   const res = checkFaces();
   assert.equal(res.ok, true, res.errors.join('; '));
   assert.ok(res.faces >= 6);

@@ -65,9 +65,10 @@ async function makeFixture() {
   return root;
 }
 
-async function startServer(root) {
+async function startServer(root, extraEnv = {}) {
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mjs'), '--port', '0', '--root', root], {
     cwd: ROOT,
+    env: { ...process.env, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -87,6 +88,53 @@ async function startServer(root) {
   if (!port) throw new Error(`20 秒内没等到 ${portFile}：${stderr}`);
   return { child, port, getStderr: () => stderr };
 }
+
+test('Bangumi 连接结果分别报告，确认只写预览中的变更', async t => {
+  const root = await makeFixture();
+  let accepted = false, id = 777002, collectionRequests = 0;
+  const upstream = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const send = value => res.end(JSON.stringify(value));
+    if (req.url === '/calendar') return send([{ weekday: { id: 1 }, items: [] }]);
+    if (!accepted) { res.statusCode = 401; return send({ message: 'do-not-echo-token' }); }
+    if (req.url === '/v0/me') return send({ username: 'tester', nickname: '测试账号', email: 'private' });
+    collectionRequests++;
+    return send({ data: [{ subject_id: id, ep_status: 4, subject: { id, name_cn: '测试番', eps: 12 } }] });
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const srv = await startServer(root, { BGM_BASE: 'http://127.0.0.1:' + upstream.address().port, BGM_USER: '', BGM_TOKEN: '', BGM_PROXY: '' });
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  await post('/api/token', { token: 'test-token', user: 'tester' });
+  const connection = await post('/api/token/test', {});
+  assert.equal(connection.json.sources.collections.code, 'token_invalid');
+  assert.equal(connection.json.sources.calendar.status, 'ok');
+  assert.ok(!connection.text.includes('do-not-echo-token'));
+  accepted = true;
+  const wrong = await post('/api/token/test', { user: 'wrong' });
+  assert.equal(wrong.json.sources.collections.code, 'account_mismatch');
+  assert.equal(wrong.json.identity.user, 'tester');
+  assert.ok(!wrong.text.includes('private'));
+  const preview = await post('/api/sync', { dry_run: true, mode: 'progress' });
+  assert.ok(preview.json.changes.some(c => c.id === 777002));
+  id = 777003;
+  const calls = collectionRequests;
+  const applied = await post('/api/sync', { preview_id: preview.json.preview_id });
+  assert.equal(applied.status, 200);
+  assert.deepEqual(applied.json.changes, preview.json.changes);
+  assert.equal(collectionRequests, calls);
+  assert.equal((await readLib(root)).watching.find(w => w.id === 777002).ep_status, 4);
+  const stale = await post('/api/sync', { dry_run: true });
+  await post('/api/progress', { id: '554779', delta: 1 });
+  assert.equal((await post('/api/sync', { preview_id: stale.json.preview_id })).status, 409);
+  assert.ok(!(await readLib(root)).watching.some(w => w.id === 777003));
+  const save = await post('/api/token', { proxy: 'http://fake-user:fake-secret@127.0.0.1:9999', token: '' });
+  assert.equal(save.json.proxy, '127.0.0.1:9999');
+  assert.equal(save.json.has_token, false);
+  assert.ok(!save.text.includes('fake-secret'));
+});
 
 async function req(port, pathname, { method = 'GET', body, headers = {} } = {}) {
   const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(10000) };
@@ -112,6 +160,97 @@ async function installBuildTools(root) {
   }
   await fs.copyFile(path.join(ROOT, 'data/talks.json'), path.join(root, 'data/talks.json'));
 }
+
+test('本季能显示分钟级平台时刻，详情保存后周表与桌宠共用本地排期', async t => {
+  const root = await makeFixture();
+  await installBuildTools(root);
+  const q = seasonOf(new Date());
+  const id = '777005';
+  const start = new Date(Date.now() + 86400000);
+  await fs.writeFile(path.join(root, `data/season/${q}.json`), JSON.stringify({
+    q, items: [{ id, name_cn: '本季测试番', eps: 12, weekday: null }],
+    fetched_at: new Date().toISOString(),
+  }));
+  await fs.mkdir(path.join(root, 'cache/bgm'), { recursive: true });
+  await fs.writeFile(path.join(root, 'cache/bgm/broadcast.json'), JSON.stringify({
+    at: Date.now(), siteMeta: { demo: { title: '测试平台', regions: ['CN'] } },
+    items: [{ title: '本季测试番', broadcast: 'R/' + start.toISOString() + '/P7D',
+      sites: [{ site: 'bangumi', id }, { site: 'demo', broadcast: 'R/2090-01-01T15:12:00Z/P7D' }] }],
+  }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const airing = async () => (await req(srv.port, '/api/season/airing?q=' + q)).json.airings[id];
+  assert.equal((await airing()).time_cst, '23:12');
+  assert.equal((await airing()).platform, '测试平台');
+  await post('/api/season/apply', { q, add: [id] });
+  assert.equal((await post('/api/season/time', { id, time: '23:10' })).status, 400);
+  assert.equal((await req(srv.port, '/api/watch/detail?id=' + id)).json.airing.time_cst, '23:12');
+  const saved = await post('/api/season/time', { id, weekday: 1, time: '25:30' });
+  assert.equal(saved.json.rebuilt, true);
+  assert.equal((await airing()).source, '本地排期');
+  assert.equal(cstParts(new Date((await airing()).next)).hour, 1);
+  const snapshot = JSON.parse(await fs.readFile(path.join(root, 'data/today.json'), 'utf8'));
+  assert.equal(snapshot.all_shows.find(w => String(w.id) === id).time_cst, '01:30');
+  assert.match(await fs.readFile(path.join(root, 'ghost/master/today.txt'), 'utf8'), /library_sha256=[0-9a-f]{64}/);
+});
+
+test('最新一话起点、撤销统计和单番备份恢复', async t => {
+  const root = await makeFixture();
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const added = await post('/api/watch/detail', { name: '最新一话测试', eps: 12, ep_status: 0, start_mode: 'latest', latest_episode: 8 });
+  const { id } = added.json.detail;
+  assert.equal(added.json.detail.ep_status, 0);
+  assert.equal(added.json.detail.start_episode, 8);
+  const first = await post('/api/progress', { id, delta: 1 });
+  assert.equal(first.json.ep_status, 8);
+  assert.equal((await req(srv.port, '/api/stats')).json.total, 1);
+  assert.equal((await post('/api/undo', { expected_revision: first.json.revision })).status, 200);
+  const stats = (await req(srv.port, '/api/stats')).json;
+  assert.deepEqual([stats.total, stats.week, stats.streak], [0, 0, 0]);
+  assert.equal((await req(srv.port, '/api/history')).json.gained, 0);
+  const preview = (await post('/api/restore', { name: 'library.json.bak', dry_run: true })).json;
+  assert.equal(preview.changes.find(change => change.id === id).to.ep_status, 8);
+  const restore = { name: 'library.json.bak', id, expected_revision: preview.revision, backup_revision: preview.backup_revision };
+  assert.equal((await post('/api/restore', restore)).status, 200);
+  assert.equal((await req(srv.port, '/api/watch/detail?id=' + id)).json.detail.ep_status, 8);
+  assert.equal((await req(srv.port, '/api/stats')).json.total, 0);
+  assert.equal((await post('/api/restore', restore)).status, 409);
+  assert.equal((await readLib(root)).watching.find(w => w.id === '554779').ep_status, 0);
+});
+
+test('调档只移动一档、结束排片仍可补番、静音只取消提醒', async t => {
+  const root = await makeFixture();
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const id = '554779';
+  const tomorrow = new Date(Date.now() + 86400000);
+  const saved = await post('/api/season/time', { id, weekday: cstParts(tomorrow).weekday, time: '23:30' });
+  assert.equal(saved.status, 200);
+  const state = async () => (await req(srv.port, '/api/state')).json;
+  const slots = async () => Object.values((await state()).week).flat().filter(row => String(row.id) === id);
+  const schedule = (action, more) => post('/api/watch/schedule', { id, action, ...more });
+  assert.equal((await schedule('skip')).status, 200);
+  assert.deepEqual(await slots(), []);
+  const todayAt = cstParts(new Date(Date.now() + 3600000)).date + 'T23:45';
+  const moved = await schedule('move', { at: todayAt });
+  assert.equal(moved.status, 200);
+  assert.equal((await slots())[0].time_cst, '23:45');
+  assert.equal((await schedule('mute', { muted: true })).json.detail.reminder_muted, true);
+  const calendar = (await req(srv.port, '/api/export')).text;
+  assert.match(calendar, /T234500/);
+  assert.ok(!calendar.includes('VALARM'));
+  assert.equal((await schedule('end')).status, 200);
+  assert.deepEqual(await slots(), []);
+  assert.ok((await state()).catchup.some(row => String(row.id) === id));
+  assert.equal((await post('/api/progress', { id, delta: 1 })).json.ep_status, 1);
+  assert.equal((await schedule('restart')).status, 200);
+  assert.equal((await slots())[0].time_cst, '23:45');
+  assert.equal((await post('/api/settings', { quiet_start: '23:00', quiet_end: '07:00' })).status, 200);
+});
 
 test('离线新增和详情编辑共用备份与撤销，跨日排期按实际日期生成', async t => {
   const root = await makeFixture();
@@ -188,6 +327,7 @@ test('暂停、继续、归档保留排期和进度，并同步到提醒与导�
   assert.equal(await exported(), false);
   assert.equal((await post('/api/progress', { id, delta: 1 })).status, 404);
   assert.equal((await post('/api/watch', { id, action: 'add' })).status, 409);
+  assert.equal((await post('/api/season/time-batch', { ids: [id], time: '22:10', weekday: 3 })).json.count, 0);
 
   assert.equal((await move('resume', (await read()).revision)).json.state, 'watching');
   assert.deepEqual(await read(), added.json.detail);

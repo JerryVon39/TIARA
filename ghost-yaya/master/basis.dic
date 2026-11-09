@@ -62,6 +62,7 @@ OnSecondChange {
     _now = _t[4] * 60 + _t[5]
     if GETTYPE(yayaDone) == 0 { yayaDone = "" }   // 首次运行时它还不存在
     foreach _list ; _s {
+        if !_s["mine"] || _s["reminder_muted"] { continue }
         if _s["weekday"] != _wd { continue }
         _d = _now - _s["min"]
         if _d < 0 || _d > 4 { continue }   // 只认刚过去的 5 分钟

@@ -20,7 +20,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchCalendar, fetchCollections, mergeLibrary } from '../lib/bgm.mjs';
+import { mergeLibrary } from '../lib/bgm.mjs';
+import { effectiveBgmConfig, fetchSyncData } from '../lib/bgm-sync.mjs';
 import { readLibrary, writeLibrary } from '../lib/library.mjs';
 import { withLibraryLock } from '../lib/library-lock.mjs';
 import { writeJsonAtomic } from '../lib/atomic.mjs';
@@ -51,12 +52,7 @@ function loadConfig() {
   let cfg = {};
   const p = path.join(ROOT, 'data', 'bgm.json');
   if (exists(p)) { try { cfg = readJson(p); } catch (e) { say('⚠ data/bgm.json 解析失败：' + e.message); } }
-  return {
-    user: process.env.BGM_USER || opt('user') || cfg.user || '',
-    token: process.env.BGM_TOKEN || opt('token') || cfg.token || '',
-    proxy: process.env.BGM_PROXY || opt('proxy') || cfg.proxy || '',
-    base: process.env.BGM_BASE || opt('base') || cfg.base || 'https://api.bgm.tv'
-  };
+  return effectiveBgmConfig(cfg, { user: opt('user'), token: opt('token'), proxy: opt('proxy'), base: opt('base') });
 }
 
 function saveRaw(name, data) {
@@ -75,41 +71,26 @@ function fmtChange(c) {
 
 async function main() {
   const cfg = loadConfig();
-  const data = { calendar: null, collections: null };
+  let data;
+  let partial = false;
   const notes = [];
-
-  // ---- 放送表 ----
   if (FIXTURE) {
-    const f = path.join(ROOT, FIXTURE, 'calendar.json');
-    if (!exists(f)) throw new Error('fixture 缺日历：' + f);
-    data.calendar = readJson(f);
-    notes.push('日历：fixture ' + path.relative(ROOT, f));
-  } else {
-    try {
-      data.calendar = await fetchCalendar({ proxy: cfg.proxy, base: cfg.base });
-      saveRaw('calendar', data.calendar);
-      const days = data.calendar.map((d) => `${d.weekday?.cn || d.weekday?.id}:${(d.items || []).length}`).join(' ');
-      notes.push('日历：在线成功（' + days + '）');
-    } catch (e) {
-      notes.push('日历：拉取失败（' + e.message + '），跳过');
+    const calendar = path.join(ROOT, FIXTURE, 'calendar.json');
+    const collections = path.join(ROOT, FIXTURE, 'collections.json');
+    data = { calendar: readJson(calendar) };
+    if (!CAL_ONLY && exists(collections)) {
+      const content = readJson(collections);
+      data.collections = content.data || content;
     }
-  }
-
-  // ---- 在看收藏 ----
-  if (!CAL_ONLY) {
-    if (FIXTURE) {
-      const f = path.join(ROOT, FIXTURE, 'collections.json');
-      if (exists(f)) { data.collections = readJson(f).data || readJson(f); notes.push('收藏：fixture'); }
-    } else if (!cfg.token) {
-      notes.push('收藏：没有 token，跳过（只更新放送表；配置 data/bgm.json 可同步「在看」）');
-    } else {
-      try {
-        data.collections = await fetchCollections(cfg.user, cfg.token, { proxy: cfg.proxy, base: cfg.base });
-        saveRaw('collections', data.collections);
-        notes.push('收藏：在线成功，' + data.collections.length + ' 部在看');
-      } catch (e) {
-        notes.push('收藏：拉取失败（' + e.message + '），跳过');
-      }
+    notes.push('数据来源：本地样本');
+  } else {
+    const result = await fetchSyncData(cfg, { mode: CAL_ONLY ? 'calendar' : 'collections' });
+    data = result.data;
+    partial = result.partial;
+    for (const [key, source] of Object.entries(result.sources)) {
+      const label = key === 'calendar' ? '日历' : '收藏';
+      notes.push(label + '：' + (source.status === 'ok' ? '已读取 ' + source.count : source.error || '已跳过'));
+      if (!DRY && data[key]) saveRaw(key, data[key]);
     }
   }
 
@@ -128,7 +109,7 @@ async function main() {
     return result;
   });
   // 只有真实、非预览的成功同步才更新开机同步的时间戳。
-  if (!DRY && !FIXTURE && data.calendar) {
+  if (!DRY && !FIXTURE && !partial && data.calendar) {
     await writeJsonAtomic(path.join(ROOT, 'cache/bgm/sync-success.json'), { at: new Date().toISOString() });
   }
 
@@ -154,7 +135,7 @@ async function main() {
   }
 
   if (AS_JSON) {
-    console.log(JSON.stringify({ ok: true, dryRun: DRY, changes: changes.length, detail: changes, notes }, null, 2));
+    console.log(JSON.stringify({ ok: true, partial, dryRun: DRY, changes: changes.length, detail: changes, notes }, null, 2));
   }
 }
 
