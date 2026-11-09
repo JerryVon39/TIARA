@@ -1,0 +1,783 @@
+{
+  "version": 3,
+  "note": "TIARA（馬剃天愛星 / 副会長）的台词池。Web 预览器与 SSP 人格共用同一份，改这里就同时生效。{nickname} 由 data/library.json 的 user.nickname_for_pet 决定（默认「会長」，面板「账号与称呼」可改）；「不届き者」这类固定说法不跟称呼走。可用占位符：{nickname} {count} {behind_count} {nade_today} {nade_total} {affinity} {name_cn} {time_cst} {summary} {quote}。face 取值：normal/happy/sad/surprise/sleepy/think",
+  "boot": [
+    {
+      "text": "学生会，开始办公。……{nickname}，今天的案件我确认过了。",
+      "face": "normal"
+    },
+    {
+      "text": "副会长，到任。……我回来了，{nickname}。",
+      "face": "happy"
+    },
+    {
+      "text": "……{nickname}。昨晚几点睡的，记录上可写着呢。",
+      "face": "sleepy"
+    }
+  ],
+  "firstBoot": [
+    {
+      "text": "初次见面。学生会副会长，馬剃天愛星。……以后，请多指教。",
+      "face": "happy"
+    },
+    {
+      "text": "记录簿我收下了。以后 {nickname} 的观看进度，由我来登记。……有意见吗？",
+      "face": "normal"
+    }
+  ],
+  "close": [
+    {
+      "text": "下班。……案件，别攒着。",
+      "face": "normal"
+    },
+    {
+      "text": "明天见。……好好睡觉。",
+      "face": "sleepy"
+    }
+  ],
+  "random": [
+    {
+      "text": "记录核对完了。……你也，早点休息。",
+      "face": "normal"
+    },
+    {
+      "text": "今天 {count} 件。……我陪你一起看。",
+      "face": "normal"
+    },
+    {
+      "text": "……今天的 {nickname}，有点可靠。",
+      "face": "happy"
+    },
+    {
+      "text": "……咳。没什么。只是觉得，这样也不错。",
+      "face": "normal"
+    },
+    {
+      "text": "这份记录，边角折了。……不过，我替你抚平了。",
+      "face": "normal"
+    },
+    {
+      "text": "……累了就靠一会儿。学生会室，现在只有我们。",
+      "face": "normal"
+    },
+    {
+      "text": "……两个人的伞，那种事。……也不是不能想。",
+      "face": "surprise"
+    },
+    {
+      "text": "……！刚、刚才那是业务之外的话。忘掉。",
+      "face": "surprise"
+    },
+    {
+      "text": "今天的效率，我认可。……手，要握一下吗。",
+      "face": "happy"
+    },
+    {
+      "text": "记录要准确。……但你的事，我记得更清楚。",
+      "face": "happy"
+    },
+    {
+      "text": "……纸巾。……不、不是因为那个。",
+      "face": "surprise"
+    },
+    {
+      "text": "这份资料相当不错。……跟你一样。",
+      "face": "happy"
+    }
+  ],
+  "click": [
+    {
+      "text": "……嗯？",
+      "face": "normal"
+    },
+    {
+      "text": "在。……怎么了。",
+      "face": "normal"
+    },
+    {
+      "text": "……叫我做什么。",
+      "face": "normal"
+    },
+    {
+      "text": "手边的事先放下也行。……我等你。",
+      "face": "normal"
+    }
+  ],
+  "headpat": [
+    {
+      "text": "……唔。手，别停。",
+      "face": "happy"
+    },
+    {
+      "text": "……这样，会让我分心的。",
+      "face": "surprise"
+    },
+    {
+      "text": "……再一下。就一下。",
+      "face": "happy"
+    }
+  ],
+  "doubleclick": [
+    {
+      "text": "……！突然抱过来……不行，太狡猾了。",
+      "face": "surprise"
+    },
+    {
+      "text": "……就、就一小会儿。别人看不见吧。",
+      "face": "surprise"
+    },
+    {
+      "text": "……{nickname} 的味道。……咳，没什么。",
+      "face": "happy"
+    }
+  ],
+  "nade": [
+    {
+      "text": "……手放在头上是什么意思。……解释一下。",
+      "face": "normal"
+    },
+    {
+      "text": "……真是的。{nickname}，今天是第 {nade_today} 次了。",
+      "face": "normal"
+    },
+    {
+      "text": "……随你便。反正，我也不会躲。",
+      "face": "happy"
+    },
+    {
+      "text": "……那个。也不是……讨厌。",
+      "face": "happy"
+    },
+    {
+      "text": "……今天，就特别允许你。{nade_total} 次了，记住。",
+      "face": "happy"
+    }
+  ],
+  "todayEmpty": [
+    {
+      "text": "今天没有要追的番。……那，就这样待着也行。",
+      "face": "happy"
+    },
+    {
+      "text": "今天空着。……难得，要不要说会儿话。",
+      "face": "happy"
+    }
+  ],
+  "todayHas": [
+    {
+      "text": "今天 {count} 件。……我陪你一起看。",
+      "face": "happy"
+    },
+    {
+      "text": "案件 {count} 件。……从哪件开始，你定。",
+      "face": "normal"
+    },
+    {
+      "text": "今天 {count} 件。……顺序我跟着你。",
+      "face": "happy"
+    }
+  ],
+  "todayBehind": [
+    {
+      "text": "积压 {behind_count} 部。……不急，我等你。",
+      "face": "normal"
+    },
+    {
+      "text": "有 {behind_count} 部结转了。……别硬撑，一起处理。",
+      "face": "happy"
+    }
+  ],
+  "todayNext": [
+    {
+      "text": "接下来是 {name_cn}，{time_cst}。别迟到。",
+      "face": "normal"
+    },
+    {
+      "text": "{time_cst}，{name_cn}。……要认真看。",
+      "face": "think"
+    }
+  ],
+  "lateNight": [
+    {
+      "text": "都这个点了。……去睡吧，明天我等你。",
+      "face": "normal"
+    },
+    {
+      "text": "熬夜要记一笔。……然后，晚安。",
+      "face": "happy"
+    }
+  ],
+  "remind": [
+    {
+      "text": "{name_cn}，{time_cst} 到了。……一起看？",
+      "face": "normal"
+    },
+    {
+      "text": "到点了。{name_cn}。……我陪着你。",
+      "face": "happy"
+    },
+    {
+      "text": "{nickname}，{name_cn} 开始了。……别一个人看。",
+      "face": "happy"
+    }
+  ],
+  "midnight": [
+    {
+      "text": "日期变了。记录我来更新。",
+      "face": "normal"
+    },
+    {
+      "text": "……文件又结转了吧？",
+      "face": "sad"
+    },
+    {
+      "text": "深夜加班不值得称赞。晚安。",
+      "face": "sleepy"
+    }
+  ],
+  "refresh": [
+    {
+      "text": "资料更新了。请核对。",
+      "face": "normal"
+    },
+    {
+      "text": "重算完毕。……没有偏差。",
+      "face": "think"
+    }
+  ],
+  "refreshFail": [
+    {
+      "text": "重算失败。……我去查原因。",
+      "face": "sad"
+    },
+    {
+      "text": "……数字对不上。再试一次。",
+      "face": "sad"
+    }
+  ],
+  "syncWait": [
+    {
+      "text": "……正在查询，请稍等。",
+      "face": "think"
+    },
+    {
+      "text": "正在向外部问询。",
+      "face": "think"
+    }
+  ],
+  "syncOk": [
+    {
+      "text": "资料取回来了。……我来核对。",
+      "face": "normal"
+    },
+    {
+      "text": "同步完成。新的案件，登记了。",
+      "face": "happy"
+    }
+  ],
+  "syncFail": [
+    {
+      "text": "……没有回应。请检查网络。",
+      "face": "sad"
+    },
+    {
+      "text": "查询失败。……设置能不能看一上。",
+      "face": "sad"
+    }
+  ],
+  "selfIntro": [
+    {
+      "text": "馬剃天愛星。学生会副会长。……{nickname} 的观看记录，我保管着。",
+      "face": "normal"
+    },
+    {
+      "text": "副会长为什么管番组表？……因为是工作。",
+      "face": "normal"
+    }
+  ],
+  "wheel": [
+    {
+      "text": "……放大是要干什么。",
+      "face": "surprise"
+    },
+    {
+      "text": "看着舒服就好。……随你。",
+      "face": "normal"
+    }
+  ],
+  "morning": [
+    {
+      "text": "早上好。……昨晚睡得好吗。",
+      "face": "happy"
+    },
+    {
+      "text": "早上了。先喝水。……我看着你喝完。",
+      "face": "happy"
+    }
+  ],
+  "noon": [
+    {
+      "text": "中午了。……吃过饭再说案子，我等你。",
+      "face": "happy"
+    },
+    {
+      "text": "午休时间。……趴一会儿也行，我看着。",
+      "face": "happy"
+    }
+  ],
+  "evening": [
+    {
+      "text": "傍晚了。今天也辛苦了。",
+      "face": "happy"
+    },
+    {
+      "text": "放学时间。……确认完案件，一起回去？",
+      "face": "happy"
+    }
+  ],
+  "catchup": [
+    {
+      "text": "未处理 {behind_count} 部。……移开视线也不会消失。",
+      "face": "sad"
+    },
+    {
+      "text": "有结转的量。请有计划地清。",
+      "face": "normal"
+    }
+  ],
+  "poke": [
+    {
+      "text": "……太近了。……但是，也没让你走。",
+      "face": "surprise"
+    },
+    {
+      "text": "……别、别一直盯着看。",
+      "face": "surprise"
+    },
+    {
+      "text": "……那个，我脸上有什么吗。",
+      "face": "normal"
+    },
+    {
+      "text": "……唔。这样，我会当真的。",
+      "face": "surprise"
+    }
+  ],
+  "hourly": [
+    {
+      "text": "……整点了。进度如何。",
+      "face": "normal"
+    },
+    {
+      "text": "正好告一段落。休息一下。",
+      "face": "happy"
+    }
+  ],
+  "birthday": [
+    {
+      "text": "……生日，是吗。记录里没写。恭喜，你。",
+      "face": "happy"
+    },
+    {
+      "text": "……生日这种事，我记下了。明年不会忘。",
+      "face": "normal"
+    },
+    {
+      "text": "生日快乐。……礼物以后再补，先记着。",
+      "face": "happy"
+    }
+  ],
+  "menuOpen": [
+    {
+      "text": "案件簿。……{count} 件，我陪你一件件看。",
+      "face": "happy"
+    },
+    {
+      "text": "未处理 {pending} 件。……不急，我记着。",
+      "face": "normal"
+    }
+  ],
+  "bump": [
+    {
+      "text": "{name_cn}，记到 {seen}/{total}。……继续。",
+      "face": "normal"
+    },
+    {
+      "text": "了解。{name_cn}，一件处理完了。",
+      "face": "happy"
+    }
+  ],
+  "bumpRapid": [
+    {
+      "text": "……{bump_recent} 件一口气？手速倒是很快。",
+      "face": "surprise"
+    },
+    {
+      "text": "这么快。……我记都记不过来。",
+      "face": "surprise"
+    }
+  ],
+  "catchupFull": [
+    {
+      "text": "{name_cn}，看完了。……记录我改了。",
+      "face": "happy"
+    },
+    {
+      "text": "全部处理完毕。……做得不错。",
+      "face": "happy"
+    }
+  ],
+  "idleLong": [
+    {
+      "text": "……还在吗。……我等你。",
+      "face": "happy"
+    },
+    {
+      "text": "有一阵子没动静了。……要我先回去？",
+      "face": "sad"
+    }
+  ],
+  "openPanel": [
+    {
+      "text": "番组表，打开着。……看完记得关。",
+      "face": "normal"
+    },
+    {
+      "text": "资料在那儿。……要看的话，我陪你。",
+      "face": "happy"
+    }
+  ],
+  "nosebleed": [
+    {
+      "text": "……！鼻、鼻血が。……纸巾，快。",
+      "face": "surprise"
+    },
+    {
+      "text": "不、不是的。这只是……气候干燥。",
+      "face": "surprise"
+    },
+    {
+      "text": "……谁让你一直摸的。",
+      "face": "sad"
+    }
+  ],
+  "flusterHigh": [
+    {
+      "text": "……别、别一直点。我记不住。",
+      "face": "surprise"
+    },
+    {
+      "text": "手、手拿开。……不然我要按章程处理了。",
+      "face": "sad"
+    }
+  ],
+  "imaginationHigh": [
+    {
+      "text": "……咳。刚才那个画面，是业务需要才想的。",
+      "face": "surprise"
+    },
+    {
+      "text": "……我、我在想别的事。工作的事。",
+      "face": "surprise"
+    }
+  ],
+  "rules": [
+    {
+      "when": {
+        "hour_min": 0,
+        "hour_max": 4
+      },
+      "text": "……这个时间。明天的办公会受影响。",
+      "face": "sleepy"
+    },
+    {
+      "when": {
+        "hour_min": 22,
+        "hour_max": 23
+      },
+      "text": "快换日了。今天的份呢。",
+      "face": "sad"
+    },
+    {
+      "when": {
+        "hour_min": 7,
+        "hour_max": 9
+      },
+      "text": "早上好。……脸洗了吗。",
+      "face": "normal"
+    },
+    {
+      "when": {
+        "weekday": [
+          1
+        ]
+      },
+      "text": "星期一。……把这周的安排定下来。",
+      "face": "normal"
+    },
+    {
+      "when": {
+        "behind_min": 3
+      },
+      "text": "积压 {behind_count} 部。……这是要指导的案子。",
+      "face": "sad"
+    },
+    {
+      "when": {
+        "nade_min": 10
+      },
+      "text": "……{nickname}。摸得太多了。",
+      "face": "surprise"
+    },
+    {
+      "when": {
+        "imagination_min": 60
+      },
+      "text": "……咳。脸有点热。是暖气的关系。",
+      "face": "surprise"
+    },
+    {
+      "when": {
+        "fluster_min": 40
+      },
+      "text": "……别、别看着我。记录会写歪的。",
+      "face": "surprise"
+    },
+    {
+      "when": {
+        "mood": "dreamy"
+      },
+      "text": "……那个，两个人共用一个耳机的场面。也就是说……",
+      "face": "surprise"
+    },
+    {
+      "when": {
+        "mood": "flustered"
+      },
+      "text": "……冷静。我是副会长。……冷静。",
+      "face": "sad"
+    }
+  ],
+  "menu": {
+    "header": "{nickname} · 副会长室",
+    "header_count": "今日 {count} 件 · 未处理 {pending} 件",
+    "header_empty": "今日清闲 · 陪你坐会儿",
+    "cases": "案件",
+    "case_add": "登记一话",
+    "case_none": "今天没有案件 · 那就聊聊天",
+    "panel": "番组表",
+    "panel_bubble": "气泡番组表",
+    "panel_web": "网页番组表",
+    "panel_refresh": "重算",
+    "say": "说句话",
+    "nade": "摸摸头",
+    "biz": "业务",
+    "sync": "同步 Bangumi",
+    "advanced": "高级",
+    "recalc": "重算今日数据",
+    "openfolder": "打开数据文件夹",
+    "logs": "看服务日志",
+    "view": "显示",
+    "layer": "层级",
+    "size": "尺寸",
+    "theme": "主题",
+    "theme_auto": "跟随系统",
+    "theme_dark": "暗",
+    "theme_light": "亮",
+    "hide": "隐藏到托盘",
+    "quit": "退出",
+    "panel_title": "今日案件",
+    "panel_empty": "今天没有案件。……正好，歇一会儿吧。",
+    "panel_next": "接下来",
+    "panel_empty_next": "接下来三天都没有案件。……难得。",
+    "panel_quote": "今日一句",
+    "undo": "撤销上一次记账",
+    "choice_yes": "同步吧",
+    "choice_no": "等会儿",
+    "panel_pending": "欠着的",
+    "choice_retry": "再试一次",
+    "choice_later": "算了"
+  },
+  "soft": [
+    {
+      "text": "……靠这么近，我会当真的。",
+      "face": "surprise"
+    },
+    {
+      "text": "……手，牵着吧。就今天。",
+      "face": "happy"
+    },
+    {
+      "text": "……别走开。……再待一会儿。",
+      "face": "happy"
+    }
+  ],
+  "praise": [
+    {
+      "text": "……被夸了。……再、再说一次？",
+      "face": "happy"
+    },
+    {
+      "text": "……哼。这种话，说一次就够了。……不过，谢谢。",
+      "face": "happy"
+    }
+  ],
+  "worry": [
+    {
+      "text": "……你脸色不太好。先歇一会儿，案件我记着。",
+      "face": "sad"
+    },
+    {
+      "text": "……是不是太累了。今天到此为止，我批准。",
+      "face": "sad"
+    }
+  ],
+  "goodnight": [
+    {
+      "text": "晚安。……明天也，一起。",
+      "face": "happy"
+    },
+    {
+      "text": "……灯关了。晚安，{nickname}。",
+      "face": "happy"
+    }
+  ],
+  "hug": [
+    {
+      "text": "……抱这么紧，我记不了账了。",
+      "face": "surprise"
+    },
+    {
+      "text": "……唔。……这样也好。",
+      "face": "happy"
+    },
+    {
+      "text": "……再抱一下。……就一下。",
+      "face": "happy"
+    }
+  ],
+  "misreadGuess": [
+    {
+      "text": "……等等。你刚才那个眼神，是想看别的番吧。",
+      "face": "surprise"
+    },
+    {
+      "text": "……你该不会，是嫌我记错了。",
+      "face": "sad"
+    }
+  ],
+  "misreadFix": [
+    {
+      "text": "……不。是我误会了。……抱歉。",
+      "face": "sad"
+    },
+    {
+      "text": "……我刚才是自己想的。……忘掉。",
+      "face": "surprise"
+    },
+    {
+      "text": "……我、我apan 早とちり了。……别笑。",
+      "face": "surprise"
+    }
+  ],
+  "night": [
+    {
+      "text": "……这个点了。真的该睡了。",
+      "face": "sad"
+    },
+    {
+      "text": "夜里别一个人待太久。……我陪着，也不能替你睡。",
+      "face": "happy"
+    }
+  ],
+  "askSync": [
+    {
+      "text": "要现在去 Bangumi 拿最新资料吗？",
+      "face": "normal"
+    },
+    {
+      "text": "资料有点旧了。……要我去拿新的吗？",
+      "face": "normal"
+    },
+    {
+      "text": "要我跑一趟 Bangumi 吗。……一句话的事。",
+      "face": "think"
+    }
+  ],
+  "undoWait": [
+    {
+      "text": "……刚才是记错了吗。我退回一步。",
+      "face": "normal"
+    },
+    {
+      "text": "手滑了？……我退回去。",
+      "face": "normal"
+    },
+    {
+      "text": "……这一步不对。退回上一个记录。",
+      "face": "think"
+    }
+  ],
+  "undoOk": [
+    {
+      "text": "退回一步了。……下次小心点。",
+      "face": "sad"
+    },
+    {
+      "text": "……嗯，退掉了。别再点错了。",
+      "face": "sad"
+    }
+  ],
+  "undoFail": [
+    {
+      "text": "没有可以退回的了。……本来就没记错。",
+      "face": "surprise"
+    },
+    {
+      "text": "退无可退了。……记录是干净的。",
+      "face": "normal"
+    }
+  ],
+  "noServer": [
+    {
+      "text": "网页服务没开，我改不了库。",
+      "face": "sad"
+    },
+    {
+      "text": "网页服务没开。……库改不了，记录我还在看。",
+      "face": "sad"
+    },
+    {
+      "text": "服务不在。……等它起来再动手。",
+      "face": "normal"
+    }
+  ],
+  "anniversary": [
+    {
+      "text": "第 {days} 天了。……我记着呢。",
+      "face": "happy"
+    },
+    {
+      "text": "一起待了 {days} 天。……不讨厌。",
+      "face": "happy"
+    },
+    {
+      "text": "第 {days} 天。……以后也，这样吧。",
+      "face": "happy"
+    }
+  ],
+  "pending": [
+    {
+      "text": "欠着 {behind_count} 部。……不急，一件件来。",
+      "face": "normal"
+    },
+    {
+      "text": "待看 {behind_count} 部。……欠着的东西，总归要还。",
+      "face": "normal"
+    },
+    {
+      "text": "还有 {behind_count} 部没补。……我记着账。",
+      "face": "sad"
+    }
+  ]
+}

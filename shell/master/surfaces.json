@@ -1,0 +1,43 @@
+{
+  "size": {
+    "w": 384,
+    "h": 576
+  },
+  "slots": [
+    {
+      "face": "normal",
+      "idx": 0,
+      "file": "surface0.png",
+      "bytes": 160148,
+      "source": "00_default.png"
+    },
+    {
+      "face": "happy",
+      "idx": 1,
+      "file": "surface1.png",
+      "bytes": 154257,
+      "source": "01_closed_eye_smile.png"
+    },
+    {
+      "face": "sad",
+      "idx": 2,
+      "file": "surface2.png",
+      "bytes": 159578,
+      "source": "04_displeased.png"
+    },
+    {
+      "face": "surprise",
+      "idx": 3,
+      "file": "surface3.png",
+      "bytes": 156876,
+      "source": "03_surprised.png"
+    },
+    {
+      "face": "talk",
+      "idx": -1,
+      "file": "talk.png",
+      "bytes": 158187,
+      "source": "02_talking.png"
+    }
+  ]
+}

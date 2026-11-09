@@ -1,0 +1,41 @@
+[
+  {
+    "weekday": { "en": "Mon", "cn": "星期一", "ja": "月耀日", "id": 1 },
+    "items": [
+      { "id": 200001, "type": 2, "name": "Getsuyou no Sample", "name_cn": "周一示例番", "air_weekday": 1 }
+    ]
+  },
+  {
+    "weekday": { "en": "Tue", "cn": "星期二", "ja": "火耀日", "id": 2 },
+    "items": [
+      { "id": 456789, "type": 2, "name": "とある新作", "name_cn": "某部本季新番", "air_weekday": 2 },
+      { "id": 500001, "type": 2, "name": "NEW SAMPLE", "name_cn": "某部刚开播的新番", "air_weekday": 2 }
+    ]
+  },
+  {
+    "weekday": { "en": "Wed", "cn": "星期三", "ja": "水耀日", "id": 3 },
+    "items": []
+  },
+  {
+    "weekday": { "en": "Thu", "cn": "星期四", "ja": "木耀日", "id": 4 },
+    "items": [
+      { "id": 200002, "type": 2, "name": "Mokuyou no Sample", "name_cn": "周四示例番", "air_weekday": 4 }
+    ]
+  },
+  {
+    "weekday": { "en": "Fri", "cn": "星期五", "ja": "金耀日", "id": 5 },
+    "items": [
+      { "id": 400602, "type": 2, "name": "藥屋少女的呢喃 第二季", "name_cn": "药屋少女的呢喃 第二季", "air_weekday": 5 }
+    ]
+  },
+  {
+    "weekday": { "en": "Sat", "cn": "星期六", "ja": "土耀日", "id": 6 },
+    "items": []
+  },
+  {
+    "weekday": { "en": "Sun", "cn": "星期日", "ja": "日耀日", "id": 7 },
+    "items": [
+      { "id": 200003, "type": 2, "name": "Nichiyou no Sample", "name_cn": "周日示例番", "air_weekday": 7 }
+    ]
+  }
+]

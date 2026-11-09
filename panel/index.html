@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TIARA · 番组表</title>
+<meta name="theme-color" id="themeColor" content="#0e1116" />
+<meta name="description" content="TIARA：本地离线的番组管家。今天看什么、还差几话、下一集什么时候。" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="netbar" id="netbar" hidden>
+    <span id="netbarText">连不上本地服务</span>
+    <button id="netbarRetry" type="button">重试</button>
+  </div>
+  <header class="bar" id="panelHeader">
+    <div class="brand"><svg class="avatar" aria-hidden="true" width="26" height="26" viewBox="0 0 26 26"><rect width="26" height="26" rx="7" fill="#9a3d4d"/><path d="M6 7h14v9h-8l-4 3v-3H6z" fill="#fff"/></svg><span class="mark">TIARA</span><h1>番组表</h1></div>
+    <nav class="tabs" aria-label="番组视图">
+      <button class="tab on" data-tab="week" aria-current="page">本周<span class="kbd" aria-hidden="true">1</span></button>
+      <button class="tab" data-tab="today">今天<span class="kbd" aria-hidden="true">2</span></button>
+      <button class="tab" data-tab="season">本季<span class="kbd" aria-hidden="true">3</span></button>
+      <button class="tab" data-tab="library">番库<span class="kbd" aria-hidden="true">4</span></button>
+    </nav>
+    <span class="grow"></span>
+    <div class="tools">
+      <span class="date" id="dateLabel">—</span>
+      <button id="pendingBtn" class="ghost" title="落后至少一话的番，点开看是哪几部" hidden>待看 0</button>
+      <input type="search" id="q" aria-label="筛选番剧" placeholder="筛番名 / 优先级 / 别名" />
+      <button id="clockBtn" title="30 小时制：凌晨 00:00–04:59 记为前一天 24:00–28:59">30h</button>
+      <button id="addWatchBtn" data-new-watch class="primary" aria-label="手动添加番剧">新增</button>
+      <button id="syncBtn">同步</button>
+    </div>
+  </header>
+
+  <main id="panelMain"><div class="wrap" id="view"><div class="panel empty" role="status">正在读取本地番组库…</div></div></main>
+
+  <footer class="dock" id="panelFooter">
+    <div class="dock-group" aria-label="数据工具">
+    <button id="restoreBtn">恢复上一版</button>
+    <button id="icsBtn">导出日历</button>
+    <button id="mdBtn">导出周表</button>
+    <button id="tokenBtn">账号</button>
+    <button id="diagBtn">诊断</button>
+    </div>
+    <div class="dock-group" aria-label="显示偏好">
+    <label for="scaleSel">桌宠尺寸</label>
+    <select id="scaleSel">
+      <option value="0.7">70%</option>
+      <option value="0.85">85%</option>
+      <option value="1" selected>100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+    </select>
+    <label for="coverSel">封面</label>
+    <select id="coverSel">
+      <option value="sm">小</option>
+      <option value="md" selected>中</option>
+      <option value="lg">大</option>
+      <option value="xl">特大</option>
+    </select>
+    <button id="themeBtn" class="ghost" title="在「暗 / 亮 / 跟随系统」之间切换">暗色</button>
+    </div>
+    <span class="hint" id="footHint">纯本地 · 数据不出门</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="mask" id="mask" aria-hidden="true" hidden><div class="dlg" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" tabindex="-1"></div></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

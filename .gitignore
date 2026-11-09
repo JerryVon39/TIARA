@@ -1,0 +1,34 @@
+# ===== 运行期产物 / 缓存（不入库）=====
+cache/
+pet/bin/
+pet/obj/
+*.log
+*.bak
+data/state.json
+data/today.json
+data/library.json.bak*
+data/backups/
+data/history.jsonl
+ghost/master/today.txt
+ghost/master/*.nar
+小春.nar
+
+# ===== 编译产物（用 node tools/build_pet.mjs 重建）=====
+*.exe
+
+# ===== 随包运行时（node tools/fetch_runtime.mjs 生成本机副本，93 MB 不入库）=====
+runtime/
+TIARA.nar
+
+dist/
+ghost-yaya/master/today.json
+
+# ===== 个人配置与缓存（含 token / 可重拉，不入库）=====
+data/bgm.json
+data/season/
+data/undo/
+data/.library-lock/
+data/covers/
+
+# ===== 原子写留下的临时文件（正常不该有；出现说明上次写盘被打断）=====
+*.tmp
