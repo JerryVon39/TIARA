@@ -40,6 +40,7 @@
   }
   function enc(s) { return encodeURIComponent(String(s == null ? '' : s)); }
   function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+  function watchGap(w, expected) { return Math.max(0, num(expected) - Math.max(num(w.ep_status), num(w.start_episode) - 1)); }
 
   /** 总话数在最近 3 天内变多 → 显示「新」（同步时 lib/bgm.mjs 写的 eps_updated_at） */
   function isFresh(w) {
@@ -73,7 +74,7 @@
     // 所有页面写入按触发顺序提交，撤销不能越过尚在等待的记账。
     if (url !== '/api/progress') flushAllBumps();
     var run = POST_CHAIN.then(function () {
-      if (url === '/api/undo' && LAST_WRITE && ['/api/progress', '/api/watch/detail', '/api/watch/lifecycle'].indexOf(LAST_WRITE.url) >= 0) {
+      if (url === '/api/undo' && LAST_WRITE && ['/api/progress', '/api/watch/detail', '/api/watch/lifecycle', '/api/watch/schedule'].indexOf(LAST_WRITE.url) >= 0) {
         if (!LAST_WRITE.result || !LAST_WRITE.result.changed) return { ok: false, error: '刚才没有写入新改动，无需撤销' };
         body = Object.assign({}, body, { expected_revision: LAST_WRITE.result.revision });
       }
@@ -380,8 +381,8 @@
         buckets[bucket].push({
           id: x.id, name: x.name_cn || x.name || String(x.id),
           time: dd.time, status: airStatus(x.time_cst, d), mine: mine, watched: watched, total: total,
-          left: w ? Math.max(0, total - watched) : 0,
-          behind: w ? Math.max(0, num(w.expected_eps) - watched) : 0,
+          left: w ? watchGap(w, total) : 0,
+          behind: w ? watchGap(w, w.expected_eps) : 0,
           priority: w && w.priority,
           fresh: isFresh(w),
           sel: SEL === String(x.id)
@@ -451,7 +452,7 @@
           id: s.id, name: s.name_cn || s.name, time: dispShow(s.time_cst, t.weekday).time,
           status: s.time_cst ? (s.aired ? 'aired' : 'next') : '',
           mine: true, watched: num(s.watched_eps), total: num(s.total_eps),
-          left: Math.max(0, num(s.total_eps) - num(s.watched_eps)), behind: num(s.behind), priority: s.priority
+          left: watchGap({ ep_status: s.watched_eps, start_episode: s.start_episode }, s.total_eps), behind: num(s.behind), priority: s.priority
         });
       }).join('')
       : '<div class="empty" style="padding:14px 16px;text-align:left">今天没有你的番。去「本季」挑几部，或用「本周」看整周排片。</div>';
@@ -499,8 +500,8 @@
         id: w.id, name: w.name_cn || w.name,
         time: dispShow(w.air_time_cst, w.air_weekday).time,
         mine: true, watched: num(w.ep_status), total: num(w.eps),
-        left: Math.max(0, num(w.eps) - num(w.ep_status)),
-        behind: Math.max(0, num(w.expected_eps) - num(w.ep_status)),
+        left: watchGap(w, w.eps),
+        behind: watchGap(w, w.expected_eps),
         priority: w.priority,
         fresh: isFresh(w),
         sel: SEL === String(w.id)
@@ -510,7 +511,7 @@
     var catchupHtml = catchup.map(function (w) {
       return showCard({
         id: w.id, name: w.name_cn || w.name, time: '', mine: true,
-        watched: num(w.ep_status), total: num(w.eps), left: Math.max(0, num(w.eps) - num(w.ep_status))
+        watched: num(w.ep_status), total: num(w.eps), left: watchGap(w, w.eps)
       }, {});
     }).join('');
 
@@ -683,7 +684,8 @@
         rows += '<tr class="dayrow' + (isToday ? ' today' : '') + '"><td colspan="6">' + label +
           '<span class="n">' + n + ' 部</span></td></tr>';
       }
-      var meta = [x.date || '', (x.tags || []).slice(0, 3).join(' / '), x.platform || ''].filter(Boolean).join(' · ');
+      var meta = [x.date ? '首播 ' + x.date : '', (x.tags || []).slice(0, 3).join(' / '), x.platform || ''].filter(Boolean).join(' · ');
+      var airing = w && w.airing || (!tracked || w && !w.schedule_manual && !w.schedule_ended ? (j.airings || {})[id] : null);
       var opCell;
       if (w) {
         var tt = num(w.eps);
@@ -693,8 +695,9 @@
           '<button data-op="-1" data-id="' + esc(id) + '" title="回退一话">−</button>' +
           '<button data-op="1" data-id="' + esc(id) + '" title="记一话">+</button>' +
           '<button class="x" data-op="remove" data-id="' + esc(id) + '" title="移出在追">×</button></div>' +
-          '<input class="tin" type="text" data-time="' + esc(id) + '" value="' + esc(w.air_time_cst || '') +
-          '" placeholder="时刻 23:00" title="填了就进本周排片" />' +
+          (w.air_weekday ? '<input class="tin" type="text" data-time="' + esc(id) + '" value="' + esc(w.air_time_cst || '') +
+          '" placeholder="时刻 23:00" title="按本地排期保存" />' :
+          '<button type="button" data-detail="' + esc(id) + '">补星期和时刻</button>') +
           '</div>';
       } else if (inactive) {
         opCell = '<span class="tag mut">' + WATCH_STATE_LABEL[inactive.state] + '</span>';
@@ -707,7 +710,9 @@
         '<td class="pc">' + cover(id, x.name_cn || x.name) + '</td>' +
         '<td class="nm-cell">' +
         '<div class="nm" title="' + esc(x.name_cn || x.name) + '">' + watchTitle(id, tracked ? tracked.name_cn || tracked.name : x.name_cn || x.name, !!tracked) + '</div>' +
-        '<div class="meta">' + esc(meta) + '</div><div class="meta season-mobile-meta">' +
+        '<div class="meta">' + esc(meta) + '</div>' +
+        (!inactive ? '<div class="meta season-airing">' + esc(formatAiring(airing) || '更新时间未公布') + '</div>' : '') +
+        '<div class="meta season-mobile-meta">' +
         (x.eps ? esc(x.eps) + ' 话' : '话数未定') + (x.rating ? ' · 评分 ' + num(x.rating).toFixed(1) : '') + '</div></td>' +
         '<td class="cn">' + (x.eps ? esc(String(x.eps)) + ' 话' : '—') + '</td>' +
         '<td class="rt">' + (x.rating ? num(x.rating).toFixed(1) : '—') + '</td>' +
@@ -716,7 +721,7 @@
 
     // 服务端会把拉取失败的原始错误塞进 warning（含 ECONNREFUSED 127.0.0.1:7890 这种），
     // 对用户没意义：换成一句能照做的，细节留给「诊断」页。
-    var warn = j.warning ? String(j.warning) : SEASON_ERR;
+    var warn = j.warning ? String(j.warning) : SEASON_ERR || j.airingWarning;
     var warnText = '';
     if (warn) {
       warnText = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|proxy|socket hang up/i.test(warn)
@@ -752,6 +757,19 @@
           if (body) body.innerHTML = seasonBodyHtml();
           bindSeason();
         }
+        if (!SEASON || !SEASON.items.length) return;
+        return json('/api/season/airing?q=' + encodeURIComponent(SEASON_Q)).then(function (schedule) {
+          if (request !== seasonRequest || !SEASON) return;
+          SEASON.airings = schedule.airings || {};
+          SEASON.airingWarning = schedule.warning;
+          if (TAB === 'season') {
+            var current = $('#seasonBody');
+            if (current && !current.contains(document.activeElement)) {
+              current.innerHTML = seasonBodyHtml();
+              bindSeason();
+            }
+          }
+        }).catch(function () {});
       })
       .catch(function (e) {
         if (request !== seasonRequest) return;
@@ -762,6 +780,15 @@
           bindSeason();
         }
       });
+  }
+
+  function formatAiring(airing) {
+    if (!airing || !airing.next) return '';
+    var at = new Date(airing.next);
+    if (!Number.isFinite(+at)) return '';
+    var date = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric',
+      weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
+    return '预计 ' + date + ' · ' + (airing.source || '本地排期');
   }
 
   // ---------------- 交互 ----------------
@@ -832,6 +859,15 @@
   function bump(id, delta) {
     var w = findWatch(id);
     if (!w) return;
+    if (w.start_episode > 1) {
+      post('/api/progress', { id: id, delta: delta }).then(function (result) {
+        if (!result.ok) return toast(result.error || '进度保存失败');
+        if (!result.changed) return toast('进度没有变化');
+        toast('进度已保存 · ' + result.ep_status + '/' + (result.eps || '?'), { label: '撤销', fn: undo });
+        return refresh();
+      }).catch(function () { toast('面板服务未响应'); });
+      return;
+    }
     var seen = num(w.ep_status);
     var total = num(w.eps);
     var next = seen + (delta > 0 ? 1 : -1);
@@ -887,7 +923,7 @@
       if (meta) {
         var left = Math.max(0, total - seen);
         var tail = left > 0 ? '剩 ' + left + ' 话' : '看齐';
-        var behind = Math.max(0, num(w.expected_eps) - seen);
+        var behind = watchGap(w, w.expected_eps);
         if (behind > 0) tail += ' · 落后 ' + behind;
         var prio = w.priority ? ' · ' + w.priority : '';
         meta.textContent = (total ? seen + '/' + total + ' · ' + tail : '已看 ' + seen + ' 话 · 总数未定') + prio;
@@ -915,7 +951,7 @@
     var list = (STATE && STATE.watching) || [];
     var n = 0;
     for (var i = 0; i < list.length; i++) {
-      if (num(list[i].expected_eps) - num(list[i].ep_status) > 0) n += 1;
+      if (watchGap(list[i], list[i].expected_eps) > 0) n += 1;
     }
     if (!n) { btn.hidden = true; return; }
     btn.hidden = false;
@@ -928,7 +964,7 @@
     var bad = [];
     for (var i = 0; i < list.length; i++) {
       var w = list[i];
-      var gap = num(w.expected_eps) - num(w.ep_status);
+      var gap = watchGap(w, w.expected_eps);
       if (gap > 0) bad.push({ w: w, gap: gap });
     }
     if (!bad.length) return openDlg('待看', '<div class="empty">没有落后的番，都看齐了。</div>');
@@ -972,36 +1008,47 @@
     }).catch(function () { BUSY = false; toast('服务没响应'); });
   }
 
-  function addWatch(id, name) {
-    if (BUSY) return;
-    BUSY = true;
-    post('/api/watch', { id: id, action: 'add', name: name }).then(function (j) {
-      BUSY = false;
-      if (j.ok === false || j.error) return toast(j.error || '没加进去');
-      toast('加成在追了，记得补开播时刻');
-      refresh();
-    }).catch(function () { BUSY = false; toast('服务没响应'); });
+  function startOptions() {
+    return '<option value="head">从头补</option><option value="seen">填写已看到第几话</option><option value="latest">从最新一话开始</option>';
   }
 
-  /** 本季表里直接点「+ 追」：走 season/apply，连 track_from 一起记下（这样「落后几话」才算得准） */
-  function addFromSeason(id) {
+  function openJoin(count, submit) {
     if (BUSY) return;
-    BUSY = true;
-    var btn = $('#seasonBody') && $('#seasonBody').querySelector('[data-seadd="' + CSS.escape(String(id)) + '"]');
-    if (btn) { btn.disabled = true; btn.textContent = '加…'; }
-    post('/api/season/apply', { q: SEASON_Q, add: [id] }).then(function (j) {
-      BUSY = false;
-      if (j.ok === false || j.error) {
-        if (btn) { btn.disabled = false; btn.textContent = '+ 追'; }
-        return toast(j.error || '没加进去');
-      }
-      toast('已加进在追，记得补开播时刻');
-      return refresh().then(function () { if (TAB === 'season') loadSeason(false); });
-    }).catch(function () {
-      BUSY = false;
-      if (btn) { btn.disabled = false; btn.textContent = '+ 追'; }
-      toast('服务没响应');
+    openDlg('加入在追',
+      '<form id="joinForm"><p>为 ' + count + ' 部番剧选择起点。最新一话按已知排期估算。</p>' +
+      '<label class="row"><span>补番起点</span><select id="joinMode">' + startOptions() + '</select></label>' +
+      '<label class="row" id="joinSeenRow" hidden><span>已看到第几话</span><input type="number" id="joinSeen" min="0" value="0" /></label>' +
+      '<p id="joinResult" role="status"></p></form>',
+      '<button data-close>取消</button><button class="primary" type="submit" form="joinForm" id="joinGo">加入</button>');
+    var form = $('#joinForm'), mode = $('#joinMode'), go = $('#joinGo'), result = $('#joinResult');
+    mode.addEventListener('change', function () { $('#joinSeenRow').hidden = mode.value !== 'seen'; });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      go.disabled = true;
+      submit({ start_mode: mode.value, seen: Number($('#joinSeen').value) }).then(function (response) {
+        if (!response.ok) { result.textContent = response.error || '没有加入番库'; return; }
+        var count = response.added == null ? Number(!!response.changed) : response.added;
+        var skipped = (response.skipped || []).length;
+        if (!count && skipped) { result.textContent = '这批番无法确定该起点，请调整选择后再试。'; return; }
+        if (form.isConnected) closeDlg();
+        toast('已加入 ' + count + ' 部' + (skipped ? '，跳过 ' + skipped + ' 部起点未定的番' : ''));
+        SEASON_MARK = {};
+        return refresh();
+      }).catch(function () { result.textContent = '面板服务未响应'; })
+        .finally(function () { go.disabled = false; });
     });
+  }
+
+  function addWatch(id, name) {
+    openJoin(1, function (start) { return post('/api/watch', Object.assign({ id: id, action: 'add', name: name }, start)); });
+  }
+
+  function addFromSeason(id) {
+    addSeasonSelection([id]);
+  }
+
+  function addSeasonSelection(ids) {
+    openJoin(ids.length, function (start) { return post('/api/season/apply', Object.assign({ q: SEASON_Q, add: ids }, start)); });
   }
 
   function bindSeason() {
@@ -1075,37 +1122,37 @@
 
       // 批量设时刻：勾了几部就一次写完，省得 167 行里一个个点输入框
       $('#batchTime').addEventListener('click', function () {
-        var ids = Object.keys(SEASON_MARK);
-        if (!ids.length) return toast('先勾选几部（点左边的方框）');
+        var ids = new Set((SEASON && SEASON.items || []).map(function (item) { return String(item.id); }));
+        var entries = (STATE.watching || []).filter(function (item) { return ids.has(String(item.id)); });
+        if (!entries.length) return toast('这一季没有在追的番剧');
         openDlg('批量设开播时刻',
-          '<div class="empty" style="padding:0 0 10px;text-align:left">给勾选的 <b>' + ids.length +
-          '</b> 部一起写时刻。Bangumi 只给星期几，不给几点，所以这一格要你自己填。</div>' +
-          '<div class="row"><span>时刻</span><input type="text" id="btTime" placeholder="23:00（最晚 24:59）" /></div>' +
-          '<div class="empty" style="padding:10px 0 0;text-align:left;font-size:11.5px">' +
-          '只能给已经在追的番写时刻：没加的先点「+ 追」。</div>',
-          '<button data-close>取消</button><button class="primary" id="btGo">写入</button>');
-        var input = $('#btTime');
-        var go = $('#btGo');
-        input.focus();
-        var submit = function () {
-          var time = input.value.trim();
-          if (!time) return toast('先填个时刻，比如 23:00');
-          post('/api/season/time-batch', { ids: ids, time: time }).then(function (r) {
-            if (r.ok === false || r.error) return toast(r.error || '没写进去');
-            closeDlg();
-            // 服务端回 {count, changed:[], missing:[]}；old 版回 changed 数组。0 条要说清为什么。
-            var n = num(r.count != null ? r.count : (Array.isArray(r.changed) ? r.changed.length : 0));
-            if (!n) return toast('这些番还没加进在追，先在表里点「+ 追」');
-            toast('已给 ' + n + ' 部写好时刻' + (r.missing && r.missing.length ? '，' + r.missing.length + ' 部没在追' : ''));
-            SEASON_MARK = {};
-            refresh().then(function () {
-              var b = $('#seasonBody');
-              if (b) { b.innerHTML = seasonBodyHtml(); bindSeason(); }
-            });
-          }).catch(function () { toast('服务没响应'); });
-        };
-        go.addEventListener('click', submit);
-        input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+          '<form id="batchForm"><div class="sync-changes">' + entries.map(function (item) {
+            return '<label class="row"><span>' + esc(item.name_cn || item.name || item.id) + '</span>' +
+              '<input type="checkbox" name="ids" value="' + esc(item.id) + '" /></label>';
+          }).join('') + '</div>' +
+          '<label class="row"><span>时刻</span><input id="btTime" placeholder="如 23:00 或 25:30" required /></label>' +
+          '<label class="row"><span>星期</span><select id="btDay"><option value="">保留各自星期</option>' +
+          WEEK_ORDER.map(function (day) { return '<option value="' + day + '">周' + CN[day] + '</option>'; }).join('') +
+          '</select></label><p id="btStatus" role="status"></p></form>',
+          '<button data-close>取消</button><button class="primary" id="btGo" type="submit" form="batchForm">写入</button>');
+        $('#batchForm').addEventListener('submit', function (event) {
+          event.preventDefault();
+          var form = event.currentTarget;
+          var selected = new FormData(form).getAll('ids');
+          var day = Number($('#btDay').value) || undefined;
+          var status = $('#btStatus');
+          var go = $('#btGo');
+          if (!selected.length) { status.textContent = '请至少选择一部番剧'; return; }
+          go.disabled = true;
+          post('/api/season/time-batch', { ids: selected, time: $('#btTime').value.trim(), weekday: day }).then(function (result) {
+            if (!result.ok) { status.textContent = result.error || '保存失败'; return; }
+            var skipped = (result.missing || []).length + (result.needs_weekday || []).length;
+            if (form.isConnected) closeDlg();
+            toast('已更新 ' + result.count + ' 部' + (skipped ? '，跳过 ' + skipped + ' 部不在追或缺星期的番剧' : ''));
+            return refresh();
+          }).catch(function () { status.textContent = '面板服务未响应'; })
+            .finally(function () { go.disabled = false; });
+        });
       });
 
       var goSeason = function (q) {
@@ -1151,17 +1198,9 @@
       $('#applyBtn').addEventListener('click', function () {
         var ids = Object.keys(SEASON_MARK);
         if (!ids.length) return toast('先勾几部');
-        // 必须带上 q：服务端按 q 取缓存里的条目，不传就用「当前季度」，翻旧季加番会写成空名字
-        post('/api/season/apply', { q: SEASON_Q, add: ids }).then(function (j) {
-          if (j.ok === false || j.error) return toast(j.error || '没加成');
-          // 服务端新契约回 {added,changes}：added 才是真加入的部数；changes 是字段级 diff 条数（含周表那条）
-          var n = num(j.added != null ? j.added : (j.count != null ? j.count : ids.length));
-          if (n === 0) toast('这些番已经在在追里了，没有新增');
-          else toast('加了 ' + n + ' 部，时刻可以在本季表里补');
-          SEASON_MARK = {};
-          refresh().then(function () { if (TAB === 'season') loadSeason(false); });
-        }).catch(function () { toast('服务没响应'); });
+        addSeasonSelection(ids);
       });
+
     }
   }
 
@@ -1204,7 +1243,7 @@
     var marker = $('#watchLoading');
     flushAllBumps();
     POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
-      if (marker.isConnected) showWatchForm(j.detail);
+      if (marker.isConnected) showWatchForm(j.detail, j.airing);
     }).catch(function (e) {
       if (marker.isConnected) openDlg('读不到番剧详情', '<p role="alert">' + esc(e.message || '请刷新后再试') + '</p>');
     });
@@ -1222,7 +1261,7 @@
     });
   }
 
-  function showWatchForm(detail) {
+  function showWatchForm(detail, airing) {
     var archived = detail.state === 'archived';
     var controls = '';
     if (detail.id) {
@@ -1230,6 +1269,7 @@
         (detail.state === 'watching' ? '<button type="button" data-life="pause">暂停追番</button>' :
           '<button type="button" data-life="resume">' + (archived ? '恢复到在追' : '继续追番') + '</button>') +
         (!archived && detail.eps > 0 && detail.ep_status >= detail.eps ? '<button type="button" data-life="archive">归档已看完</button>' : '') +
+        (detail.state === 'watching' ? '<button type="button" id="watchSchedule">调档与提醒</button>' : '') +
         '</div>';
     }
     var opts = '<option value="">未排期</option>' + WEEK_ORDER.map(function (d) {
@@ -1238,10 +1278,17 @@
     openDlg(detail.id ? '番剧详情' : '手动添加番剧',
       '<form id="watchForm"><fieldset class="watch-fields" aria-label="番剧资料"' + (archived ? ' disabled' : '') + '>' +
       '<label class="watch-field watch-wide">番名<input id="watchName" type="text" maxlength="160" required value="' + esc(detail.name) + '" /></label>' +
+      (!detail.id ? '<label class="watch-field watch-wide">补番起点<select id="watchStart">' +
+        startOptions().replace('value="seen"', 'value="seen" selected') + '</select></label>' +
+        '<label class="watch-field watch-wide" id="watchLatestRow" hidden>最新一话是第几话<input id="watchLatest" type="number" min="1" /></label>' : '') +
       '<label class="watch-field">已看到第几集<input id="watchSeen" type="number" min="0" step="1" required inputmode="numeric" value="' + esc(detail.ep_status) + '" /></label>' +
       '<label class="watch-field">总集数<input id="watchTotal" type="number" min="1" step="1" inputmode="numeric" placeholder="未知可留空" value="' + esc(detail.eps) + '" /></label>' +
+      (detail.start_episode > 1 ? '<p class="watch-wide watch-hint">补番从第 ' + esc(detail.start_episode) + ' 话开始。</p>' : '') +
       '<label class="watch-field">开播星期<select id="watchDay">' + opts + '</select></label>' +
       '<label class="watch-field">开播时间（北京时间）<input id="watchTime" type="text" maxlength="12" placeholder="如 23:30" aria-describedby="watchTimeHint" value="' + esc(detail.air_time_cst) + '" /></label>' +
+      (!archived && detail.id ? '<p class="watch-wide watch-hint">' +
+        esc(detail.schedule_ended ? '已停止排片，可继续补番' : formatAiring(airing) || '下一次更新时间未公布') +
+        (detail.reminder_muted ? ' · 提醒已静音' : '') + '</p>' : '') +
       '<p id="watchTimeHint" class="watch-wide watch-hint">时间可留空。周一 25:30 会排到周二 01:30。修改已看集数不会增加今日观看统计。</p>' +
       (archived ? '' : '<div class="watch-wide watch-lookup"><button type="button" id="watchLookup">联网查时刻</button>' +
       '<span class="watch-hint">来源 <a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">bangumi-data</a>（CC BY 4.0）</span></div>' +
@@ -1254,6 +1301,13 @@
     var day = $('#watchDay', form), time = $('#watchTime', form), error = $('#watchError', form);
     var matches = $('#watchMatches', form), lookup = $('#watchLookup', form);
     var save = $('#watchSave');
+    var adopted = null;
+    var start = $('#watchStart', form), latest = $('#watchLatest', form);
+    if (start) start.addEventListener('change', function () {
+      latest.required = start.value === 'latest';
+      $('#watchLatestRow').hidden = !latest.required;
+      seen.disabled = start.value !== 'seen';
+    });
     var saving = false;
     function setBusy(value) {
       saving = value;
@@ -1262,12 +1316,21 @@
       form.querySelectorAll('[data-life]').forEach(function (b) { b.disabled = value; });
     }
     function showError(message) { error.textContent = message; error.hidden = false; }
+    function edited() {
+      return name.value.trim() !== detail.name || Number(seen.value) !== detail.ep_status ||
+        (Number(total.value) || null) !== detail.eps || (Number(day.value) || null) !== detail.air_weekday ||
+        (time.value.trim() || null) !== detail.air_time_cst || adopted;
+    }
+    var schedule = $('#watchSchedule', form);
+    if (schedule) schedule.addEventListener('click', function () {
+      if (saving) return;
+      if (edited()) return showError('请先保存详情修改，再调整排期。');
+      openScheduleControls(detail);
+    });
     form.querySelectorAll('[data-life]').forEach(function (b) {
       b.addEventListener('click', function () {
         if (saving) return;
-        if (!archived && (name.value.trim() !== detail.name || Number(seen.value) !== detail.ep_status ||
-            (Number(total.value) || null) !== detail.eps || (Number(day.value) || null) !== detail.air_weekday ||
-            (time.value.trim() || null) !== detail.air_time_cst)) {
+        if (!archived && edited()) {
           return showError('请先保存详情修改，再调整追番状态。');
         }
         error.hidden = true;
@@ -1304,13 +1367,14 @@
           var label = document.createElement('strong');
           label.textContent = item.name;
           var caption = document.createElement('span');
-          caption.textContent = '周' + CN[item.weekday] + ' ' + item.time_cst + ' · ' + item.since +
+          caption.textContent = formatAiring(item) + (item.regions && item.regions.length ? ' · ' + item.regions.join('/') : '') +
             (item.original_name !== item.name ? ' · ' + item.original_name : '');
           button.appendChild(label);
           button.appendChild(caption);
           button.addEventListener('click', function () {
             day.value = String(item.weekday);
             time.value = item.time_cst;
+            adopted = item;
             matches.textContent = '已填入周' + CN[item.weekday] + ' ' + item.time_cst + '。保存后生效。';
             time.focus();
           });
@@ -1327,6 +1391,12 @@
       var payload = { id: detail.id, expected_revision: detail.revision, name: name.value.trim(),
         eps: total.value === '' ? null : Number(total.value), ep_status: Number(seen.value),
         air_weekday: day.value ? Number(day.value) : null, air_time_cst: time.value.trim() || null };
+      if (start) {
+        payload.start_mode = start.value;
+        if (start.value !== 'seen') payload.ep_status = 0;
+        if (start.value === 'latest') payload.latest_episode = Number(latest.value);
+      }
+      if (adopted && payload.air_weekday === adopted.weekday && payload.air_time_cst === adopted.time_cst) payload.schedule_source = adopted.source;
       setBusy(true);
       post('/api/watch/detail', payload).then(function (j) {
         if (!j.ok) { error.textContent = j.error || '保存失败'; error.hidden = false; return; }
@@ -1344,42 +1414,158 @@
     });
   }
 
+  function openScheduleControls(detail) {
+    var pending = (detail.schedule_adjustments || []).find(function (entry) {
+      return Math.max(Date.parse(entry.original_at), Date.parse(entry.at) || 0) >= Date.now();
+    });
+    openDlg('调档与提醒',
+      '<form id="scheduleForm"><p>' + esc(detail.name) + '</p>' +
+      (pending ? '<p class="note">' + esc(pending.at ? '已改期 · ' + formatAiring({ next: pending.at }) : '已跳过 ' + pending.date + ' 的周播档') + '</p>' : '') +
+      '<label class="row"><span>操作</span><select id="scheduleAction">' +
+      '<option value="mute">' + (detail.reminder_muted ? '恢复单番提醒' : '静音此番') + '</option>' +
+      (detail.schedule_ended ? '<option value="restart">恢复排片</option>' :
+        '<option value="skip">跳过下一次周播</option><option value="move">调整下一次开播</option><option value="end">完结或停止排片</option>') +
+      (pending ? '<option value="clear">撤销待生效的调档</option>' : '') +
+      '</select></label><label id="scheduleAtRow" class="row" hidden><span>新时刻（北京时间）</span><input type="datetime-local" id="scheduleAt" /></label>' +
+      '<p id="scheduleResult" role="status"></p></form>',
+      '<button id="scheduleBack">返回详情</button><button class="primary" type="submit" form="scheduleForm" id="scheduleGo">确认</button>');
+    var form = $('#scheduleForm'), action = $('#scheduleAction'), at = $('#scheduleAt'), result = $('#scheduleResult'), go = $('#scheduleGo');
+    action.addEventListener('change', function () { at.required = action.value === 'move'; $('#scheduleAtRow').hidden = !at.required; });
+    $('#scheduleBack').addEventListener('click', function () { openWatchDetail(detail.id); });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      go.disabled = true;
+      post('/api/watch/schedule', { id: detail.id, action: action.value, at: at.value, muted: !detail.reminder_muted,
+        expected_revision: detail.revision }).then(function (reply) {
+        if (!reply.ok) { result.textContent = reply.error || '没有保存'; return; }
+        if (form.isConnected) closeDlg();
+        toast(reply.changed ? '排期与提醒已保存' : '设置没有变化', reply.changed ? { label: '撤销', fn: undo } : undefined);
+        return refresh();
+      }).catch(function () { result.textContent = '面板服务未响应'; })
+        .finally(function () { go.disabled = false; });
+    });
+  }
+
   // ---------------- 同步 ----------------
+  function syncSources(result, sample) {
+    var sources = result.sources || {};
+    var names = { calendar: '公开日历', collections: '在看收藏' };
+    return ['calendar', 'collections'].map(function (key) {
+      var source = sources[key];
+      if (!source) return '';
+      var message = source.status === 'ok'
+        ? (sample && key === 'collections' ? '可读取' : '已读取 ' + source.count + (key === 'calendar' ? ' 组' : ' 部'))
+        : source.status === 'skipped' ? (source.reason === 'no_token' ? '未设置令牌' : '此次不读取') : source.error;
+      return '<p><strong>' + names[key] + '</strong> · ' + esc(message) + '</p>';
+    }).join('');
+  }
+
   function doSync() {
-    if (BUSY) return toast('还在跑，等它跑完');
-    BUSY = true;
-    var btn = $('#syncBtn');
-    btn.disabled = true;
-    btn.textContent = '同步中…';
-    post('/api/sync', { dry_run: true }).then(function (j) {
-      BUSY = false; btn.disabled = false; btn.textContent = '同步';
-      if (j.ok === false || j.error) {
-        return openDlg('同步失败', '<div class="empty">' + esc((j.log || '').slice(-800) || '没有输出') +
-          '<br />常见原因：没开代理，或 bgm.tv 连不上。把代理填在「账号」里。</div>');
+    if (BUSY) return toast('同步正在进行');
+    openDlg('同步 Bangumi',
+      '<label class="row"><span>同步范围</span><select id="syncMode">' +
+      '<option value="collections">同步在看收藏，保留本地进度</option><option value="calendar">只同步公开日历</option>' +
+      '<option value="progress">同步在看收藏并导入观看进度</option></select></label>' +
+      '<p class="note">先预览本地番库会发生的变化。</p>',
+      '<button data-close>取消</button><button class="primary" id="syncPreview">预览</button>');
+    $('#syncPreview').addEventListener('click', function () {
+      var mode = $('#syncMode').value;
+      closeDlg();
+      var btn = $('#syncBtn');
+      function busy(value, label) {
+        BUSY = value;
+        btn.disabled = value;
+        btn.textContent = label;
       }
-      var log = String(j.log || '').trim();
-      openDlg('同步预览（还没落盘）',
-        '<div>下面是从 Bangumi 拉回来的改动，确认后才会写进库里。</div><pre>' + esc(log || '（没有需要改的地方）') + '</pre>',
-        '<button data-close>先不动</button><button class="primary" id="syncGo">确认写入</button>');
-      var go = $('#syncGo');
-      if (go) go.addEventListener('click', function () {
-        closeDlg();
-        BUSY = true; btn.disabled = true; btn.textContent = '写入中…';
-        post('/api/sync', { dry_run: false }).then(function (r) {
-          BUSY = false; btn.disabled = false; btn.textContent = '同步';
-          if (r.ok === false || r.error) return openDlg('同步失败',
-            '<div class="empty">' + esc(String(r.log || r.error || '没有输出').slice(-800)) + '</div>');
-          toast('同步完成');
-          refresh().then(function () { if (TAB === 'season') loadSeason(false); });
-        }).catch(function () {
-          // 以前这里没有 catch：写入失败会把「同步中…」和 BUSY 永远挂住，之后点什么都没反应
-          BUSY = false; btn.disabled = false; btn.textContent = '同步';
-          toast('服务没响应，没有写入');
+      busy(true, '正在预览…');
+      flushAllBumps();
+      POST_CHAIN.then(function () {
+        return sendPost('/api/sync', { dry_run: true, mode: mode });
+      }).then(function (result) {
+        if (!result.ok) {
+          openDlg('同步预览失败', '<p>' + esc(result.error || '无法取得同步资料') + '</p>' + syncSources(result));
+          return;
+        }
+        var changes = result.changes || [];
+        var list = changes.map(function (change) {
+          return '<li>' + esc(change.name || change.id) + ' · ' + esc(change.field) + ' · ' +
+            esc(change.from == null ? '空' : change.from) + ' → ' + esc(change.to == null ? '空' : change.to) + '</li>';
+        }).join('');
+        openDlg(result.partial ? '同步预览 · 部分来源失败' : '同步预览',
+          syncSources(result) + '<p>' + (changes.length ? changes.length + ' 项变更' : '番库没有需要写入的改动。') + '</p>' +
+          (list ? '<ul class="sync-changes">' + list + '</ul>' : ''),
+          '<button data-close>关闭</button>' + (changes.length ? '<button class="primary" id="syncGo">确认写入这批变更</button>' : ''));
+        var go = $('#syncGo');
+        if (go) go.addEventListener('click', function () {
+          closeDlg();
+          busy(true, '正在写入…');
+          post('/api/sync', { preview_id: result.preview_id }).then(function (applied) {
+            if (!applied.ok) {
+              openDlg('未写入同步结果', '<p>' + esc(applied.error || '请重新预览') + '</p>',
+                '<button data-close>关闭</button><button class="primary" id="syncRetry">重新预览</button>');
+              $('#syncRetry').addEventListener('click', function () { closeDlg(); doSync(); });
+              return;
+            }
+            toast(applied.partial ? '已写入成功取得的资料，部分来源失败' : '同步完成');
+            return refresh().then(function () { if (TAB === 'season') return loadSeason(false); });
+          }).catch(function () { toast('没有收到确认结果，请刷新番库查看'); })
+            .finally(function () { busy(false, '同步'); });
         });
-      });
-    }).catch(function () {
-      BUSY = false; btn.disabled = false; btn.textContent = '同步';
-      toast('服务没响应');
+      }).catch(function () { toast('面板服务未响应'); }).finally(function () { busy(false, '同步'); });
+    });
+  }
+
+  function openBgmAccount() {
+    json('/api/token').then(function (config) {
+      openDlg('Bangumi 账号',
+        '<form id="bgmAccount"><label class="row"><span>用户名</span><input id="tkUser" value="' + esc(config.user) + '" placeholder="留空可从令牌识别" /></label>' +
+        '<label class="row"><span>访问令牌</span><input type="password" autocomplete="new-password" id="tkTok" placeholder="' +
+        (config.has_token ? '已保存，留空保留' : '尚未设置') + '" /></label>' +
+        '<label class="row"><span>HTTP 代理</span><input type="password" autocomplete="off" id="tkProxy" placeholder="' +
+        esc(config.proxy ? '已配置 ' + config.proxy + '，留空保留' : '例如 http://127.0.0.1:7890') + '" /></label>' +
+        '<p><label><input id="tkClear" type="checkbox" /> 清除令牌</label> <label><input id="proxyClear" type="checkbox" /> 清除代理</label></p>' +
+        (config.overrides.length ? '<p class="note">环境变量优先 · ' + esc(config.overrides.join(' / ')) + '</p>' : '') +
+        '<p class="note">公开日历可直接使用。令牌只保存到本机配置。</p><div id="tkResult" role="status"></div></form>',
+        '<button data-close>关闭</button><button id="tkTest">测试连接</button><button class="primary" id="tkSave">保存</button>');
+      var form = $('#bgmAccount');
+      var message = $('#tkResult');
+      function submit(test) {
+        var draft = { user: $('#tkUser').value.trim(), token: $('#tkClear').checked ? '' : $('#tkTok').value.trim() || undefined,
+          proxy: $('#proxyClear').checked ? '' : $('#tkProxy').value.trim() || undefined };
+        var buttons = [$('#tkSave'), $('#tkTest')];
+        buttons.forEach(function (b) { b.disabled = true; });
+        message.textContent = test ? '正在检查连接…' : '正在保存…';
+        sendPost(test ? '/api/token/test' : '/api/token', draft).then(function (result) {
+          if (!form.isConnected) return;
+          if (test) {
+            message.innerHTML = (result.identity ? '<p>令牌对应账号 · ' + esc(result.identity.user) + '</p>' : '') +
+              (result.error ? '<p>' + esc(result.error) + '</p>' : '') + syncSources(result, true);
+          } else if (!result.ok) {
+            message.textContent = result.error || '保存失败';
+          } else {
+            closeDlg();
+            toast('Bangumi 设置已保存');
+          }
+        }).catch(function () { message.textContent = '面板服务未响应'; })
+          .finally(function () { buttons.forEach(function (b) { b.disabled = false; }); });
+      }
+      $('#tkTest').addEventListener('click', function () { submit(true); });
+      $('#tkSave').addEventListener('click', function () { submit(false); });
+      form.addEventListener('submit', function (event) { event.preventDefault(); submit(true); });
+    }).catch(function () { toast('读取账号设置失败'); });
+  }
+
+  function openNickname() {
+    if (!STATE) return;
+    openDlg('桌宠称呼', '<label class="row"><span>她叫你</span><input id="tkNick" maxlength="12" value="' +
+      esc(STATE.nickname || '') + '" /></label>', '<button data-close>取消</button><button class="primary" id="nickSave">保存</button>');
+    $('#nickSave').addEventListener('click', function () {
+      post('/api/nickname', { nickname: $('#tkNick').value.trim() }).then(function (result) {
+        if (!result.ok) return toast(result.error || '称呼保存失败');
+        closeDlg();
+        toast('称呼已保存');
+        return refresh();
+      }).catch(function () { toast('面板服务未响应'); });
     });
   }
 
@@ -1394,6 +1580,12 @@
       if (new URLSearchParams(location.search).get('welcome') === '1') WELCOME_FORCE = true;
     } catch (e) {}
     if (VIEWS.indexOf(TAB) < 0) TAB = 'week';
+    if (new URLSearchParams(location.search).get('sync') === '1') {
+      var url = new URL(location.href);
+      url.searchParams.delete('sync');
+      history.replaceState(null, '', url);
+      doSync();
+    }
 
     document.querySelectorAll('.tab').forEach(function (b) {
       var active = b.getAttribute('data-tab') === TAB;
@@ -1447,60 +1639,90 @@
     });
 
     $('#restoreBtn').addEventListener('click', function () {
-      json('/api/backups').then(function (j) {
-        var list = (j.backups || []);
-        openDlg('恢复上一版',
-          '<div>会把 <b>library.json</b> 换成备份。当前版本会先另存一份。</div>' +
-          (list.length ? '<pre>' + esc(list.map(function (b) {
-            return (b.name || '') + '  ' + (b.mtime ? new Date(b.mtime).toLocaleString('zh-CN') : '');
-          }).join('\n')) + '</pre>' : '<div class="empty">还没有备份。</div>'),
-          '<button data-close>取消</button><button class="primary" id="restoreGo">恢复</button>');
-        var go = $('#restoreGo');
-        if (go) go.addEventListener('click', function () {
-          post('/api/restore', { name: (list[0] && list[0].name) || 'library.json.bak' }).then(function (r) {
-            if (r.ok === false || r.error) { closeDlg(); return toast(r.error || '恢复失败'); }
-            closeDlg();
-            toast('已恢复');
-            refresh();
-          }).catch(function () { toast('服务没响应，没有恢复'); });
+      json('/api/backups').then(function (result) {
+        var list = result.backups || [];
+        if (!list.length) return toast('还没有可用的番库备份');
+        openDlg('备份与恢复',
+          '<label class="row"><span>备份版本</span><select id="restoreVersion">' + list.map(function (backup) {
+            return '<option value="' + esc(backup.name) + '">' + esc(new Date(backup.mtime).toLocaleString('zh-CN') +
+              (backup.fixed ? ' · 最近一次' : ' · ' + backup.name)) + '</option>';
+          }).join('') + '</select></label>' +
+          '<label class="row"><span>恢复范围</span><select id="restoreEntry"><option value="">整份番库</option></select></label>' +
+          '<p class="note">恢复前保留当前番库。观看统计、账号和偏好设置保留。</p><div id="restoreDiff" role="status"></div>',
+          '<button data-close>取消</button><button class="primary" id="restoreGo" disabled>确认恢复</button>');
+        var version = $('#restoreVersion'), entry = $('#restoreEntry'), diff = $('#restoreDiff'), go = $('#restoreGo');
+        var request = 0, preview;
+        function describe(item) {
+          if (!item) return '库中无此番';
+          return WATCH_STATE_LABEL[item.state] + ' · ' + item.ep_status + '/' + (item.eps || '?') + ' · ' +
+            (item.air_weekday ? '周' + CN[item.air_weekday] + ' ' + (item.air_time_cst || '时刻未定') : '未排期');
+        }
+        function show() {
+          var id = entry.value;
+          var changes = preview.changes.filter(function (change) { return !id || change.id === id; });
+          diff.innerHTML = changes.length ? '<ul class="sync-changes">' + changes.map(function (change) {
+            return '<li><strong>' + esc((change.to || change.from).name) + '</strong><br />' +
+              esc(describe(change.from) + ' → ' + describe(change.to)) + '</li>';
+          }).join('') + '</ul>' : '<p>这个范围内没有可见的进度、状态或排期差异。</p>';
+          go.textContent = id ? '确认恢复这一部' : '确认恢复整份番库';
+          go.disabled = false;
+        }
+        function load() {
+          var seq = ++request;
+          preview = null;
+          go.disabled = true;
+          diff.textContent = '正在读取备份…';
+          sendPost('/api/restore', { name: version.value, dry_run: true }).then(function (data) {
+            if (seq !== request || !version.isConnected) return;
+            if (!data.ok) { diff.textContent = data.error || '读不到备份'; return; }
+            preview = data;
+            entry.innerHTML = '<option value="">整份番库</option>' + (data.current_readable ? data.entries.map(function (row) {
+              return '<option value="' + esc(row.id) + '">' + esc(row.name) + '</option>';
+            }).join('') : '');
+            show();
+          }).catch(function () { if (seq === request) diff.textContent = '读不到备份'; });
+        }
+        version.addEventListener('change', load);
+        entry.addEventListener('change', function () { if (preview) show(); });
+        go.addEventListener('click', function () {
+          if (!preview) return;
+          go.disabled = true;
+          post('/api/restore', { name: version.value, id: entry.value || undefined,
+            expected_revision: preview.revision, backup_revision: preview.backup_revision }).then(function (applied) {
+            if (!applied.ok) { load(); toast(applied.error || '恢复失败'); return; }
+            if (version.isConnected) closeDlg();
+            toast(applied.id ? '番剧已恢复' : '番库已恢复');
+            return refresh();
+          }).catch(function () { go.disabled = false; toast('没有收到恢复结果'); });
         });
+        load();
       }).catch(function () { toast('读不到备份列表'); });
     });
 
     $('#icsBtn').addEventListener('click', function () { location.href = '/api/export?fmt=ics'; });
     $('#mdBtn').addEventListener('click', function () { location.href = '/api/export?fmt=md'; });
 
-    $('#tokenBtn').addEventListener('click', function () {
-      json('/api/token').then(function (j) {
-        openDlg('账号与称呼',
-          '<div class="empty" style="padding:0 0 10px;text-align:left">Bangumi 的 token 只写在本机 <b>data/bgm.json</b>；不填也能用公开日历。</div>' +
-          '<div class="row"><span>用户名</span><input type="text" id="tkUser" value="' + esc(j.user || '') + '" /></div>' +
-          '<div class="row"><span>Token</span><input type="text" id="tkTok" placeholder="' + esc(j.token_mask || '还没填') + '" /></div>' +
-          '<div class="row"><span>代理</span><input type="text" id="tkProxy" value="' + esc(j.proxy || '') + '" placeholder="http://127.0.0.1:7890" /></div>' +
-          '<div class="row" style="margin-top:12px"><span>她叫你</span><input type="text" id="tkNick" maxlength="12" value="' + esc((STATE.nickname) || '') + '" placeholder="' + esc((STATE.persona && STATE.persona.default) || '会長') + '" /></div>' +
-          '<div class="empty" style="padding:4px 0 0;text-align:left;font-size:11.5px">' +
-          '存进 <b>data/library.json</b> 的 <code>user.nickname_for_pet</code>，桌宠与面板都跟着变。' +
-          '生气时的「不届き者」这类固定说法不跟着改。</div>',
-          '<button data-close>取消</button><button class="primary" id="tkSave">保存</button>');
-        $('#tkSave').addEventListener('click', function () {
-          var nick = ($('#tkNick').value || '').trim();
-          post('/api/token', {
-            user: $('#tkUser').value.trim(),
-            token: $('#tkTok').value.trim() || undefined,
-            proxy: $('#tkProxy').value.trim()
-          }).then(function (r) {
-            if (r.ok === false || r.error) { toast(r.error || '账号保存失败'); return; }
-            if (!nick || nick === STATE.nickname) { closeDlg(); toast('账号已保存'); return; }
-            post('/api/nickname', { nickname: nick }).then(function (n) {
-              if (n.ok === false || n.error) { toast(n.error || '称呼保存失败'); return; }
-              STATE.nickname = n.nickname;
-              closeDlg();
-              refresh();
-              toast('以后她就叫你「' + n.nickname + '」了');
-            }).catch(function () { toast('服务没响应，称呼没存上'); });
-          }).catch(function () { toast('服务没响应，账号没存上'); });
+    $('#tokenBtn').addEventListener('click', openBgmAccount);
+    $('#nickBtn').addEventListener('click', openNickname);
+    $('#reminderBtn').addEventListener('click', function () {
+      json('/api/settings').then(function (settings) {
+        openDlg('提醒设置',
+          '<form id="quietForm"><p>免打扰以北京时间计算，可跨午夜。两项留空时关闭。</p>' +
+          '<label class="row"><span>开始</span><input id="quietStart" type="time" value="' + esc(settings.quiet_start) + '" /></label>' +
+          '<label class="row"><span>结束</span><input id="quietEnd" type="time" value="' + esc(settings.quiet_end) + '" /></label>' +
+          '<p id="quietStatus" role="status"></p></form>',
+          '<button data-close>取消</button><button class="primary" type="submit" form="quietForm">保存</button>');
+        $('#quietForm').addEventListener('submit', function (event) {
+          event.preventDefault();
+          var status = $('#quietStatus');
+          sendPost('/api/settings', { quiet_start: $('#quietStart').value, quiet_end: $('#quietEnd').value }).then(function (reply) {
+            if (!reply.ok) { status.textContent = reply.error || '设置保存失败'; return; }
+            if (status.isConnected) closeDlg();
+            toast('提醒设置已保存');
+            return refresh();
+          }).catch(function () { status.textContent = '面板服务未响应'; });
         });
-      });
+      }).catch(function () { toast('读取提醒设置失败'); });
     });
 
     // ---------------- 诊断：服务日志 ----------------

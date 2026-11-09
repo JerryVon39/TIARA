@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>TIARA · 番组表</title>
+<link rel="icon" type="image/png" sizes="64x64" href="./icon-64.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
 <meta name="theme-color" id="themeColor" content="#0e1116" />
 <meta name="description" content="TIARA：本地离线的番组管家。今天看什么、还差几话、下一集什么时候。" />
 <link rel="stylesheet" href="./style.css" />
@@ -14,7 +16,7 @@
     <button id="netbarRetry" type="button">重试</button>
   </div>
   <header class="bar" id="panelHeader">
-    <div class="brand"><svg class="avatar" aria-hidden="true" width="26" height="26" viewBox="0 0 26 26"><rect width="26" height="26" rx="7" fill="#9a3d4d"/><path d="M6 7h14v9h-8l-4 3v-3H6z" fill="#fff"/></svg><span class="mark">TIARA</span><h1>番组表</h1></div>
+    <div class="brand"><img class="avatar" src="./icon-64.png" alt="TIARA" width="26" height="26" /><span class="mark">TIARA</span><h1>番组表</h1></div>
     <nav class="tabs" aria-label="番组视图">
       <button class="tab on" data-tab="week" aria-current="page">本周<span class="kbd" aria-hidden="true">1</span></button>
       <button class="tab" data-tab="today">今天<span class="kbd" aria-hidden="true">2</span></button>
@@ -36,10 +38,12 @@
 
   <footer class="dock" id="panelFooter">
     <div class="dock-group" aria-label="数据工具">
-    <button id="restoreBtn">恢复上一版</button>
+    <button id="restoreBtn">备份与恢复</button>
     <button id="icsBtn">导出日历</button>
     <button id="mdBtn">导出周表</button>
-    <button id="tokenBtn">账号</button>
+    <button id="tokenBtn">Bangumi 账号</button>
+    <button id="nickBtn">桌宠称呼</button>
+    <button id="reminderBtn">提醒设置</button>
     <button id="diagBtn">诊断</button>
     </div>
     <div class="dock-group" aria-label="显示偏好">

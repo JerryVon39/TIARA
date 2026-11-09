@@ -333,6 +333,7 @@ async function main() {
     b.click();
     return id;
   })()`);
+  if (inlineId !== 'no-button') await evaluate("document.querySelector('#joinGo')?.click()");
   // 点完 0.8 秒内先量提示条（它 2.2 秒后自己淡出），再去确认那一行已经变成进度控件
   await sleep(800);
   const toastInfo = await measureToast();
@@ -348,6 +349,7 @@ async function main() {
     await evaluate(`(function(){
       var b = document.querySelector('#seasonBody [data-op="remove"][data-id="${inlineId}"]');
       if (b) b.click();
+      document.querySelector('#removeWatchGo')?.click();
     })()`);
     await sleep(2600);
   }

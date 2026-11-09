@@ -427,6 +427,10 @@
   .watch-lifecycle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
   .watch-lifecycle + .watch-error { margin-top: 8px; }
   .library-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+  .sync-changes { max-height: 48vh; overflow: auto; padding-inline-end: 8px; }
+  .sync-changes li { margin-block: 4px; }
+  .season-airing { white-space: normal; }
+  .watch-field[hidden], .row[hidden] { display: none; }
   .library-row > button { justify-self: end; }
 
   .toast {

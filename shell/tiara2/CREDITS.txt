@@ -1,0 +1,21 @@
+本目录的立绘与表情差分由项目作者使用 AI 制作，作者同意随 TIARA 源码发布。
+
+立绘：馬剃天愛星 立ち絵 + 表情差分
+
+处理方式：裁剪白边、等比缩放。
+
+本套用到的图
+------------
+surface0  normal   ← 00_default.png           平静
+surface1  happy    ← 01_closed_eye_smile.png  闭眼微笑
+surface2  sad      ← 04_displeased.png        不满（眉眼压低 + 抿嘴）
+surface3  surprise ← 03_surprised.png         惊讶（眉毛抬 + 小 O 形嘴）
+talk               ← 02_talking.png           说话（打字机吐字期间显示的口型帧）
+
+说明
+----
+· 五张原图都是 887×1774 RGBA、像素级对齐，所以不需要 --norm 归一，切换时不会有位移。
+· sleepy / think 没有对应素材，Pet 与面板都会自动退回 normal。
+· talk.png 是这套新加的机制：Pet 在打字机吐字期间换成这张，打完再切回台词对应的表情
+  （见 pet/Pet.cs 的 _talkImg 与 panel/index.html 的 setTalkingFace()）；
+  别的立绘组没有 talk.png 就自动不启用，行为跟以前一样。

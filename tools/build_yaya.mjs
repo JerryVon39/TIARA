@@ -209,6 +209,7 @@ function main() {
   fn.push('    _now = _t[4] * 60 + _t[5]');
   fn.push('    if GETTYPE(yayaDone) == 0 { yayaDone = "" }   // 首次运行时它还不存在');
   fn.push('    foreach _list ; _s {');
+  fn.push('        if !_s["mine"] || _s["reminder_muted"] { continue }');
   fn.push('        if _s["weekday"] != _wd { continue }');
   fn.push('        _d = _now - _s["min"]');
   fn.push('        if _d < 0 || _d > 4 { continue }   // 只认刚过去的 5 分钟');

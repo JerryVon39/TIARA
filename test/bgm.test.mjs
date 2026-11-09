@@ -11,6 +11,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mergeLibrary, mergeSeason, weekdayMap, parseResponse, decodeChunked, httpGet } from '../lib/bgm.mjs';
+import { expectedEpisode } from '../lib/today.mjs';
+import { remainingEpisodes } from '../lib/watch-start.mjs';
 
 const baseLib = () => ({
   version: 1,
@@ -38,6 +40,17 @@ test('weekdayMap：把放送表翻成 id → 星期', () => {
   assert.equal(m.get('500001'), 2);
   assert.equal(m.get('400602'), 5);
   assert.equal(m.size, 2);
+});
+
+test('本季补番起点分别保留 8、5、1 话待看', () => {
+  const now = new Date('2026-11-10T12:00:00+08:00');
+  const entry = { id: 111, name_cn: '测试番', eps: 12, date: '2026-09-21', weekday: 1 };
+  const outcomes = ['head', 'seen', 'latest'].map(start_mode => {
+    const { next } = mergeSeason({ watching: [], weekday: {} }, [entry], { add: [111], now, start_mode, seen: 3 });
+    const w = next.watching[0];
+    return remainingEpisodes(w, expectedEpisode(w, next, now));
+  });
+  assert.deepEqual(outcomes, [8, 5, 1]);
 });
 
 test('mergeLibrary：新增在看条目，默认进度 0', () => {

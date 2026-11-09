@@ -20,15 +20,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildToday, timeline, summarize, cstParts, reminders, DEFAULT_SETTINGS, toMin, expectedEpisode } from './lib/today.mjs';
-import { fetchSeason, fetchSubject, mergeSeason, seasonOf, seasonRange, weekdayFromInfobox, httpGet } from './lib/bgm.mjs';
+import { buildToday, timeline, summarize, cstParts, reminders, DEFAULT_SETTINGS, toMin, expectedEpisode, scheduledWeek } from './lib/today.mjs';
+import { fetchSeason, fetchSubject, mergeLibrary, mergeSeason, seasonOf, seasonRange, weekdayFromInfobox, httpGet } from './lib/bgm.mjs';
 import { readSeasonCache, writeSeasonCache, listCachedSeasons, hasSeasonCache } from './lib/season-cache.mjs';
 import { coverIdOf, coverCachePath, pickCoverUrl, COVER_MAX_AGE } from './lib/cover.mjs';
 import { isLocalOrigin, checkWriteOrigin, checkBodySize, parseJsonBody } from './lib/http-util.mjs';
 import { buildIcs } from './lib/ics.mjs';
 import { personaInfo, normalizeNickname, addressOf } from './lib/persona.mjs';
-import { writeFileAtomic } from './lib/atomic.mjs';
-import { readLibrary, writeLibrary, listBackups, restoreLibrary, popUndo, undoDepth } from './lib/library.mjs';
+import { writeFileAtomic, writeJsonAtomic } from './lib/atomic.mjs';
+import { readLibrary, writeLibrary, listBackups, readBackup, peekUndo, undoDepth } from './lib/library.mjs';
 import { parseClock } from './lib/time.mjs';
 import { APP_ID, VERSION } from './lib/version.mjs';
 import { withLibraryLock } from './lib/library-lock.mjs';
@@ -36,8 +36,11 @@ import { createHash, randomBytes } from 'node:crypto';
 import { panelId, panelPortFile, panelControlFile, findPanel } from './lib/panel-instance.mjs';
 import { actualSchedule } from './lib/today.mjs';
 import { editWatchDetail, watchDetail } from './lib/watch-detail.mjs';
-import { lookupBroadcast } from './lib/broadcast-lookup.mjs';
+import { broadcastSuggestions, lookupBroadcast } from './lib/broadcast-lookup.mjs';
+import { nextScheduledUpdate, nextWeeklyUpdate, parseWatchSlot, quietAt, scheduleRow, setWatchSlot } from './lib/watch-schedule.mjs';
+import { applyWatchStart, remainingEpisodes, watchFloor, WATCH_STARTS } from './lib/watch-start.mjs';
 import { findWatchEntry, inactiveWatchIds, moveWatchEntry } from './lib/watch-lifecycle.mjs';
+import { BGM_REL, readBgmConfig as readStoredBgmConfig, effectiveBgmConfig, bgmConfigView, validateBgmProxy, fetchSyncData } from './lib/bgm-sync.mjs';
 
 const DEFAULT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STARTED_AT = new Date().toISOString();
@@ -122,6 +125,10 @@ async function writeSettings(patch) {
     clock: patch.clock === '24h' || patch.clock === '30h' ? patch.clock : cur.clock,
     pet_scale: Number.isFinite(scale) && scale >= 0.5 && scale <= 2 ? scale : cur.pet_scale,
   };
+  if (patch.quiet_start !== undefined) {
+    next.quiet_start = patch.quiet_start;
+    next.quiet_end = patch.quiet_end;
+  }
   await fs.mkdir(path.dirname(path.join(ROOT, SETTINGS_REL)), { recursive: true });
   await writeFileAtomic(path.join(ROOT, SETTINGS_REL), JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8' });
   return next;
@@ -375,7 +382,7 @@ async function apiState(req, res) {
       behind: t.behindAll,
       behind_today: t.behind,
       catchup: t.catchup,
-      reminders: reminders(t.today, now, 60),
+      reminders: reminders(t.today, now, 60).filter(row => !quietAt(settings, new Date(Date.parse(t.date + 'T00:00:00+08:00') + toMin(row.time_cst) * 60000))),
       timeline: { aired: tl.aired, upcoming: tl.upcoming, next: tl.next, last: tl.last },
       summary: summarize(t, lib),
       quote: lib.trivia?.quote_of_today ?? '',
@@ -386,6 +393,7 @@ async function apiState(req, res) {
       // 在追列表带上「本周该看到第几话」，面板要靠它区分「剩 N 话」和「落后 N 话」
   watching: (lib.watching ?? []).map((w) => ({
     ...w,
+    airing: watchAiring(w, w.start_date),
     expected_eps: expectedEpisode(w, lib, now, new Set(t.today.filter(x => x.aired).map((x) => String(x.id)))),
   })),
       // 待看队列：落后 ≥1 话的番（不问时刻、不催——只在这里安静列出来）
@@ -395,11 +403,12 @@ async function apiState(req, res) {
         for (const w of lib.watching ?? []) {
           const exp = expectedEpisode(w, lib, now, todayIds);
           const seen = Number(w.ep_status) || 0;
-          if (typeof exp === 'number' && exp > seen) {
+          const behind = remainingEpisodes(w, exp);
+          if (typeof exp === 'number' && behind) {
             list.push({
               id: w.id,
               name: w.name_cn || w.name || String(w.id),
-              behind: exp - seen,
+              behind,
               seen,
               expected: exp,
             });
@@ -408,7 +417,7 @@ async function apiState(req, res) {
         list.sort((a, b) => b.behind - a.behind);
         return { count: list.length, shows: list };
       })(),
-      week: slimWeek(lib.weekday ?? {}),
+      week: slimWeek(Object.fromEntries(scheduledWeek(lib, now).map(day => [day.weekday, day.rows]))),
       watching_count: (lib.watching || []).length,
       paused: lib.paused ?? [],
       archived: lib.archived ?? [],
@@ -553,7 +562,6 @@ async function appendHistory(rec) {
  * 也拦住了「某个路由绕过护栏直写 library.json」这类事）。这里只注入 root 与日志。
  */
 const saveLibrary = (lib, opts = {}) => writeLibrary(ROOT, lib, { log: logLine, ...opts });
-const takeUndo = () => popUndo(ROOT);
 const undoDepthNow = () => undoDepth(ROOT);
 
 /** POST /api/undo → 撤销最近一次写库；返回撤销前/后各自看了多少话，便于面板提示 */
@@ -563,22 +571,25 @@ async function apiUndo(req, res) {
   const body = await readJsonBody(req, res);
   if (!body) return;
   return withWriteLock(async () => {
-    if (body.expected_revision) {
-      const current = await fs.readFile(path.join(ROOT, 'data/library.json'), 'utf8');
-      if (createHash('sha256').update(current).digest('hex') !== body.expected_revision) {
-        return json(res, { ok: false, error: '番组库已有其他修改，这次撤销未执行，请刷新后确认' }, 409, req);
-      }
+    const current = await librarySnapshot();
+    if (body.expected_revision && current.revision !== body.expected_revision) {
+      return json(res, { error: '番组库已有其他修改，这次撤销未执行，请刷新后确认' }, 409, req);
     }
-    const text = await takeUndo();
-    if (!text) return json(res, { ok: false, error: '没有可撤销的操作' }, 409, req);
+    let step;
     let lib;
     try {
-      lib = JSON.parse(text);
+      step = await peekUndo(ROOT);
+      if (!step) return json(res, { error: '没有可撤销的操作' }, 409, req);
+      lib = JSON.parse(step.text.replace(/^\uFEFF/, ''));
     } catch (e) {
       return json(res, { ok: false, error: '撤销快照坏了：' + e.message }, 500, req);
     }
     if (!Array.isArray(lib.watching)) return json(res, { ok: false, error: '快照里没有 watching' }, 500, req);
+    const voided = new Set(current.lib.void_history || []);
+    if (step.historyId) voided.add(step.historyId);
+    if (voided.size) lib.void_history = [...voided];
     await saveLibrary(lib, { pushUndo: false, source: 'undo' });
+    await step.remove();
     await appendHistory({ ts: new Date().toISOString(), date: cstParts().date, undo: true, watching: lib.watching.length });
     const rebuilt = await rebuildToday();
     logLine('info', `撤销：回到 watching=${lib.watching.length} 份快照`);
@@ -718,9 +729,12 @@ async function apiProgress(req, res) {
     const epsNum = Number(w.eps);
     const eps = Number.isFinite(epsNum) && epsNum > 0 ? Math.round(epsNum) : 0;
     const prev = Math.max(0, Math.round(Number(w.ep_status) || 0));
-    let next = wantSet !== null ? wantSet : prev + wantDelta;
+    const floor = watchFloor(w);
+    let next = wantSet !== null ? wantSet : wantDelta > 0 ? Math.max(prev, floor) + wantDelta : prev + wantDelta;
     next = Math.max(0, Math.round(next));
     if (eps > 0) next = Math.min(eps, next);
+    if (wantSet === null && wantDelta < 0 && next <= floor) next = 0;
+    const watchedDelta = Math.max(next, floor) - Math.max(prev, floor);
 
     w.ep_status = next;
     if (next > prev) w.last_watched = cstParts().date;
@@ -730,15 +744,17 @@ async function apiProgress(req, res) {
       return { code: 200, payload: { ok: true, id, prev, ep_status: next, eps, changed: false, rebuilt: false } };
     }
 
-    const saved = await saveLibrary(lib, { source: 'progress' });
+    const historyId = randomBytes(16).toString('hex');
+    const saved = await saveLibrary(lib, { source: 'progress', historyId });
     await appendHistory({
+      history_id: historyId,
       ts: new Date().toISOString(),
       date: cstParts().date,
       id,
       name: w.name_cn || w.name || id,
       from: prev,
       to: next,
-      delta: next - prev,
+      delta: watchedDelta,
     });
     return { code: 200, payload: { ok: true, id, prev, ep_status: next, eps, changed: true,
       revision: createHash('sha256').update(saved).digest('hex') } };
@@ -825,6 +841,10 @@ async function apiWatch(req, res) {
       track_from: cstParts().date,
       ...(meta?.date || src?.start_date ? { start_date: meta?.date || src.start_date } : {}),
     };
+    const latest = body.start_mode === 'latest' ? expectedEpisode({ ...entry, track_from: null }, lib) : null;
+    if (!applyWatchStart(entry, body.start_mode, { seen: body.seen, latest })) {
+      return { code: 400, payload: { error: '无法确定这个补番起点，可选择从头补或手填进度' } };
+    }
     lib.watching.push(entry);
     await saveLibrary(lib, { source: 'watch:add' });
     return { code: 200, payload: { ok: true, action, id, name_cn: entry.name_cn, eps: entry.eps, air_weekday: entry.air_weekday, changed: true }, write: true };
@@ -840,7 +860,12 @@ async function apiWatchDetail(req, res) {
     const lib = await readLibrary(ROOT);
     const found = findWatchEntry(lib, id);
     if (!found) return json(res, { error: '找不到这部番' }, 404, req);
-    return json(res, { ok: true, detail: watchDetail(lib, found.entry, found.state) }, 200, req);
+    const detail = watchDetail(lib, found.entry, found.state);
+    let airing = found.state === 'watching' ? watchAiring(detail, found.entry.start_date) : null;
+    if (!airing && found.state === 'watching' && !detail.schedule_ended && !found.entry.schedule_manual && /^\d+$/.test(detail.id)) {
+      airing = (await broadcastSuggestions(ROOT, [detail.id]).catch(() => ({})))[detail.id] || null;
+    }
+    return json(res, { ok: true, detail, airing }, 200, req);
   }
   if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
   if (!guardWrite(req, res)) return;
@@ -863,6 +888,55 @@ async function apiWatchLifecycle(req, res) {
       return { code: 409, error: '这部番已有修改，请重新打开详情' };
     }
     return moveWatchEntry(lib, found, body.action);
+  });
+}
+
+async function apiWatchSchedule(req, res) {
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
+  if (!guardWrite(req, res)) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  return updateWatch(req, res, 'watch:schedule', lib => {
+    const found = findWatchEntry(lib, body.id);
+    if (!found || found.state !== 'watching') return { code: 409, error: '请先将番剧恢复到在追' };
+    const w = found.entry;
+    const detail = watchDetail(lib, w);
+    if (body.expected_revision && body.expected_revision !== detail.revision) {
+      return { code: 409, error: '番剧资料已变动，请重新打开详情' };
+    }
+    const action = body.action;
+    if (action === 'mute') {
+      if (typeof body.muted !== 'boolean') return { code: 400, error: '静音设置无效' };
+      w.reminder_muted = body.muted;
+    } else if (action === 'end' || action === 'restart') {
+      w.schedule_ended = action === 'end';
+    } else if (['skip', 'move', 'clear'].includes(action)) {
+      const now = new Date();
+      const changes = w.schedule_adjustments || [];
+      const past = changes.filter(change => Math.max(Date.parse(change.original_at), Date.parse(change.at) || 0) < +now);
+      if (action === 'clear') {
+        w.schedule_adjustments = past;
+      } else {
+        const pending = changes.find(change => !past.includes(change));
+        const original = pending?.original_at || nextWeeklyUpdate(detail.air_weekday, detail.air_time_cst, now, w.start_date);
+        if (detail.schedule_ended || !original || !scheduleRow(lib, w)) return { code: 409, error: '请先保存周播星期和时刻' };
+        let at = null;
+        if (action === 'move') {
+          const value = body.at;
+          const stamp = typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(value) ? Date.parse(value + ':00+08:00') : NaN;
+          if (!Number.isFinite(stamp) || stamp <= +now || stamp >= Date.parse(original) + 7 * 86400000 ||
+              new Date(stamp + 8 * 3600000).toISOString().slice(0, 16) !== value) {
+            return { code: 400, error: '新时刻须在当前时间之后，且早于下一周的常规档' };
+          }
+          at = new Date(stamp).toISOString();
+        }
+        w.schedule_adjustments = [...past, { date: cstParts(new Date(original)).date, original_at: original, at }];
+      }
+    } else {
+      return { code: 400, error: '排期操作无效' };
+    }
+    const next = watchDetail(lib, w);
+    return { changed: next.revision !== detail.revision, detail: next };
   });
 }
 
@@ -891,7 +965,7 @@ async function apiScheduleLookup(req, res) {
   if ((!name && !id) || name.length > 160) return json(res, { error: '请先填番名，再查开播时间' }, 400, req);
   try {
     const config = await readBgmConfig();
-    const candidates = await lookupBroadcast({ name, id, proxy: process.env.BGM_PROXY || config.proxy });
+    const candidates = await lookupBroadcast({ root: ROOT, name, id, proxy: config.proxy });
     json(res, { ok: true, candidates }, 200, req);
   } catch {
     json(res, { error: '暂时连不上排期数据源。你可以先手填时刻，稍后再试。' }, 502, req);
@@ -909,10 +983,12 @@ async function apiHistory(req, res) {
     return json(res, { ok: true, total: 0, recent: [], byShow: [] }, 200, req);
   }
 
+  const voided = new Set((await readLibrary(ROOT).catch(() => null))?.void_history || []);
   const all = [];
   for (const l of lines.slice(-2000)) {
     try {
-      all.push(JSON.parse(l));
+      const row = JSON.parse(l);
+      if (!voided.has(row.history_id)) all.push(row);
     } catch {}
   }
 
@@ -959,32 +1035,83 @@ async function apiBackups(req, res) {
  *   · 覆盖之前先调 backupLibrary()，把「正在用的好数据」写进 .bak，
  *     等下一次误操作再恢复时拿到的是坏的那份
  */
+function backupEntries(lib) {
+  const rows = new Map();
+  for (const state of ['watching','paused','archived']) {
+    for (const w of lib[state] || []) rows.set(String(w.id), watchDetail(lib, w, state));
+  }
+  return rows;
+}
+
+function backupChanges(current, backup, id) {
+  const before = backupEntries(current || {});
+  const after = backupEntries(backup);
+  const ids = id ? [id] : [...new Set([...before.keys(), ...after.keys()])];
+  return ids.flatMap(key => {
+    const from = before.get(key), to = after.get(key);
+    return from?.revision === to?.revision ? [] : [{ id: key, from, to }];
+  });
+}
+
+function restoreWatchFromBackup(current, backup, id) {
+  const source = findWatchEntry(backup, id);
+  if (!source) return null;
+  const existing = findWatchEntry(current, id);
+  if (existing) current[existing.state].splice(existing.index, 1);
+  (current[source.state] ||= []).push(source.entry);
+  if (Array.isArray(current.dropped)) current.dropped = current.dropped.filter(w => String(w.id) !== id);
+  current.weekday ||= {};
+  for (const key of Object.keys(current.weekday)) current.weekday[key] = current.weekday[key].filter(w => String(w.id) !== id);
+  for (const [day, rows] of Object.entries(backup.weekday || {})) {
+    for (const row of rows) if (String(row.id) === id) (current.weekday[day] ||= []).push(row);
+  }
+  return current;
+}
+
 async function apiRestore(req, res) {
   if (!guardWrite(req, res)) return;
-  if (req.method !== 'POST') return json(res, { ok: false, error: 'use POST' }, 405, req);
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
   const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限：readJsonBody 已经回过了，别继续
+  if (!body) return;
   const name = String(body.name || '');
-  if (!name) return json(res, { ok: false, error: 'missing name' }, 400, req);
+  const id = body.id == null ? null : String(body.id);
+  if (!name) return json(res, { error: '请选择备份' }, 400, req);
 
-  const known = await listBackups(ROOT);
   const outcome = await withWriteLock(async () => {
     try {
-      const lib = await restoreLibrary(ROOT, name, { log: logLine });
-      return { code: 200, payload: { ok: true, restored: name, watching: (lib.watching || []).length }, write: true };
+      const raw = await fs.readFile(path.join(ROOT, 'data/library.json'), 'utf8').catch(e => {
+        if (e.code !== 'ENOENT') throw e;
+        return '';
+      });
+      const revision = hash(raw);
+      let current;
+      try { current = JSON.parse(raw.replace(/^\uFEFF/, '')); } catch {}
+      if (!Array.isArray(current?.watching)) current = null;
+      const backup = await readBackup(ROOT, name);
+      if (id && (!current || !findWatchEntry(backup.lib, id))) {
+        return { code: 409, payload: { error: '这份备份找不到该番，或当前库不可读' } };
+      }
+      if (body.dry_run) {
+        return { code: 200, payload: { ok: true, revision, backup_revision: backup.revision,
+          entries: [...backupEntries(backup.lib).values()], changes: backupChanges(current, backup.lib, id), current_readable: !!current } };
+      }
+      if ((body.expected_revision && body.expected_revision !== revision) ||
+          (body.backup_revision && body.backup_revision !== backup.revision)) {
+        return { code: 409, payload: { error: '当前番库或备份已变动，请重新预览' } };
+      }
+      const restored = id ? restoreWatchFromBackup(current, backup.lib, id) : backup.lib;
+      if (current?.void_history) restored.void_history = current.void_history;
+      await saveLibrary(restored, { backup: !!current, source: 'restore:' + name });
+      return { code: 200, payload: { ok: true, restored: name, id }, write: true };
     } catch (e) {
       if (e.code === 'ENOBACKUP') {
-        return { code: 404, payload: { ok: false, error: String(e.message), backups: known.map((b) => b.name) } };
+        return { code: 404, payload: { error: '找不到这份备份', backups: (await listBackups(ROOT)).map(b => b.name) } };
       }
       logLine('error', 'restore: ' + e.message);
-      return { code: 400, payload: { ok: false, error: String(e.message) } };
+      return { code: 400, payload: { error: e.message } };
     }
   });
-  if (outcome.write) {
-    const rebuilt = await rebuildToday();
-    outcome.payload = { ...outcome.payload, ...rebuildInfo(rebuilt) };
-    logLine('info', `恢复备份 ${name}`);
-  }
+  if (outcome.write) Object.assign(outcome.payload, rebuildInfo(await rebuildToday()));
   json(res, outcome.payload, outcome.code, req);
 }
 
@@ -996,6 +1123,13 @@ async function apiSettings(req, res) {
   if (!guardWrite(req, res)) return;
   const body = await readJsonBody(req, res);
   if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
+  if (body.quiet_start !== undefined || body.quiet_end !== undefined) {
+    const start = body.quiet_start, end = body.quiet_end;
+    const valid = value => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    if (!(start === '' && end === '') && !(valid(start) && valid(end) && start !== end)) {
+      return json(res, { error: '请填写两个不同的 24 小时时刻，或同时留空关闭免打扰' }, 400, req);
+    }
+  }
   const next = await withWriteLock(() => writeSettings(body));
   const rebuilt = await rebuildToday();
   json(res, { ok: true, settings: next, ...rebuildInfo(rebuilt) }, 200, req);
@@ -1032,84 +1166,95 @@ async function apiNickname(req, res) {
  * 参数：{ takeProgress?: boolean, proxy?: string, fixture?: string }
  * 拿不到网就原样返回 CLI 的报错，面板只负责把它显示出来。
  */
+const syncPreviews = new Map();
+const SYNC_PREVIEW_TTL = 5 * 60 * 1000;
+
+const hash = value => createHash('sha256').update(value).digest('hex');
+
+async function librarySnapshot() {
+  const raw = await fs.readFile(path.join(ROOT, 'data/library.json'), 'utf8');
+  return { lib: JSON.parse(raw.replace(/^\uFEFF/, '')), revision: hash(raw) };
+}
+
+const readBgmConfig = async () => effectiveBgmConfig(await readStoredBgmConfig(ROOT));
+
 async function apiSync(req, res) {
   if (!guardWrite(req, res)) return;
   if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
   const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
+  if (!body) return;
 
-  const args = [path.join(ROOT, 'tools', 'sync_bangumi.mjs'), '--no-build'];
-  if (body.takeProgress) args.push('--take-progress');
-  if (body.weekday === 'all') args.push('--weekday-all');
-  if (body.proxy) args.push('--proxy', String(body.proxy));
-  if (body.fixture) args.push('--fixture', String(body.fixture));
-  if (body.dry_run) args.push('--dry-run');
-
-  // 子进程在获取网络数据后自己取得跨进程写锁；这里不能持锁等待它。
-  const started = Date.now();
-  const out = await (async () => {
-    const t0 = Date.now();
-    const r = await new Promise((resolve) => {
-      execFile(process.execPath, args, { timeout: 25000, cwd: ROOT, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-        resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || ''), took: Date.now() - t0 });
-      });
+  if (body.dry_run === true) {
+    const config = await readBgmConfig();
+    const mode = body.mode || (body.takeProgress ? 'progress' : 'collections');
+    if (!['calendar', 'collections', 'progress'].includes(mode)) return json(res, { error: '同步方式无效' }, 400, req);
+    if (mode === 'progress' && !config.token) return json(res, { error: '请先连接 Bangumi 账号，再导入进度' }, 400, req);
+    const { data, usable, ...status } = await fetchSyncData(config, { mode });
+    if (!usable) return json(res, { error: '这次没有取得可同步的数据', ...status }, 502, req);
+    const snapshot = await librarySnapshot();
+    const { next, changes } = mergeLibrary(snapshot.lib, data, {
+      takeProgress: mode === 'progress', weekday: body.weekday === 'all' ? 'all' : 'watching',
     });
-    return r;
-  })();
-
-  if (out.code === 0 && !body.dry_run) await rebuildToday();
-  const tail = (out.stdout + out.stderr).trim().split('\n').slice(-14).join('\n');
-  json(res, { ok: out.code === 0, dry_run: !!body.dry_run, ms: Date.now() - started, log: tail }, out.code === 0 ? 200 : 502, req);
-}
-
-// ---------------- Bangumi：配置 / 本季表 / 导出 / 统计 ----------------
-
-const BGM_REL = 'data/bgm.json';
-
-/** 读 data/bgm.json：{user, token, proxy}（都不含也能跑，只是拿不到收藏进度） */
-async function readBgmConfig() {
-  try {
-    const raw = JSON.parse(await fs.readFile(path.join(ROOT, BGM_REL), 'utf8'));
-    return {
-      user: String(raw.user || ''),
-      token: String(raw.token || ''),
-      proxy: String(raw.proxy || ''),
-    };
-  } catch {
-    return { user: '', token: '', proxy: '' };
+    const names = new Map((next.watching || []).map(w => [String(w.id), w.name_cn || w.name]));
+    for (const change of changes) change.name = names.get(String(change.id)) || change.note && change.to || String(change.id);
+    const preview_id = randomBytes(18).toString('hex');
+    for (const [id, preview] of syncPreviews) if (preview.expires < Date.now()) syncPreviews.delete(id);
+    if (syncPreviews.size >= 8) syncPreviews.delete(syncPreviews.keys().next().value);
+    syncPreviews.set(preview_id, { ...status, next, changes, revision: snapshot.revision,
+      configRevision: hash(JSON.stringify(config)), expires: Date.now() + SYNC_PREVIEW_TTL });
+    return json(res, { ok: true, preview_id, changes, ...status }, 200, req);
   }
-}
 
-async function writeBgmConfig(patch) {
-  const cur = await readBgmConfig();
-  const next = {
-    user: patch.user !== undefined ? String(patch.user || '').trim() : cur.user,
-    token: patch.token !== undefined ? String(patch.token || '').trim() : cur.token,
-    proxy: patch.proxy !== undefined ? String(patch.proxy || '').trim() : cur.proxy,
-  };
-  await fs.mkdir(path.dirname(path.join(ROOT, BGM_REL)), { recursive: true });
-  await writeFileAtomic(path.join(ROOT, BGM_REL), JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8' });
-  return next;
-}
-
-/** GET /api/token 读配置（token 打码）；POST 写 */
-async function apiToken(req, res) {
-  const cfg = await readBgmConfig();
-  if (req.method === 'GET') {
-    return json(res, {
-      ok: true,
-      user: cfg.user,
-      proxy: cfg.proxy,
-      has_token: !!cfg.token,
-      token_mask: cfg.token ? cfg.token.slice(0, 4) + '…' + cfg.token.slice(-2) : '',
-    }, 200, req);
+  const applied = await withWriteLock(async () => {
+    const preview = syncPreviews.get(body.preview_id);
+    if (!preview || preview.expires < Date.now()) return null;
+    if (preview.revision !== (await librarySnapshot()).revision ||
+        preview.configRevision !== hash(JSON.stringify(await readBgmConfig()))) {
+      syncPreviews.delete(body.preview_id);
+      return null;
+    }
+    if (preview.changes.length) await saveLibrary(preview.next, { source: 'sync' });
+    syncPreviews.delete(body.preview_id);
+    return preview;
+  });
+  if (!applied) return json(res, { error: '同步预览已失效，可能是番库或账号已修改，请重新预览。' }, 409, req);
+  if (!applied.partial && applied.sources.calendar.status === 'ok') {
+    await writeJsonAtomic(path.join(ROOT, 'cache/bgm/sync-success.json'), { at: new Date().toISOString() })
+      .catch(() => logLine('error', '无法保存 Bangumi 同步时间'));
   }
+  const rebuilt = applied.changes.length ? rebuildInfo(await rebuildToday()) : {};
+  json(res, { ok: true, changes: applied.changes, sources: applied.sources, partial: applied.partial, ...rebuilt }, 200, req);
+}
+
+function patchBgmConfig(config, patch) {
+  const next = { ...config };
+  for (const key of ['user', 'token', 'proxy']) {
+    if (patch[key] === undefined) continue;
+    if (typeof patch[key] !== 'string' || patch[key].length > 2048 || /[\x00-\x1f\x7f]/.test(patch[key])) return null;
+    next[key] = patch[key].trim();
+  }
+  return validateBgmProxy(next.proxy) ? next : null;
+}
+
+async function apiToken(req, res, test = false) {
+  if (!test && req.method === 'GET') return json(res, { ok: true, ...bgmConfigView(await readStoredBgmConfig(ROOT)) }, 200, req);
   if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
   if (!guardWrite(req, res)) return;
   const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
-  const next = await writeBgmConfig(body);
-  json(res, { ok: true, user: next.user, proxy: next.proxy, has_token: !!next.token }, 200, req);
+  if (!body) return;
+  const update = async () => {
+    const next = patchBgmConfig(await readStoredBgmConfig(ROOT), body);
+    if (next && !test) {
+      await fs.mkdir(path.join(ROOT, 'data'), { recursive: true });
+      await writeJsonAtomic(path.join(ROOT, BGM_REL), next);
+    }
+    return next;
+  };
+  const next = test ? await update() : await withWriteLock(update);
+  if (!next) return json(res, { error: '账号设置格式不正确。代理请填写 HTTP 代理地址，例如 http://127.0.0.1:7890。' }, 400, req);
+  if (!test) return json(res, { ok: true, ...bgmConfigView(next) }, 200, req);
+  const { data, usable, ...status } = await fetchSyncData(effectiveBgmConfig(next), { connection: true });
+  json(res, { ok: usable, ...status, ...bgmConfigView(next), ...(usable ? {} : { error: 'Bangumi 连接失败' }) }, usable ? 200 : 502, req);
 }
 
 /**
@@ -1140,7 +1285,7 @@ async function apiSeason(req, res) {
 
   const cfg = await readBgmConfig();
   try {
-    const data = await fetchSeason({ q, proxy: cfg.proxy });
+    const data = await fetchSeason({ q, proxy: cfg.proxy, base: cfg.base });
     const saved = await writeSeasonCache(ROOT, data);
     queueCoverPrefetch((data.items || []).map((it) => it.id));
     return json(res, { ok: true, source: 'net', ...data, fetched_at: saved.fetched_at, stale: false, age_ms: 0 }, 200, req);
@@ -1150,6 +1295,37 @@ async function apiSeason(req, res) {
     }
     return json(res, { ok: false, error: String(e.message || e), q, hint: '检查系统代理 / 在面板里填 proxy' }, 502, req);
   }
+}
+
+function watchAiring(detail, since) {
+  const next = nextScheduledUpdate(detail, new Date(), since);
+  return next ? { next, source: detail.schedule_source || '本地排期' } : null;
+}
+
+async function apiSeasonAiring(req, res) {
+  if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
+  const q = new URL(req.url, 'http://127.0.0.1').searchParams.get('q');
+  if (!/^\d{4}Q[1-4]$/.test(q || '')) return json(res, { error: '季度无效' }, 400, req);
+  const cached = await readSeasonCache(ROOT, q);
+  const ids = (cached?.items || []).map(item => String(item.id));
+  const config = await readBgmConfig();
+  let suggestions = {}, warning = '';
+  if (ids.length) {
+    try { suggestions = await broadcastSuggestions(ROOT, ids, { online: true, proxy: config.proxy }); }
+    catch { warning = '暂时无法刷新分钟级排期'; }
+  }
+  const lib = await readLibrary(ROOT);
+  const tracked = new Map([...(lib.watching || []), ...(lib.paused || []), ...(lib.archived || [])].map(w => [String(w.id), w]));
+  const inactive = inactiveWatchIds(lib);
+  for (const id of ids) {
+    if (inactive.has(id)) { delete suggestions[id]; continue; }
+    const w = tracked.get(id);
+    if (!w) continue;
+    const saved = watchAiring(watchDetail(lib, w), w.start_date);
+    if (saved) suggestions[id] = saved;
+    else if (w.schedule_manual || w.schedule_ended) delete suggestions[id];
+  }
+  json(res, { ok: true, airings: suggestions, warning }, 200, req);
 }
 
 /**
@@ -1179,6 +1355,8 @@ async function apiSeasonApply(req, res) {
     }
   }
   const remove = Array.isArray(body.remove) ? body.remove.map(String).filter(Boolean) : [];
+  if (body.start_mode != null && !WATCH_STARTS.includes(body.start_mode)) return json(res, { error: '补番起点无效' }, 400, req);
+  if (body.start_mode === 'seen' && (!Number.isSafeInteger(body.seen) || body.seen < 0)) return json(res, { error: '请填写已看到第几话' }, 400, req);
   if (!add.length && !remove.length) return json(res, { ok: false, error: 'add / remove 都是空的' }, 400, req);
 
   let q = null;
@@ -1201,16 +1379,20 @@ async function apiSeasonApply(req, res) {
   if (add.length && !usable.length) {
     return json(res, { ok: false, error: '这些 id 在本季表里找不到，没有写入（避免写出只有 id 的脏条目）', missing }, 400, req);
   }
+  const airings = body.start_mode === 'latest' ? await broadcastSuggestions(ROOT, usable).catch(() => ({})) : {};
 
   const outcome = await withWriteLock(async () => {
     const lib = await readLibrary(ROOT);
-    const { next, changes } = mergeSeason(lib, items, {
+    const { next, changes, skipped } = mergeSeason(lib, items, {
       add: usable,
       remove,
       track_from: body.track_from || cstParts().date,
       now: new Date(),
+      start_mode: body.start_mode,
+      seen: body.seen,
+      airings,
     });
-    if (!changes.length) return { code: 200, payload: { ok: true, q, added: 0, changes: 0, detail: [], missing } };
+    if (!changes.length) return { code: 200, payload: { ok: true, q, added: 0, changes: 0, detail: [], missing, skipped } };
     await saveLibrary(next, { source: 'season:apply' });
     for (const c of changes) {
       await appendHistory({ ts: new Date().toISOString(), date: cstParts().date, event: 'season', ...c });
@@ -1226,6 +1408,7 @@ async function apiSeasonApply(req, res) {
         changes: changes.length,
         detail: changes.slice(0, 20),
         missing,
+        skipped,
       },
       write: true,
     };
@@ -1266,134 +1449,47 @@ async function apiSeasonSubject(req, res) {
   if (!id) return json(res, { error: 'missing id' }, 400, req);
   const cfg = await readBgmConfig();
   try {
-    const meta = await fetchSubject(id, { proxy: cfg.proxy });
+    const meta = await fetchSubject(id, { proxy: cfg.proxy, base: cfg.base });
     json(res, { ok: true, ...meta }, 200, req);
   } catch (e) {
     json(res, { ok: false, error: String(e.message || e) }, 502, req);
   }
 }
 
-/** POST /api/season/time {id, time_cst} → 手填开播时刻（Bangumi 没有这个字段） */
-async function apiSeasonTime(req, res) {
+/** 手填时刻的单条、批量接口共用同一套校验和写库逻辑。 */
+async function apiSeasonTime(req, res, batch = false) {
   if (!guardWrite(req, res)) return;
   if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
   const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
-  const id = String(body.id ?? '');
-  // 面板传 time，命令行/脚本传 time_cst，两种都认
-  const rawTime = String(body.time_cst ?? body.time ?? '').trim();
-  if (!id) return json(res, { ok: false, error: 'missing id' }, 400, req);
-  // 空串 = 清空时刻；非空必须是合法时刻（'abc' 以前能通过，因为它走的是排序用的 toMin）
-  let time = null;
-  if (rawTime) {
-    const parsed = parseClock(rawTime);
-    if (!parsed.ok) return json(res, { ok: false, error: parsed.error }, 400, req);
-    time = parsed.text;
-  }
-
+  if (!body) return;
+  const ids = batch ? (Array.isArray(body.ids) ? body.ids : []) : [body.id];
+  const want = [...new Set(ids.filter(id => id != null && id !== '').map(String))];
+  if (!want.length || want.length > 500) return json(res, { error: '请选择 1–500 部在追番剧' }, 400, req);
+  const rawTime = body.time_cst ?? body.time ?? '';
+  const initial = parseWatchSlot(body.weekday ?? 1, rawTime);
+  if (initial.error) return json(res, { error: initial.error }, 400, req);
   const outcome = await withWriteLock(async () => {
     const lib = await readLibrary(ROOT);
-    const w = (lib.watching || []).find((x) => String(x.id) === id);
-    if (!w) return { code: 404, payload: { ok: false, error: 'not watching: ' + id } };
-    w.air_time_cst = time;
-    let touched = 1;
-    for (const key of Object.keys(lib.weekday || {})) {
-      for (const entry of lib.weekday[key]) {
-        if (String(entry.id) === id && entry.time_cst !== time) {
-          entry.time_cst = time;
-          touched += 1;
-        }
-      }
+    const changed = [], missing = [], needs_weekday = [];
+    const active = new Map((lib.watching || []).map(w => [String(w.id), w]));
+    for (const id of want) {
+      const w = active.get(id);
+      if (!w) { missing.push(id); continue; }
+      const previous = scheduleRow(lib, w);
+      const day = body.weekday ?? (previous?.day || Number(w.air_weekday) || null);
+      const slot = parseWatchSlot(day, rawTime);
+      if (slot.error) { needs_weekday.push(id); continue; }
+      if (slot.time === (previous ? previous.row.time_cst || null : w.air_time_cst || null) &&
+          (slot.day === null || previous?.day === slot.day) && w.schedule_manual) continue;
+      setWatchSlot(lib, w, slot);
+      changed.push(id);
     }
-    await saveLibrary(lib, { source: 'season:time' });
-    return { code: 200, payload: { ok: true, id, time_cst: time, touched }, write: true };
+    if (!batch && missing.length) return { code: 404, payload: { error: '只能批量调整在追番剧，暂停番请从详情修改' } };
+    if (!batch && needs_weekday.length) return { code: 400, payload: { error: '请先在详情里选择开播星期' } };
+    if (changed.length) await saveLibrary(lib, { source: batch ? 'season:time-batch' : 'season:time' });
+    return { code: 200, payload: { ok: true, count: changed.length, changed, missing, needs_weekday, time_cst: initial.time }, write: changed.length > 0 };
   });
-  if (outcome.write) {
-    const rebuilt = await rebuildToday();
-    outcome.payload = { ...outcome.payload, ...rebuildInfo(rebuilt) };
-  }
-  json(res, outcome.payload, outcome.code, req);
-}
-
-/**
- * POST /api/season/time-batch {ids:[...], time, weekday?}
- * 批量补时刻：给一批已在追的番设同一个时刻（「周一首播的都填 23:30」这种场景）。
- * weekday 给了就顺便把 air_weekday 也统一（补录从同步来的番时，星期常常是缺的）。
- */
-/**
- * POST /api/season/time-batch {ids:[...], time, weekday?}
- * 批量补时刻：给一批番设同一个时刻（「周一首播的都填 23:30」这种场景）。
- *
- * 两处修复：
- *  · 以前只把「在追」条目算进 changed，非在追条目（只在周表里的）改完不落盘也不回报，
- *    面板还把空的 changed 数组当数字拼进提示语 →「已给  部写好时刻」。
- *  · 时刻校验走 parseClock，和单条版一模一样（以前 'abc' 能过、'25:00' 反而不行）。
- */
-async function apiSeasonTimeBatch(req, res) {
-  if (!guardWrite(req, res)) return;
-  if (req.method !== 'POST') return json(res, { ok: false, error: 'use POST' }, 405, req);
-  const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
-  const ids = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : [];
-  const rawTime = String(body.time_cst ?? body.time ?? '').trim();
-  const wd = Number(body.weekday);
-  if (!ids.length) return json(res, { ok: false, error: 'missing ids' }, 400, req);
-  if (ids.length > 500) return json(res, { ok: false, error: 'too many ids (max 500)' }, 400, req);
-  const parsed = parseClock(rawTime);
-  if (!parsed.ok) return json(res, { ok: false, error: parsed.error }, 400, req);
-  const time = parsed.text;
-  if (body.weekday != null && !(wd >= 1 && wd <= 7)) return json(res, { ok: false, error: 'weekday 只能是 1–7' }, 400, req);
-
-  const outcome = await withWriteLock(async () => {
-    const lib = await readLibrary(ROOT);
-    const want = new Set(ids);
-    const changed = new Set();
-
-    for (const w of lib.watching || []) {
-      if (!want.has(String(w.id))) continue;
-      w.air_time_cst = time;
-      if (body.weekday != null) w.air_weekday = wd;
-      changed.add(String(w.id));
-    }
-    for (const key of Object.keys(lib.weekday || {})) {
-      for (const entry of lib.weekday[key]) {
-        if (!want.has(String(entry.id))) continue;
-        entry.time_cst = time;
-        changed.add(String(entry.id));
-        if (body.weekday != null && String(key) !== String(wd)) entry.__moveTo = wd;
-      }
-    }
-    // 换桶：先统一摘掉，再按新星期插入，避免边遍历边改数组
-    const moves = [];
-    for (const key of Object.keys(lib.weekday || {})) {
-      const list = lib.weekday[key];
-      for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].__moveTo) {
-          const to = list[i].__moveTo;
-          delete list[i].__moveTo;
-          moves.push({ to, entry: list.splice(i, 1)[0] });
-        }
-      }
-    }
-    for (const mv of moves) {
-      const k = String(mv.to);
-      lib.weekday[k] = lib.weekday[k] || [];
-      if (!lib.weekday[k].some((e) => String(e.id) === String(mv.entry.id))) lib.weekday[k].push(mv.entry);
-    }
-
-    const changedIds = [...changed];
-    const missing = ids.filter((id) => !changed.has(id));
-    if (!changedIds.length && !moves.length) {
-      return { code: 200, payload: { ok: true, count: 0, changed: [], missing } };
-    }
-    await saveLibrary(lib, { source: 'season:time-batch' });
-    return { code: 200, payload: { ok: true, count: changedIds.length, changed: changedIds, missing, time_cst: time }, write: true };
-  });
-
-  if (outcome.write) {
-    const rebuilt = await rebuildToday();
-    outcome.payload = { ...outcome.payload, ...rebuildInfo(rebuilt) };
-  }
+  if (outcome.write) Object.assign(outcome.payload, rebuildInfo(await rebuildToday()));
   json(res, outcome.payload, outcome.code, req);
 }
 
@@ -1402,17 +1498,10 @@ async function apiSeasonTimeBatch(req, res) {
 const pad2 = (n) => String(n).padStart(2, '0');
 
 /** 未来 7 天要播的番（含 30h 制式换算后的归属日） */
-function upcomingDays(lib, now, days = 7) {
-  const inactive = inactiveWatchIds(lib);
-  const out = [];
-  for (let off = 0; off < days; off++) {
-    const d = new Date(now.getTime() + off * 86400e3);
-    const p = cstParts(d);
-    const rows = (lib.weekday?.[String(p.weekday)] || []).filter(row => !inactive.has(String(row.id)))
-      .sort((a, b) => toMin(a.time_cst) - toMin(b.time_cst));
-    if (rows.length) out.push({ date: p.date, weekday: p.weekday, rows });
-  }
-  return out;
+function upcomingDays(lib, now) {
+  return scheduledWeek(lib, now).filter(day => day.rows.length).map(day => ({
+    ...day, rows: day.rows.sort((a, b) => toMin(a.time_cst) - toMin(b.time_cst)),
+  }));
 }
 
 /** Markdown 表格单元格：竖线和换行会直接把表拆坏 */
@@ -1430,6 +1519,8 @@ async function apiExport(req, res) {
   }
   const now = new Date();
   const plan = upcomingDays(lib, now, 7);
+  const settings = await readSettings();
+  const muted = new Set((lib.watching || []).filter(w => w.reminder_muted).map(w => String(w.id)));
 
   if (fmt === 'md') {
     const lines = ['# TIARA的本周番组', '', `> 生成于 ${cstParts(now).date} ${pad2(cstParts(now).hour)}:${pad2(cstParts(now).minute)}（CST）`, ''];
@@ -1461,6 +1552,8 @@ async function apiExport(req, res) {
         time: r.time_cst,
         summary: `${r.name_cn || r.id}${typeof r.ep_expected === 'number' ? ` 第${r.ep_expected}话` : ''}`,
         description: '由 TIARA 生成 · 本地番组表',
+        noAlarm: muted.has(String(r.id)) || quietAt(settings,
+          new Date(Date.parse(day.date + 'T00:00:00+08:00') + (toMin(r.time_cst) - 10) * 60000)),
       });
     }
   }
@@ -1474,6 +1567,8 @@ async function apiExport(req, res) {
 
 /** GET /api/stats → 连续追番天数 / 本周看完 / 累计 */
 async function apiStats(req, res) {
+  const library = await readLibrary(ROOT).catch(() => ({}));
+  const voided = new Set(library.void_history || []);
   let rows = [];
   try {
     const raw = await fs.readFile(path.join(ROOT, 'data', 'history.jsonl'), 'utf8');
@@ -1487,6 +1582,7 @@ async function apiStats(req, res) {
   const today = cstParts().date;
   const weekAgo = cstParts(new Date(Date.now() - 6 * 86400e3)).date;
   for (const r of rows) {
+    if (voided.has(r.history_id)) continue;
     if (r.event === 'season' || r.action === 'season') continue;
     const delta = Number(r.delta || 0);
     if (delta > 0 && r.date) {
@@ -1504,7 +1600,7 @@ async function apiStats(req, res) {
   }
   let finished = 0;
   try {
-    const lib = JSON.parse(await fs.readFile(path.join(ROOT, 'data', 'library.json'), 'utf8'));
+    const lib = library;
     for (const w of [...(lib.watching || []), ...(lib.paused || []), ...(lib.archived || [])]) {
       const eps = Number(w.eps || 0);
       const watched = Number(w.ep_status || 0);
@@ -1637,18 +1733,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.startsWith('/api/state')) return await apiState(req, res);
+    if (url === '/api/season/airing') return await apiSeasonAiring(req, res);
     if (url.startsWith('/api/season/apply')) return await apiSeasonApply(req, res);
     if (url.startsWith('/api/season/subject')) return await apiSeasonSubject(req, res);
-    if (url.startsWith('/api/season/time-batch')) return await apiSeasonTimeBatch(req, res);
+    if (url === '/api/season/time-batch') return await apiSeasonTime(req, res, true);
     if (url.startsWith('/api/season/time')) return await apiSeasonTime(req, res);
     if (url.startsWith('/api/season')) return await apiSeason(req, res);
-    if (url.startsWith('/api/token')) return await apiToken(req, res);
+    if (url === '/api/token/test') return await apiToken(req, res, true);
+    if (url === '/api/token') return await apiToken(req, res);
     if (url.startsWith('/api/export')) return await apiExport(req, res);
     if (url.startsWith('/api/stats')) return await apiStats(req, res);
     if (url.startsWith('/api/progress')) return await apiProgress(req, res);
     if (url.startsWith('/api/undo')) return await apiUndo(req, res);
     if (url === '/api/watch/detail') return await apiWatchDetail(req, res);
     if (url === '/api/watch/lifecycle') return await apiWatchLifecycle(req, res);
+    if (url === '/api/watch/schedule') return await apiWatchSchedule(req, res);
     if (url === '/api/schedule/lookup') return await apiScheduleLookup(req, res);
     if (url === '/api/watch') return await apiWatch(req, res);
     if (url.startsWith('/api/sync')) return await apiSync(req, res);
@@ -1827,7 +1926,7 @@ async function prewarmSeasons() {
     try {
       if (await hasSeasonCache(ROOT, q)) continue;
       const t0 = Date.now();
-      const data = await fetchSeason({ q, proxy: cfg.proxy });
+      const data = await fetchSeason({ q, proxy: cfg.proxy, base: cfg.base });
       await writeSeasonCache(ROOT, data);
       logLine('info', `预热 ${q}：${data.items.length} 部 / ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     } catch (e) {
