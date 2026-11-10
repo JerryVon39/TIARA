@@ -6,7 +6,7 @@
 ```
 纯本地 · 不联网（同步功能按需联网） · 不用登录 · 数据在你自己的 JSON 里
 Windows 10/11 · Node 18+（面板与生成脚本） · .NET Framework 4.x（重编译桌宠）
-当前版本 v0.27.0 · 2026-11-10
+当前版本 v0.27.5 · 2026-11-10
 ```
 
 ---
@@ -299,7 +299,7 @@ node tools/sync_bangumi.mjs --weekday-all
 
 本机实测（2026-11-04，开了本地代理）：`fetchCalendar` 经 `http://127.0.0.1:7890` 约 0.5 秒拿回 7 天 / 114 部；`--dry-run` 不落盘；`--weekday-all` 把 119 条写进星期表。收藏列表需要 token（`data/bgm.json`），没有就只同步放送表。
 
-本季表和番剧详情将首播日期与「下一次预计更新」分开显示。分钟时刻使用北京时间，来源为本地排期、已知地区平台或 bangumi-data 原播周档。有可用数据时可在详情「联网查时刻」采纳对应平台，也能直接手填星期和时刻。没有可信时刻时显示「更新时间未公布」。 [bangumi-data 排期说明](https://github.com/bangumi-data/bangumi-data/blob/master/CONTRIBUTING.md#关于broadcast字段)
+网页和桌宠的「我的排片」都按北京时间显示原播周档，本季表和番剧详情也会标注。已有原播时刻的在追番剧会自动出现在周表里。桌宠提醒按实际排期触发，可在详情里采纳原播时刻或自订。 [bangumi-data 排期说明](https://github.com/bangumi-data/bangumi-data/blob/master/CONTRIBUTING.md#关于broadcast字段)
 
 **今日清单只放自己在追的**：`weekday` 里那些「本季放送表」条目不会挤进今日清单，而是收在面板「本季同档 N 部」的折叠区里（`lib/today.mjs` 把这两拨分成 `today` 与 `side`）。想把谁追起来，把它加进 `watching` 就行。
 
@@ -313,8 +313,9 @@ node tools/sync_bangumi.mjs --weekday-all
 | **30 小时制（默认）** | 前一天 **25:00** | 跟日本番组表、大多数番剧站的写法一致，凌晨的档不会跟当天夜里混在一起 |
 | 24 小时制 | **01:00** | 看着更直白，适合只想知道「几点」的时候 |
 
-- 切换：面板顶栏 `30h / 24h` 按钮，或 `POST /api/settings {"clock":"24h"}`；存进 `data/settings.json`，面板 / 桌宠 / `today.txt` 同时生效。
+- 面板顶栏的 `30h / 24h` 控制原播周档和提醒的时间显示。偏好存进 `data/settings.json`，面板、桌宠和 `today.txt` 共用此设置。也可通过 `POST /api/settings {"clock":"24h"}` 切换。
 - 换算规则在 `lib/today.mjs` 的 `displayClock()`：**05:00 之前**算前一天深夜，时间 +24、星期回退一天（周一凌晨 → 周日 25:00）。星期一减一天会绕回周日，这处单独处理过。
+- 桌宠弹窗打开时读取原播周档，保持打开时每分钟刷新。30 小时制只改变时刻和星期的显示，提醒仍按实际时间触发。
 - 生数据不动：`library.json` 和 `*_time` 永远是北京时间 24 小时制原样，只有 `*_time_disp` / `*_wd_disp` 是换算后的显示值，所以切回 24 小时制不会有信息损失。
 
 ## 6. 数据契约：`ghost/master/today.txt`

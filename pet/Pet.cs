@@ -190,6 +190,9 @@ namespace UkagakaBangumi
         WrapPanel _choices;
         Popup _popup;
         Border _popupCard;
+        DesktopSchedule _desktopSchedule;
+        bool _desktopSchedulePending;
+        string _desktopScheduleError = "";
 
         DispatcherTimer _ticker;     // 呼吸 / 跳（只管画面）
         DispatcherTimer _beat;       // 1 s：OnSecondChange / OnMinuteChange / OnHourChange
@@ -2719,15 +2722,8 @@ namespace UkagakaBangumi
         void TogglePanel()
         {
             if (_popup.IsOpen) { _popup.IsOpen = false; return; }
-            // 内容多了要能滚：屏幕小的时候番组表会顶出屏幕外
-            _popupCard.Child = new ScrollViewer
-            {
-                Content = BuildPanel(),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                MaxHeight = Math.Max(320, CurrentWorkAreaDip().Height * 0.78),
-                Background = Paper
-            };
+            RefreshDesktopSchedule();
+            RefreshPopup();
             _popup.IsOpen = true;
             Post("OnOpenPanel");
         }
@@ -2765,7 +2761,7 @@ namespace UkagakaBangumi
             root.Children.Add(head);
 
             int count = I("count");
-            root.Children.Add(SectionLabel("今天 " + count + " 部"));
+            root.Children.Add(SectionLabel("今日提醒 " + count + " 部"));
             if (count > 0)
             {
                 for (int i = 1; i <= count; i++)
@@ -2799,44 +2795,36 @@ namespace UkagakaBangumi
                 if (pending > 5) root.Children.Add(Note("还有 " + (pending - 5) + " 部，在网页面板里看全表。"));
             }
 
-            // 接下来三天：只列「自己真的在追」的番（放送表里没在追的别在这儿刷屏）
-            string[] cn = { "", "一", "二", "三", "四", "五", "六", "日" };
-            int today = I("weekday");
-            bool anyUpcoming = false;
-            for (int step = 1; step <= 3; step++)
+            root.Children.Add(SectionLabel("我的排片 · 原播周档"));
+            if (_desktopScheduleError.Length > 0) root.Children.Add(Note(_desktopScheduleError));
+            if (_desktopSchedule == null)
             {
-                int d = ((today - 1 + step) % 7) + 1;
-                int n = I("w" + d + "_count");
-                if (n <= 0) continue;
-
-                var rows = new List<UIElement>();
-                int mine = 0;
-                int shown = 0;
-                for (int i = 1; i <= n; i++)
-                {
-                    if (V("w" + d + "_" + i + "_mine", "0") != "1") continue;
-                    mine++;
-                    if (shown >= 5) continue;
-                    string name = V("w" + d + "_" + i + "_name", "");
-                    if (name.Length == 0) continue;
-                    string t = TimeCell(V("w" + d + "_" + i + "_time_disp", V("w" + d + "_" + i + "_time", "")));
-                    rows.Add(Row(t, name, "", "在追", V("w" + d + "_" + i + "_id", "")));
-                    shown++;
-                }
-                if (rows.Count == 0) continue;
-
-                if (!anyUpcoming)
-                {
-                    root.Children.Add(SectionLabel(M("panel_next", "接下来")));
-                    anyUpcoming = true;
-                }
-                root.Children.Add(DayBar(step == 1 ? "明天" : "周" + cn[d], mine));
-                foreach (var r in rows) root.Children.Add(r);
-                if (mine > shown)
-                    root.Children.Add(Note("还有 " + (mine - shown) + " 部，在网页面板里看全表。"));
+                if (_desktopSchedulePending && _desktopScheduleError.Length == 0)
+                    root.Children.Add(Note("正在读取原播周档…"));
             }
-            if (!anyUpcoming)
-                root.Children.Add(Note(M("panel_empty_next", "接下来三天没有你在追的番。")));
+            else
+            {
+                var schedule = _desktopSchedule;
+                root.Children.Add(Note("北京时间 · " + (schedule.clock == "30h" ? "30 小时制" : "24 小时制")));
+                if (!string.IsNullOrEmpty(schedule.warning)) root.Children.Add(Note(schedule.warning));
+                if (schedule.rows.Count == 0) root.Children.Add(Note("还没有在追番剧的排片。"));
+                string[] days = { "时段待定", "周一", "周二", "周三", "周四", "周五", "周六", "周日" };
+                int index = 0;
+                while (index < schedule.rows.Count)
+                {
+                    int day = schedule.rows[index].weekday;
+                    int first = index;
+                    while (index < schedule.rows.Count && schedule.rows[index].weekday == day) index++;
+                    root.Children.Add(DayBar(days[day], index - first));
+                    for (int i = first; i < index; i++)
+                    {
+                        var show = schedule.rows[i];
+                        string label = show.source == "original" ? "原播更新" : show.source == "custom" ? "自订排片" : "";
+                        string eps = show.total > 0 ? show.seen + "/" + show.total : "已看 " + show.seen + " 话";
+                        root.Children.Add(Row(TimeCell(show.time), show.name, eps, label, show.id));
+                    }
+                }
+            }
 
             int ch = I("catchup_count");
             if (ch > 0)
@@ -2866,7 +2854,7 @@ namespace UkagakaBangumi
             };
             foot.Child = new TextBlock
             {
-                Text = "纯本地 · today.txt",
+                Text = "TIARA · 追番放送簿",
                 FontFamily = new FontFamily("Microsoft YaHei UI"),
                 FontSize = 10.5,
                 Foreground = InkSoft
@@ -3289,6 +3277,7 @@ namespace UkagakaBangumi
                     break;
                 case "OnMinuteChange":
                     CheckSettingsFile();               // 面板改了尺寸/省电，1 分钟内跟上
+                    if (PanelOpen) RefreshDesktopSchedule();
                     break;
                 case "OnHourChange":
                     HourlySay();
@@ -4196,10 +4185,67 @@ namespace UkagakaBangumi
         // ================= 网页番组表 / 退出 =================
         bool PanelOpen { get { return _popup != null && _popup.IsOpen; } }
 
+        public sealed class DesktopSchedule
+        {
+            public string clock { get; set; }
+            public string warning { get; set; }
+            public List<DesktopScheduleRow> rows { get; set; }
+        }
+
+        public sealed class DesktopScheduleRow
+        {
+            public string id { get; set; }
+            public string name { get; set; }
+            public int weekday { get; set; }
+            public string time { get; set; }
+            public string source { get; set; }
+            public int seen { get; set; }
+            public int total { get; set; }
+        }
+
+        void RefreshDesktopSchedule()
+        {
+            if (_desktopSchedulePending || _closing || _panelHost == null || _selfTest) return;
+            _desktopSchedulePending = true;
+            _panelHost.EnsureStarted().ContinueWith(task =>
+            {
+                DesktopSchedule schedule = null;
+                string error = "";
+                try
+                {
+                    var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + task.Result + "/api/schedule/desktop");
+                    req.Proxy = null;
+                    req.AllowAutoRedirect = false;
+                    req.Timeout = 23000;
+                    req.ReadWriteTimeout = 3000;
+                    using (var response = (HttpWebResponse)req.GetResponse())
+                    using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                        schedule = new JavaScriptSerializer().Deserialize<DesktopSchedule>(reader.ReadToEnd());
+                    if (schedule == null || schedule.rows == null || schedule.rows.Exists(row => row.weekday < 0 || row.weekday > 7))
+                        throw new InvalidDataException("Invalid weekly schedule");
+                }
+                catch (Exception ex)
+                {
+                    schedule = null;
+                    error = "暂时无法读取排片，请稍后重试。";
+                    Log("desktop schedule: " + ex.GetBaseException().Message);
+                }
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    _desktopSchedulePending = false;
+                    if (_closing) return;
+                    if (schedule != null) _desktopSchedule = schedule;
+                    _desktopScheduleError = error;
+                    if (PanelOpen) RefreshPopup();
+                }));
+            });
+        }
+
         void RefreshPopup()
         {
             if (_popupCard == null) return;
-            _popupCard.Child = new ScrollViewer
+            var oldScroll = _popupCard.Child as ScrollViewer;
+            var scroll = new ScrollViewer
             {
                 Content = BuildPanel(),
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -4207,6 +4253,8 @@ namespace UkagakaBangumi
                 MaxHeight = Math.Max(320, CurrentWorkAreaDip().Height * 0.78),
                 Background = Paper
             };
+            _popupCard.Child = scroll;
+            if (PanelOpen && oldScroll != null) scroll.ScrollToVerticalOffset(oldScroll.VerticalOffset);
         }
 
         void UsePanel(Action<int> ready, bool showError)
