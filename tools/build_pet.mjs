@@ -47,6 +47,9 @@ if (missing.length) {
 const src = path.join(ROOT, 'pet', 'Pet.cs');
 const out = path.join(ROOT, 'pet', 'Pet.exe');
 const manifest = path.join(ROOT, 'pet', 'app.manifest');
+const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('桌宠版本须为三段数字');
+const versionSource = path.join(ROOT, 'pet', `.assembly-version-${process.pid}.tmp`);
 
 const args = [
   '/nologo',
@@ -58,11 +61,15 @@ const args = [
   `/win32manifest:${manifest}`, // DPI 感知：不加的话 125% 缩放下界面会被裁掉右边
   ...refs.map((r) => `/r:${r}`),
   src,
+  path.join(ROOT, 'pet', 'Companion.cs'),
+  path.join(ROOT, 'pet', 'DesktopExtras.cs'),
   path.join(ROOT, 'pet', 'PanelHost.cs'),
+  versionSource,
 ];
 
 console.log(`[build_pet] csc: ${csc}`);
 try {
+  fs.writeFileSync(versionSource, `[assembly: System.Reflection.AssemblyVersion("${version}.0")]\n`);
   const stdout = execFileSync(csc, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   if (stdout.trim()) console.log(stdout.trim());
   const kb = (fs.statSync(out).size / 1024).toFixed(0);
@@ -70,5 +77,7 @@ try {
 } catch (e) {
   const msg = (e.stdout || '') + (e.stderr || '') || e.message;
   console.error('[build_pet] 编译失败：\n' + msg);
-  process.exit(1);
+  process.exitCode = 1;
+} finally {
+  fs.rmSync(versionSource, { force: true });
 }

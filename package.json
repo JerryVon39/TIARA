@@ -1,6 +1,6 @@
 {
   "name": "tiara",
-  "version": "0.27.9",
+  "version": "0.30.0",
   "private": true,
   "description": "TIARA · 伪春菜番组管家（桌宠 + 本地网页面板 + SSP 人格）",
   "type": "module",

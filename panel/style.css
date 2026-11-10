@@ -252,6 +252,8 @@
   .show-ticket .t:not(.unknown) { font: 650 17px/1.25 var(--mono); color: var(--ink); }
   .show-ticket .ops { margin-top: 0; justify-content: end; }
   .show-ticket .nm { font-size: 15px; font-weight: 650; }
+  .watch-link { display: inline-block; margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--accent); }
+  .watch-link:hover { text-decoration: underline; }
   .original-note {
     display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
     background: var(--accent-soft); color: var(--accent); padding: 10px 12px; border-radius: 9px; margin: 0;

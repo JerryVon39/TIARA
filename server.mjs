@@ -35,12 +35,13 @@ import { withLibraryLock } from './lib/library-lock.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { panelId, panelPortFile, panelControlFile, findPanel } from './lib/panel-instance.mjs';
 import { actualSchedule } from './lib/today.mjs';
-import { editWatchDetail, watchDetail } from './lib/watch-detail.mjs';
+import { editWatchDetail, watchDetail, watchUrl } from './lib/watch-detail.mjs';
 import { broadcastSuggestions, lookupBroadcast } from './lib/broadcast-lookup.mjs';
 import { nextScheduledUpdate, nextWeeklyUpdate, parseWatchSlot, quietAt, scheduleRow, setWatchSlot } from './lib/watch-schedule.mjs';
 import { applyWatchStart, remainingEpisodes, watchFloor, WATCH_STARTS } from './lib/watch-start.mjs';
 import { findWatchEntry, inactiveWatchIds, moveWatchEntry } from './lib/watch-lifecycle.mjs';
 import { BGM_REL, readBgmConfig as readStoredBgmConfig, effectiveBgmConfig, bgmConfigView, validateBgmProxy, fetchSyncData } from './lib/bgm-sync.mjs';
+import { importMigration, MIGRATION_LIMIT, migrationSourceRevision, migrationState, migrationSummary, parseMigration, recoverMigration } from './lib/migration.mjs';
 
 const DEFAULT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STARTED_AT = new Date().toISOString();
@@ -552,7 +553,7 @@ async function rotateHistory() {
 async function appendHistory(rec) {
   try {
     await fs.appendFile(path.join(ROOT, HISTORY_REL), JSON.stringify(rec) + '\n', 'utf8');
-    rotateHistory().catch(() => {});
+    await rotateHistory().catch(() => {});
   } catch (e) {
     logLine('error', 'appendHistory: ' + e.message);
   }
@@ -865,7 +866,8 @@ async function apiWatchDetail(req, res) {
     if (!airing && found.state === 'watching' && !detail.schedule_ended && !found.entry.schedule_manual && /^\d+$/.test(detail.id)) {
       airing = (await broadcastSuggestions(ROOT, [detail.id]).catch(() => ({})))[detail.id] || null;
     }
-    return json(res, { ok: true, detail, airing }, 200, req);
+    const reminder = reminderStatus(detail, scheduleRow(lib, found.entry), await readSettings(), found.entry.start_date);
+    return json(res, { ok: true, detail, airing, reminder }, 200, req);
   }
   if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
   if (!guardWrite(req, res)) return;
@@ -873,6 +875,17 @@ async function apiWatchDetail(req, res) {
   if (!body) return;
   // Absolute progress is a correction/baseline, so it should not add watch history.
   return updateWatch(req, res, body.id == null ? 'watch:manual' : 'watch:detail', lib => editWatchDetail(lib, body));
+}
+
+function reminderStatus(detail, slot, settings, since) {
+  if (detail.state !== 'watching') return { status: detail.state };
+  if (detail.schedule_ended) return { status: 'ended' };
+  if (detail.reminder_muted) return { status: 'muted' };
+  const next = slot && nextScheduledUpdate(detail, new Date(), since);
+  if (!next) return { status: 'unscheduled' };
+  if (quietAt(settings, new Date(next))) return { status: 'quiet', at: next };
+  return { status: 'scheduled', at: next,
+    moved: detail.schedule_adjustments.some(change => change.at === next) };
 }
 
 async function apiWatchLifecycle(req, res) {
@@ -1115,6 +1128,36 @@ async function apiRestore(req, res) {
   json(res, outcome.payload, outcome.code, req);
 }
 
+async function apiMigration(req, res) {
+  if (!guardWrite(req, res)) return;
+  if (req.method === 'GET') return withWriteLock(async () => {
+    const { data } = await migrationState(ROOT);
+    const size = Buffer.byteLength(JSON.stringify({ migration: data, source: '0'.repeat(64), target: '0'.repeat(64) }));
+    if (size > MIGRATION_LIMIT) return json(res, { error: '迁移数据超过 16 MB' }, 413, req);
+    return json(res, { ok: true, migration: data }, 200, req);
+  });
+  if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
+  const body = await readJsonBody(req, res, MIGRATION_LIMIT);
+  if (!body) return;
+  let data;
+  try { data = parseMigration(body.migration); }
+  catch (error) { return json(res, { error: error.message }, 400, req); }
+  const source = migrationSourceRevision(data);
+  const result = await withWriteLock(async () => {
+    const current = await migrationState(ROOT);
+    if (body.preview === true) return { code: 200, payload: {
+      ok: true, source, target: current.revision, incoming: migrationSummary(data), current: migrationSummary(current.data),
+    } };
+    if (source !== body.source || current.revision !== body.target) {
+      return { code: 409, payload: { error: '文件或当前数据已有变化，请重新预览后再导入' } };
+    }
+    const backup = await importMigration(ROOT, current, data);
+    return { code: 200, payload: { ok: true, backup }, write: true };
+  });
+  if (result.write) Object.assign(result.payload, rebuildInfo(await rebuildToday()));
+  return json(res, result.payload, result.code, req);
+}
+
 // ---------------- /api/settings ----------------
 /** GET 读偏好；POST { clock?: '24h'|'30h' } 写偏好并重算今日数据（桌宠尺寸在 data/state.json） */
 async function apiSettings(req, res) {
@@ -1347,8 +1390,10 @@ async function apiDesktopSchedule(req, res) {
     const weekday = original?.weekday ?? local?.day ?? (platformOnly ? null : w.air_weekday);
     const time = original?.time_cst ?? (platformOnly ? '' : (local ? local.row.time_cst : w.air_time_cst));
     const slot = displayClock(time, weekday, clock);
+    const url = watchUrl(w.watch_url);
     return { id, name: w.name_cn || w.name || id, weekday: slot.weekday_disp || 0, time: slot.time_disp,
-      source: original ? 'original' : time ? 'custom' : '', seen: w.ep_status ?? 0, total: w.eps ?? 0 };
+      source: original ? 'original' : time ? 'custom' : '', seen: w.ep_status ?? 0, total: w.eps ?? 0,
+      ...(url ? { watch_url: url } : {}) };
   });
   rows.sort((a, b) => (a.weekday || 8) - (b.weekday || 8) || (a.time || '99:99').localeCompare(b.time || '99:99'));
   return json(res, { rows, clock, warning }, 200, req);
@@ -1762,12 +1807,37 @@ async function apiVersion(req, res) {
     ok: true,
     app: APP_ID,
     version: VERSION,
+    installed_version: (await readJSON('package.json').catch(() => null))?.version || VERSION,
+    install_path: ROOT,
+    desktop: await desktopPresence(),
     pid: process.pid,
     started: STARTED_AT,
     port: PORT,
     today_txt: await exists('ghost/master/today.txt'),
     files,
   }, 200, req);
+}
+
+async function desktopPresence() {
+  const pet = await readJSON('cache/pet-presence.json').catch(() => null);
+  if (!pet || !Number.isSafeInteger(pet.pid) || pet.pid <= 0 ||
+      !Number.isFinite(pet.at) || Math.abs(Date.now() / 1000 - pet.at) > 100) return null;
+  try { process.kill(pet.pid, 0); } catch { return null; }
+  return { pid: pet.pid, version: typeof pet.version === 'string' ? pet.version : null };
+}
+
+async function apiReminderTest(req, res) {
+  if (!guardWrite(req, res)) return;
+  if (req.method === 'GET') {
+    const id = new URL(req.url, 'http://localhost').searchParams.get('id');
+    const ack = await readJSON('cache/reminder-test-result.json').catch(() => null);
+    return json(res, { ok: true, delivered: Boolean(id && ack?.id === id) }, 200, req);
+  }
+  if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
+  if (!(await desktopPresence())) return json(res, { error: '请启动这个安装目录中的新版桌宠，再试一次' }, 409, req);
+  const id = randomBytes(16).toString('hex');
+  await writeJsonAtomic(path.join(ROOT, 'cache/reminder-test.json'), { id, expires: Math.floor(Date.now() / 1000) + 12 });
+  return json(res, { ok: true, id }, 200, req);
 }
 
 // ---------------- 路由 ----------------
@@ -1798,6 +1868,8 @@ const server = http.createServer(async (req, res) => {
     if (url.startsWith('/api/progress')) return await apiProgress(req, res);
     if (url.startsWith('/api/undo')) return await apiUndo(req, res);
     if (url === '/api/watch/detail') return await apiWatchDetail(req, res);
+    if (url === '/api/migration') return await apiMigration(req, res);
+    if (url === '/api/reminder/test') return await apiReminderTest(req, res);
     if (url === '/api/watch/lifecycle') return await apiWatchLifecycle(req, res);
     if (url === '/api/watch/schedule') return await apiWatchSchedule(req, res);
     if (url === '/api/schedule/lookup') return await apiScheduleLookup(req, res);
@@ -1904,6 +1976,7 @@ async function startPanel() {
     }
   }
 
+  await recoverMigration(ROOT);
   const actualPort = await listenWithFallback(PORT);
   PORT = actualPort;
   logLine('info', `TIARA ${VERSION} 面板 → http://127.0.0.1:${PORT}`);
@@ -1924,7 +1997,7 @@ async function startPanel() {
 
 async function main() {
   // 按目录串行执行「发现 → 监听 → 发布端口」，避免桌宠和独立入口同时冷启动。
-  const started = PORT_EXPLICIT ? await startPanel() : await withLibraryLock(ROOT, startPanel);
+  const started = await withLibraryLock(ROOT, startPanel);
   if (!started) return;
   if (MANAGED) {
     // 父进程退出（包括崩溃）后，私有标准输入管道关闭。

@@ -333,6 +333,7 @@
     else meta.push('本季');
     if (x.priority) meta.push(x.priority);
     var pct = x.mine && x.total > 0 ? Math.max(0, Math.min(100, Math.round((x.watched / x.total) * 100))) : 0;
+    var entry = x.mine && findWatch(x.id);
     var ops = '';
     if (x.mine) {
       ops = '<span class="ops">' +
@@ -355,6 +356,7 @@
       (x.fresh ? ' <span class="chip fresh" title="总话数刚变多">新</span>' : '') + '</div>' +
       (meta.length ? '<div class="meta">' + esc(meta.join(' · ')) + '</div>' : '') +
       (x.mine && x.total ? '<div class="prog' + (pct >= 100 ? ' full' : '') + '"><i style="width:' + pct + '%"></i></div>' : '') +
+      (entry ? watchLink(entry.watch_url, x.name) : '') +
       (opts.ticket ? '' : ops) +
       '</div>' + (opts.ticket ? ops : '') + '</div>';
   }
@@ -362,6 +364,16 @@
   function watchTitle(id, name, editable) {
     if (!editable) return esc(name);
     return '<button type="button" class="nm-link" data-detail="' + esc(id) + '" aria-label="打开《' + esc(name) + '》详情">' + esc(name) + '</button>';
+  }
+
+  function watchLink(value, name) {
+    if (typeof value !== 'string' || value.length > 2048 || !/^https?:\/\//i.test(value) || /[\s\\\x00-\x1f\x7f]/.test(value)) return '';
+    try {
+      var url = new URL(value);
+      if (!url.hostname || url.username || url.password || url.href.length > 2048) return '';
+      return '<a class="watch-link" href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer" aria-label="打开《' +
+        esc(name) + '》的观看链接">去观看 ↗</a>';
+    } catch (e) { return ''; }
   }
 
   function viewLibrary() {
@@ -1319,7 +1331,7 @@
     var marker = $('#watchLoading');
     flushAllBumps();
     POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
-      if (marker.isConnected) showWatchForm(j.detail);
+      if (marker.isConnected) showWatchForm(j.detail, j.reminder);
     }).catch(function (e) {
       if (marker.isConnected) openDlg('读不到番剧详情', '<p role="alert">' + esc(e.message || '请刷新后再试') + '</p>');
     });
@@ -1337,7 +1349,19 @@
     });
   }
 
-  function showWatchForm(detail) {
+  function reminderLabel(reminder) {
+    if (!reminder) return '暂无提醒状态';
+    var messages = { paused: '已暂停追番', archived: '已归档', ended: '已停止排片',
+      muted: '该番已静音', unscheduled: '请先保存本地排期，才能收到桌宠提醒' };
+    if (messages[reminder.status]) return messages[reminder.status];
+    var time = new Date(Date.parse(reminder.at) + 8 * 3600000);
+    if (!Number.isFinite(+time)) return '暂无提醒状态';
+    var label = time.toISOString().slice(0, 16).replace('T', ' ') + '（北京时间）';
+    return reminder.status === 'quiet' ? label + ' 落在免打扰时段' :
+      label + (reminder.moved ? ' · 本次已改期' : '');
+  }
+
+  function showWatchForm(detail, reminder) {
     var archived = detail.state === 'archived';
     var controls = '';
     if (detail.id) {
@@ -1362,10 +1386,13 @@
       (detail.start_episode > 1 ? '<p class="watch-wide watch-hint">补番从第 ' + esc(detail.start_episode) + ' 话开始。</p>' : '') +
       '<label class="watch-field">开播星期<select id="watchDay">' + opts + '</select></label>' +
       '<label class="watch-field">开播时间（北京时间）<input id="watchTime" type="text" maxlength="12" placeholder="如 23:30" aria-describedby="watchTimeHint" value="' + esc(detail.air_time_cst) + '" /></label>' +
+      '<div class="watch-wide"><label class="watch-field">观看链接<input id="watchUrl" type="url" maxlength="2048" placeholder="https://…" value="' +
+        esc(detail.watch_url) + '" /></label>' + watchLink(detail.watch_url, detail.name) + '</div>' +
       (detail.id ? '<p class="watch-wide original-note"><b>原播周档 · 北京时间</b><span id="watchOriginal" data-id="' +
         esc(detail.id) + '">' + esc(watchOriginalText(detail.id)) + '</span></p>' : '') +
-      (!archived && (detail.schedule_ended || detail.reminder_muted) ? '<p class="watch-wide watch-hint">' +
-        (detail.schedule_ended ? '已停止排片，可继续补番' : '提醒已静音') + '</p>' : '') +
+      (detail.id ? '<p class="watch-wide original-note"><b>' +
+        (reminder && reminder.status === 'scheduled' ? '下次提醒' : '提醒状态') +
+        '</b><span id="watchReminderStatus">' + esc(reminderLabel(reminder)) + '</span></p>' : '') +
       '<p id="watchTimeHint" class="watch-wide watch-hint">时间可留空。周一 25:30 会排到周二 01:30。修改已看集数不会增加今日观看统计。</p>' +
       (archived ? '' : '<div class="watch-wide watch-lookup"><button type="button" id="watchLookup">联网查时刻</button>' +
       '<span class="watch-hint">来源 <a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">bangumi-data</a>（CC BY 4.0）</span></div>' +
@@ -1375,7 +1402,7 @@
       (archived ? '' : '<button type="submit" form="watchForm" id="watchSave" class="primary">' + (detail.id ? '保存修改' : '加入在追') + '</button>'));
     var form = $('#watchForm');
     var name = $('#watchName', form), seen = $('#watchSeen', form), total = $('#watchTotal', form);
-    var day = $('#watchDay', form), time = $('#watchTime', form), error = $('#watchError', form);
+    var day = $('#watchDay', form), time = $('#watchTime', form), url = $('#watchUrl', form), error = $('#watchError', form);
     var matches = $('#watchMatches', form), lookup = $('#watchLookup', form);
     var save = $('#watchSave');
     var adopted = null;
@@ -1396,7 +1423,8 @@
     function edited() {
       return name.value.trim() !== detail.name || Number(seen.value) !== detail.ep_status ||
         (Number(total.value) || null) !== detail.eps || (Number(day.value) || null) !== detail.air_weekday ||
-        (time.value.trim() || null) !== detail.air_time_cst || adopted;
+        (time.value.trim() || null) !== detail.air_time_cst ||
+        (url.value.trim() || null) !== (detail.watch_url || null) || adopted;
     }
     var schedule = $('#watchSchedule', form);
     if (schedule) schedule.addEventListener('click', function () {
@@ -1470,7 +1498,7 @@
       error.hidden = true;
       var payload = { id: detail.id, expected_revision: detail.revision, name: name.value.trim(),
         eps: total.value === '' ? null : Number(total.value), ep_status: Number(seen.value),
-        air_weekday: day.value ? Number(day.value) : null, air_time_cst: time.value.trim() || null };
+        air_weekday: day.value ? Number(day.value) : null, air_time_cst: time.value.trim() || null, watch_url: url.value.trim() || null };
       if (start) {
         payload.start_mode = start.value;
         if (start.value !== 'seen') payload.ep_status = 0;
@@ -1720,6 +1748,117 @@
       setCover($('#coverSel').value);
     });
 
+    $('#migrationBtn').addEventListener('click', function () {
+      openDlg('升级与换机',
+        '<p>把番库、观看历史、偏好和陪伴记忆迁到另一份 TIARA。Bangumi 令牌和代理凭据需要在新安装里重新填写。</p>' +
+        '<button type="button" id="migrationExport">导出迁移文件</button>' +
+        '<hr /><label class="row"><span>导入迁移文件</span><input id="migrationFile" type="file" accept=".json,application/json" /></label>' +
+        '<label class="row"><span>旧版的 data 文件夹</span><input id="migrationFolder" type="file" webkitdirectory /></label>' +
+        '<p class="note">确认导入前会先生成备份。陪伴记忆含首次见面、好感和短剧情进度。</p>' +
+        '<p id="migrationStatus" role="status"></p>',
+        '<button data-close>关闭</button><button type="button" class="primary" id="migrationApply" disabled>确认替换</button>');
+      var message = $('#migrationStatus'), file = $('#migrationFile'), folder = $('#migrationFolder');
+      var apply = $('#migrationApply'), download = $('#migrationExport');
+      var current = null, preview = null, request = 0, limit = 16 * 1024 * 1024;
+      function counts(info) {
+        var base = '在追 ' + info.watching + ' 部、暂停 ' + info.paused + ' 部、归档 ' + info.archived + ' 部、观看记录 ' + info.history + ' 条';
+        var memory = info.companion;
+        if (!memory) return base;
+        var details = [];
+        if (memory.first_seen) details.push('首次见面 ' + memory.first_seen);
+        if (memory.affinity != null) details.push('好感 ' + memory.affinity);
+        details.push('剧情 ' + memory.stories + ' 段有进度');
+        return base + '；' + details.join('、');
+      }
+      function readJson(item) {
+        return item ? item.text().then(function (text) { return JSON.parse(text.replace(/^\uFEFF/, '')); }) : Promise.resolve({});
+      }
+      function fromFolder(files) {
+        var entries = {};
+        Array.from(files).forEach(function (item) {
+          if (/^[^/]+\/(library\.json|settings\.json|state\.json|companion-import\.json|history(?:-\d{4})?\.jsonl)$/.test(item.webkitRelativePath)) entries[item.name] = item;
+        });
+        if (!entries['library.json']) throw new Error('请选择旧版的 data 文件夹，其中应有 library.json');
+        if (Object.values(entries).reduce(function (n, item) { return n + item.size; }, 0) > limit) throw new Error('迁移数据超过 16 MB');
+        var histories = Object.keys(entries).filter(function (name) { return name.startsWith('history'); });
+        return Promise.all([readJson(entries['library.json']), readJson(entries['settings.json']),
+          Promise.all(histories.map(function (name) {
+            return entries[name].text().then(function (text) {
+              return [name, text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(function (line) { return line.trim(); })
+                .map(function (line) { return JSON.parse(line.replace(/^\uFEFF/, '')); })];
+            });
+          })), readJson(entries['state.json']), readJson(entries['companion-import.json'])]).then(function (values) {
+          var state = values[3] || {}, pending = values[4] || {};
+          var memory = pending.id && pending.id !== state.companion_import ? pending.companion :
+            { first_seen: (state.vars || {}).first_seen, affinity: (state.vars || {}).affinity, stories: state.stories };
+          var storyProgress = {};
+          ['first-page', 'after-credits', 'next-season'].forEach(function (key) {
+            if (memory && memory.stories && [0, 1, 2].indexOf(memory.stories[key]) >= 0) storyProgress[key] = memory.stories[key];
+          });
+          return { format: 'tiara-migration', schema: 1, library: values[0], settings: values[1], history: Object.fromEntries(values[2]),
+            companion: memory ? { first_seen: memory.first_seen, affinity: memory.affinity, stories: memory.stories ? storyProgress : undefined } : undefined };
+        });
+      }
+      function review(read) {
+        var ticket = ++request;
+        apply.disabled = true;
+        message.textContent = '正在检查迁移数据…';
+        Promise.resolve().then(read).then(function (data) {
+          if (ticket !== request || !message.isConnected) return null;
+          current = data;
+          return post('/api/migration', { migration: data, preview: true });
+        }).then(function (reply) {
+          if (!reply || ticket !== request || !message.isConnected) return;
+          if (!reply.ok) throw new Error(reply.error || '无法预览');
+          preview = reply;
+          message.textContent = '导入前：' + counts(reply.current) + '。导入后：' + counts(reply.incoming) + '。';
+          apply.disabled = false;
+        }).catch(function (error) {
+          if (ticket === request && message.isConnected) message.textContent = error.message || '文件读取失败';
+        });
+      }
+      file.onchange = function () {
+        if (!file.files.length) return;
+        folder.value = '';
+        review(function () {
+          if (file.files[0].size > limit) throw new Error('迁移数据超过 16 MB');
+          return readJson(file.files[0]);
+        });
+      };
+      folder.onchange = function () {
+        if (!folder.files.length) return;
+        file.value = '';
+        review(function () { return fromFolder(folder.files); });
+      };
+      download.onclick = function () {
+        download.disabled = true;
+        flushAllBumps();
+        POST_CHAIN.then(function () { return json('/api/migration'); }).then(function (result) {
+          if (!message.isConnected) return;
+          var url = URL.createObjectURL(new Blob([JSON.stringify(result.migration) + '\n'], { type: 'application/json' }));
+          var link = document.createElement('a');
+          link.href = url;
+          link.download = 'TIARA-迁移-' + new Date().toISOString().slice(0, 10) + '.json';
+          link.click();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        }).catch(function (error) { if (message.isConnected) toast(error.message || '导出失败，请检查番库和观看历史'); })
+          .finally(function () { download.disabled = false; });
+      };
+      apply.onclick = function () {
+        apply.disabled = file.disabled = folder.disabled = true;
+        message.textContent = '正在导入…';
+        post('/api/migration', { migration: current, source: preview.source, target: preview.target }).then(function (reply) {
+          if (!reply.ok) throw new Error(reply.error || '导入失败');
+          if (message.isConnected) {
+            message.textContent = '导入成功。导入前的备份在 data/backups/' + reply.backup;
+            if (reply.rebuild_error) message.textContent += '。桌宠数据重算失败，请查看诊断。';
+          }
+          refresh();
+        }).catch(function (error) { if (message.isConnected) message.textContent = error.message; })
+          .finally(function () { file.disabled = folder.disabled = false; file.value = folder.value = ''; });
+      };
+    });
+
     $('#restoreBtn').addEventListener('click', function () {
       json('/api/backups').then(function (result) {
         var list = result.backups || [];
@@ -1792,8 +1931,30 @@
           '<form id="quietForm"><p>免打扰以北京时间计算，可跨午夜。两项留空时关闭。</p>' +
           '<label class="row"><span>开始</span><input id="quietStart" type="time" value="' + esc(settings.quiet_start) + '" /></label>' +
           '<label class="row"><span>结束</span><input id="quietEnd" type="time" value="' + esc(settings.quiet_end) + '" /></label>' +
-          '<p id="quietStatus" role="status"></p></form>',
+          '<p id="quietStatus" role="status"></p></form>' +
+          '<button type="button" id="reminderTest">测试提醒</button><p class="note">测试会让当前桌宠显示一条通知。</p>' +
+          '<p id="reminderTestStatus" role="status"></p>',
           '<button data-close>取消</button><button class="primary" type="submit" form="quietForm">保存</button>');
+        $('#reminderTest').onclick = function () {
+          var button = this, status = $('#reminderTestStatus');
+          button.disabled = true;
+          status.textContent = '正在联系桌宠…';
+          sendPost('/api/reminder/test', {}).then(function (reply) {
+            if (!reply.ok) throw new Error(reply.error || '无法发送测试提醒');
+            var until = Date.now() + 12500;
+            function waitForDesktop() {
+              if (!status.isConnected) return;
+              return json('/api/reminder/test?id=' + enc(reply.id)).then(function (result) {
+                if (!status.isConnected) return;
+                if (result.delivered) { status.textContent = '桌宠已触发测试提醒'; return; }
+                if (Date.now() >= until) throw new Error('桌宠未回应。请检查桌宠和网页是否来自同一安装目录。');
+                return new Promise(function (resolve) { setTimeout(resolve, 500); }).then(waitForDesktop);
+              });
+            }
+            return waitForDesktop();
+          }).catch(function (error) { if (status.isConnected) status.textContent = error.message; })
+            .finally(function () { button.disabled = false; });
+        };
         $('#quietForm').addEventListener('submit', function (event) {
           event.preventDefault();
           var status = $('#quietStatus');
@@ -1809,11 +1970,18 @@
 
     // ---------------- 诊断：服务日志 ----------------
     function doDiagnose() {
-      json('/api/logs?tail=160').then(function (j) {
+      Promise.all([json('/api/logs?tail=160'), json('/api/version').catch(function () { return {}; })]).then(function (results) {
+        var j = results[0], version = results[1];
         var text = (j.lines || []).join('\n');
         var errs = (j.lines || []).filter(function (l) { return l.indexOf('[error]') >= 0; }).length;
         openDlg('诊断 · 服务日志',
           '<div class="empty" style="padding:0 0 10px;text-align:left">' +
+          '后台 <b>' + esc(version.version || '未知') + '</b>　桌宠 <b>' +
+          esc(version.desktop ? version.desktop.version : '未检测到新版桌宠') + '</b>' +
+          (version.installed_version && (version.version !== version.installed_version ||
+            (version.desktop && version.desktop.version !== version.installed_version)) ?
+            '<br />磁盘版本 ' + esc(version.installed_version) + '。请退出旧进程后，从新版目录启动。' : '') +
+          '<br />安装目录 <code>' + esc(version.install_path || '未知') + '</code><br />' +
           '文件 <b>' + esc(j.path || 'cache/server.log') + '</b>　' +
           '大小 ' + Math.round((j.size || 0) / 1024) + ' KB　' +
           '错误 ' + errs + ' 行' +
@@ -1961,6 +2129,8 @@
     });
 
     refresh().then(function () {
+      var watch = new URLSearchParams(location.search).get('watch');
+      if (watch) return openWatchDetail(watch);
       if (TAB === 'season' && !SEASON) loadSeason(false);
     });
     setInterval(function () { if (!document.hidden) refresh(); }, 60000);

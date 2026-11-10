@@ -5,6 +5,8 @@ pet/obj/
 *.log
 *.bak
 data/state.json
+data/companion-import.json
+data/.migration-pending.json
 data/today.json
 data/library.json.bak*
 data/backups/
