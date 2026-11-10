@@ -1836,21 +1836,19 @@
     var THEMES = ['dark', 'light', 'auto'];
     var mqDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
     function systemIsDark() { return !mqDark || mqDark.matches; }
-    function paintThemeChrome(t) {
-      var eff = t === 'auto' ? (systemIsDark() ? 'dark' : 'light') : t;
-      var meta = document.getElementById('themeColor');
-      if (meta) meta.setAttribute('content', eff === 'light' ? '#f4effa' : '#161320');
-    }
     function applyTheme(t) {
-      var html = document.documentElement;
-      if (t === 'auto') html.removeAttribute('data-theme');
-      else html.setAttribute('data-theme', t);
+      var effective = t === 'auto' ? (systemIsDark() ? 'dark' : 'light') : t;
+      document.documentElement.dataset.theme = effective;
+      var meta = $('#themeColor');
+      if (meta) meta.content = effective === 'light' ? '#f7f8fa' : '#181d23';
       var btn = $('#themeBtn');
       if (btn) btn.textContent = t === 'light' ? '亮色' : t === 'auto' ? '自动' : '暗色';
-      paintThemeChrome(t);
     }
-    var themeNow = 'dark';
-    try { themeNow = localStorage.getItem('kx.theme') || 'dark'; } catch (e) {}
+    var themeNow = 'light';
+    try {
+      var savedTheme = localStorage.getItem('kx.theme');
+      if (THEMES.includes(savedTheme)) themeNow = savedTheme;
+    } catch (e) {}
     applyTheme(themeNow);
     $('#themeBtn').addEventListener('click', function () {
       themeNow = THEMES[(THEMES.indexOf(themeNow) + 1) % THEMES.length];
@@ -1858,7 +1856,6 @@
       applyTheme(themeNow);
       toast(themeNow === 'light' ? '亮色' : themeNow === 'auto' ? '跟随系统' : '暗色');
     });
-    // 「自动」以前等于永远暗色：CSS 里没有 prefers-color-scheme，切了也不跟。现在真的跟系统走。
     if (mqDark) {
       var onSysTheme = function () { if (themeNow === 'auto') applyTheme('auto'); };
       if (mqDark.addEventListener) mqDark.addEventListener('change', onSysTheme);
