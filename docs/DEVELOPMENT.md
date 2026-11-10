@@ -460,9 +460,10 @@ curl -o week.ics "http://127.0.0.1:7788/api/export?fmt=ics"
 
 ### 9.1 规格
 
-- 目录：`shell/master/`
+- `shell/master/` 是当前启用的立绘。桌宠、网页和 SSP 打包都从这里读取。
+- `shell/tiara2/` 是可切换的素材套装。运行 `node tools/switch_shell.mjs tiara2` 会把套装图片复制到 `master`，随后重启桌宠即可看到。
 - 尺寸：**384 × 576** PNG（带 alpha），当前按 560px 高显示
-- 文件：`surface0.png` … `surface5.png`，外加可选的 `talk.png`（打字口型帧）
+- 随包提供 `surface0.png` 到 `surface3.png` 和 `talk.png`（打字口型帧）。
 
 | 表情名 | 文件 | 含义 |
 | --- | --- | --- |
@@ -508,7 +509,7 @@ node tools/switch_shell.mjs
 
 ## 10. SSP 伪春菜人格
 
-Ghost 使用 YAYA，从 `data/talks.json` 和番组库生成。双击 TIARA 打开案件簿，可以查看今日排片、今天下一部、补番清单，也可以闲聊、摸头和听自我介绍。困倦、思考、害羞分别使用 `surface4.png`、`surface5.png`、`surface6.png`，害羞用于 SSP 人格的互动台词。
+Ghost 使用 YAYA，从 `data/talks.json` 和番组库生成。双击 TIARA 打开案件簿，可以查看今日排片、今天下一部、补番清单，也可以闲聊、摸头和听自我介绍。当前套装用低落、平静和微笑表情代替困倦、思考和害羞。
 
 ### 10.1 生成与安装
 

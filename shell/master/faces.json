@@ -13,8 +13,8 @@
     "happy": { "base": "surface1.png" },
     "sad": { "base": "surface2.png" },
     "surprise": { "base": "surface3.png" },
-    "sleepy": { "base": "surface4.png" },
-    "think": { "base": "surface5.png" }
+    "sleepy": { "base": "surface2.png", "fallback": true },
+    "think": { "base": "surface0.png", "fallback": true }
   },
   "aliases": {
     "normal": "normal",

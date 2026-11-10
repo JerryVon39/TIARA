@@ -7,7 +7,7 @@ OnFirstBoot {
 OnBoot {
     '\1\s[-1]\0\s[0]学生会，开始办公。……会長，今天的案件我确认过了。\n2026-11-10 周二 · 今天没有在追的排片。\e'
     '\1\s[-1]\0\s[1]副会长，到任。……我回来了，会長。\n2026-11-10 周二 · 今天没有在追的排片。\e'
-    '\1\s[-1]\0\s[4]……会長。昨晚几点睡的，记录上可写着呢。\n2026-11-10 周二 · 今天没有在追的排片。\e'
+    '\1\s[-1]\0\s[2]……会長。昨晚几点睡的，记录上可写着呢。\n2026-11-10 周二 · 今天没有在追的排片。\e'
 }
 
 OnMouseDoubleClick {
@@ -16,11 +16,11 @@ OnMouseDoubleClick {
 }
 
 OnTiaraToday {
-    '\0\s[4]2026-11-10 周二 · 今天没有在追的排片。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[2]2026-11-10 周二 · 今天没有在追的排片。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
 }
 
 OnTiaraNext {
-    '\0\s[4]今天没有下一部已定时的番。……要不要看看补番清单？\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[2]今天没有下一部已定时的番。……要不要看看补番清单？\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
 }
 
 OnTiaraBacklog {
@@ -28,12 +28,12 @@ OnTiaraBacklog {
 }
 
 OnTiaraChat {
-    '\0\s[6]……靠这么近，我会当真的。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
-    '\0\s[6]……手，牵着吧。就今天。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
-    '\0\s[6]……别走开。……再待一会儿。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
-    '\0\s[6]……！突然抱过来……不行，太狡猾了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
-    '\0\s[6]……就、就一小会儿。别人看不见吧。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
-    '\0\s[6]……会長 的味道。……咳，没什么。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……靠这么近，我会当真的。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……手，牵着吧。就今天。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……别走开。……再待一会儿。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……！突然抱过来……不行，太狡猾了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……就、就一小会儿。别人看不见吧。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……会長 的味道。……咳，没什么。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
     '\0\s[0]记录核对完了。……你也，早点休息。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
     '\0\s[0]今天 0 件。……我陪你一起看。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
     '\0\s[1]……今天的 会長，有点可靠。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
@@ -62,8 +62,8 @@ OnTiaraIntro {
 
 OnNadeNade {
     '\0\s[0]……手放在头上是什么意思。……解释一下。\e'
-    '\0\s[6]……随你便。反正，我也不会躲。\e'
-    '\0\s[6]……那个。也不是……讨厌。\e'
+    '\0\s[1]……随你便。反正，我也不会躲。\e'
+    '\0\s[1]……那个。也不是……讨厌。\e'
 }
 
 OnMouseWheel {
@@ -118,7 +118,7 @@ OnAiTalk {
 }
 
 今日 {
-    '\0\s[4]2026-11-10 周二 · 今天没有在追的排片。\e'
+    '\0\s[2]2026-11-10 周二 · 今天没有在追的排片。\e'
 }
 
 積み {
@@ -126,7 +126,7 @@ OnAiTalk {
 }
 
 つづき {
-    '\0\s[4]今天没有下一部已定时的番。……要不要看看补番清单？\e'
+    '\0\s[2]今天没有下一部已定时的番。……要不要看看补番清单？\e'
 }
 
 OnSecondChange {
