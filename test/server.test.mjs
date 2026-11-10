@@ -181,14 +181,23 @@ test('本季能显示分钟级平台时刻，详情保存后周表与桌宠共�
   t.after(() => srv.child.kill());
   const post = (url, body) => req(srv.port, url, { method: 'POST', body });
   const airing = async () => (await req(srv.port, '/api/season/airing?q=' + q)).json.airings[id];
+  const original = async (query = '') => (await req(srv.port, '/api/schedule/original' + query)).json.airings[id];
   assert.equal((await airing()).time_cst, '23:12');
   assert.equal((await airing()).platform, '测试平台');
+  const { weekday, hour, minute } = cstParts(start);
+  const slot = { weekday, time_cst: [hour, minute].map(n => String(n).padStart(2, '0')).join(':') };
+  assert.deepEqual(await original('?q=' + q), slot);
   await post('/api/season/apply', { q, add: [id] });
+  assert.deepEqual(await original(), slot, '在追未设置提醒也能读到原播周档');
+  const lookup = await post('/api/schedule/lookup', { id, original_only: true });
+  assert.equal(lookup.json.candidates.length, 1);
+  assert.equal(lookup.json.candidates[0].platform, null);
   assert.equal((await post('/api/season/time', { id, time: '23:10' })).status, 400);
   assert.equal((await req(srv.port, '/api/watch/detail?id=' + id)).json.airing.time_cst, '23:12');
   const saved = await post('/api/season/time', { id, weekday: 1, time: '25:30' });
   assert.equal(saved.json.rebuilt, true);
   assert.equal((await airing()).source, '本地排期');
+  assert.deepEqual(await original(), slot, '自订提醒不改变公开原播周档');
   assert.equal(cstParts(new Date((await airing()).next)).hour, 1);
   const snapshot = JSON.parse(await fs.readFile(path.join(root, 'data/today.json'), 'utf8'));
   assert.equal(snapshot.all_shows.find(w => String(w.id) === id).time_cst, '01:30');
@@ -221,6 +230,46 @@ test('最新一话起点、撤销统计和单番备份恢复', async t => {
   assert.equal((await readLib(root)).watching.find(w => w.id === '554779').ep_status, 0);
 });
 
+test('桌宠原播周档跟随时制，临时调档和提醒单独计算', async t => {
+  const root = await makeFixture();
+  const lib = {
+    watching: [
+      { id: '554779', name_cn: '深夜档', eps: 12, ep_status: 4, air_weekday: 1, air_time_cst: '02:15' },
+      { id: 'custom', name_cn: '自订档', air_weekday: 2, air_time_cst: '25:10' },
+      { id: 'platform', name_cn: '仅平台', air_weekday: 2, air_time_cst: '23:12', schedule_source: 'bangumi-data · 测试平台' },
+      { id: 'ended', name_cn: '结束排片', schedule_ended: true },
+    ],
+    paused: [{ id: 'paused' }], archived: [{ id: 'archived' }],
+    weekday: { 1: [{ id: '554779', name_cn: '深夜档', time_cst: '02:15' }] },
+  };
+  await fs.writeFile(path.join(root, 'data/library.json'), JSON.stringify(lib));
+  await fs.mkdir(path.join(root, 'cache/bgm'), { recursive: true });
+  await fs.writeFile(path.join(root, 'cache/bgm/broadcast.json'), JSON.stringify({
+    at: Date.now(),
+    items: [{ title: '深夜档', broadcast: 'R/2026-01-04T17:30:00Z/P7D', sites: [{ site: 'bangumi', id: '554779' }] }],
+  }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const route = '/api/schedule/desktop';
+  const desktop = async () => (await req(srv.port, route)).json;
+  assert.deepEqual((await desktop()).rows.map(({ id, weekday, time, source }) => [id, weekday, time, source]), [
+    ['custom', 2, '25:10', 'custom'], ['554779', 7, '25:30', 'original'], ['platform', 0, '', ''],
+  ]);
+  const set = await req(srv.port, '/api/settings', { method: 'POST', body: { clock: '24h' } });
+  assert.equal(set.status, 200);
+  assert.deepEqual((await desktop()).rows.map(({ id, weekday, time }) => [id, weekday, time]), [
+    ['554779', 1, '01:30'], ['custom', 3, '01:10'], ['platform', 0, ''],
+  ]);
+  const original = await req(srv.port, '/api/schedule/original');
+  assert.deepEqual(original.json.airings['554779'], { weekday: 1, time_cst: '01:30' });
+  const state = await req(srv.port, '/api/state');
+  assert.equal(state.json.week[1][0].time_cst, '02:15');
+  const skip = await req(srv.port, '/api/watch/schedule', { method: 'POST', body: { id: '554779', action: 'skip' } });
+  assert.equal(skip.status, 200);
+  assert.equal((await desktop()).rows[0].time, '01:30');
+  assert.equal((await req(srv.port, '/api/state')).json.week[1].some(row => row.id === '554779'), false);
+});
+
 test('调档只移动一档、结束排片仍可补番、静音只取消提醒', async t => {
   const root = await makeFixture();
   const srv = await startServer(root);
@@ -232,13 +281,16 @@ test('调档只移动一档、结束排片仍可补番、静音只取消提醒',
   assert.equal(saved.status, 200);
   const state = async () => (await req(srv.port, '/api/state')).json;
   const slots = async () => Object.values((await state()).week).flat().filter(row => String(row.id) === id);
+  const recurring = async () => Object.values((await state()).weekly).flat().find(row => String(row.id) === id);
   const schedule = (action, more) => post('/api/watch/schedule', { id, action, ...more });
   assert.equal((await schedule('skip')).status, 200);
   assert.deepEqual(await slots(), []);
+  assert.equal((await recurring()).time_cst, '23:30');
   const todayAt = cstParts(new Date(Date.now() + 3600000)).date + 'T23:45';
   const moved = await schedule('move', { at: todayAt });
   assert.equal(moved.status, 200);
   assert.equal((await slots())[0].time_cst, '23:45');
+  assert.equal((await recurring()).time_cst, '23:30');
   assert.equal((await schedule('mute', { muted: true })).json.detail.reminder_muted, true);
   const calendar = (await req(srv.port, '/api/export')).text;
   assert.match(calendar, /T234500/);

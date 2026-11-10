@@ -11,6 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mergeLibrary, mergeSeason, weekdayMap, parseResponse, decodeChunked, httpGet } from '../lib/bgm.mjs';
+import { gzipSync } from 'node:zlib';
 import { expectedEpisode } from '../lib/today.mjs';
 import { remainingEpisodes } from '../lib/watch-start.mjs';
 
@@ -122,6 +123,15 @@ test('parseResponse：普通响应', () => {
   assert.equal(r.status, 200);
   assert.equal(r.headers['content-type'], 'application/json');
   assert.equal(r.body.toString(), '{"a":1}');
+});
+
+test('parseResponse：CONNECT 隧道收到分块 gzip 时还原排期 JSON', () => {
+  const compressed = gzipSync(Buffer.from('{"items":[{"title":"分钟级排期"}]}'));
+  const header = Buffer.from('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n');
+  const parts = [compressed.subarray(0, 8), compressed.subarray(8)];
+  const chunks = parts.flatMap(chunk => [Buffer.from(chunk.length.toString(16) + '\r\n'), chunk, Buffer.from('\r\n')]);
+  const response = parseResponse(Buffer.concat([header, ...chunks, Buffer.from('0\r\n\r\n')]));
+  assert.deepEqual(JSON.parse(response.body), { items: [{ title: '分钟级排期' }] });
 });
 
 test('decodeChunked / parseResponse：分块传输', () => {

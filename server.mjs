@@ -20,7 +20,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildToday, timeline, summarize, cstParts, reminders, DEFAULT_SETTINGS, toMin, expectedEpisode, scheduledWeek } from './lib/today.mjs';
+import { buildToday, timeline, summarize, cstParts, reminders, DEFAULT_SETTINGS, toMin, expectedEpisode, scheduledWeek, displayClock } from './lib/today.mjs';
 import { fetchSeason, fetchSubject, mergeLibrary, mergeSeason, seasonOf, seasonRange, weekdayFromInfobox, httpGet } from './lib/bgm.mjs';
 import { readSeasonCache, writeSeasonCache, listCachedSeasons, hasSeasonCache } from './lib/season-cache.mjs';
 import { coverIdOf, coverCachePath, pickCoverUrl, COVER_MAX_AGE } from './lib/cover.mjs';
@@ -418,6 +418,7 @@ async function apiState(req, res) {
         return { count: list.length, shows: list };
       })(),
       week: slimWeek(Object.fromEntries(scheduledWeek(lib, now).map(day => [day.weekday, day.rows]))),
+      weekly: slimWeek(lib.weekday || {}),
       watching_count: (lib.watching || []).length,
       paused: lib.paused ?? [],
       archived: lib.archived ?? [],
@@ -965,7 +966,7 @@ async function apiScheduleLookup(req, res) {
   if ((!name && !id) || name.length > 160) return json(res, { error: '请先填番名，再查开播时间' }, 400, req);
   try {
     const config = await readBgmConfig();
-    const candidates = await lookupBroadcast({ root: ROOT, name, id, proxy: config.proxy });
+    const candidates = await lookupBroadcast({ root: ROOT, name, id, proxy: config.proxy, originalOnly: body.original_only === true });
     json(res, { ok: true, candidates }, 200, req);
   } catch {
     json(res, { error: '暂时连不上排期数据源。你可以先手填时刻，稍后再试。' }, 502, req);
@@ -1300,6 +1301,58 @@ async function apiSeason(req, res) {
 function watchAiring(detail, since) {
   const next = nextScheduledUpdate(detail, new Date(), since);
   return next ? { next, source: detail.schedule_source || '本地排期' } : null;
+}
+
+async function apiOriginalSchedule(req, res) {
+  if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
+  const q = new URL(req.url, 'http://127.0.0.1').searchParams.get('q');
+  if (q != null && !/^\d{4}Q[1-4]$/.test(q)) return json(res, { error: '季度无效' }, 400, req);
+  let ids;
+  if (q) {
+    const cached = await readSeasonCache(ROOT, q);
+    ids = (cached?.items || []).map(item => item.id);
+  } else {
+    const lib = await readLibrary(ROOT);
+    ids = (lib.watching || []).concat(Object.values(lib.weekday || {}).flat()).map(item => item.id);
+  }
+  ids = ids.filter(id => /^\d+$/.test(String(id)));
+  const config = await readBgmConfig();
+  try {
+    const found = await broadcastSuggestions(ROOT, ids, { proxy: config.proxy, online: true, originalOnly: true });
+    const airings = Object.fromEntries(Object.entries(found).map(([id, item]) => [id, {
+      weekday: item.weekday, time_cst: item.time_cst,
+    }]));
+    return json(res, { ok: true, airings }, 200, req);
+  } catch {
+    return json(res, { error: '暂时无法刷新原播周档' }, 502, req);
+  }
+}
+
+async function apiDesktopSchedule(req, res) {
+  if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
+  const lib = actualSchedule(await readLibrary(ROOT));
+  const active = lib.watching.filter(w => !w.schedule_ended);
+  const { clock } = await readSettings();
+  const { proxy } = await readBgmConfig();
+  let warning = '';
+  const airings = await broadcastSuggestions(ROOT, active.map(w => w.id).filter(id => /^\d+$/.test(String(id))),
+    { proxy, online: true, originalOnly: true }).catch(() => {
+    warning = '原播周档暂时无法读取。';
+    return {};
+  });
+  const rows = active.map(w => {
+    const id = String(w.id);
+    const original = airings[id];
+    const platformOnly = /^bangumi-data ·/.test(w.schedule_source || '');
+    const local = platformOnly ? null : scheduleRow(lib, w);
+    const weekday = original?.weekday ?? local?.day ?? (platformOnly ? null : w.air_weekday);
+    const time = original?.time_cst ?? (platformOnly ? '' : (local ? local.row.time_cst : w.air_time_cst));
+    const slot = displayClock(time, weekday, clock);
+    return { id, name: w.name_cn || w.name || id, weekday: slot.weekday_disp || 0, time: slot.time_disp,
+      source: original ? 'original' : time ? 'custom' : '', seen: w.ep_status ?? 0, total: w.eps ?? 0 };
+  });
+  rows.sort((a, b) => (a.weekday || 8) - (b.weekday || 8) || (a.time || '99:99').localeCompare(b.time || '99:99'));
+  return json(res, { rows, clock, warning }, 200, req);
 }
 
 async function apiSeasonAiring(req, res) {
@@ -1749,6 +1802,8 @@ const server = http.createServer(async (req, res) => {
     if (url === '/api/watch/lifecycle') return await apiWatchLifecycle(req, res);
     if (url === '/api/watch/schedule') return await apiWatchSchedule(req, res);
     if (url === '/api/schedule/lookup') return await apiScheduleLookup(req, res);
+    if (url === '/api/schedule/original') return await apiOriginalSchedule(req, res);
+    if (url === '/api/schedule/desktop') return await apiDesktopSchedule(req, res);
     if (url === '/api/watch') return await apiWatch(req, res);
     if (url.startsWith('/api/sync')) return await apiSync(req, res);
     if (url.startsWith('/api/settings')) return await apiSettings(req, res);

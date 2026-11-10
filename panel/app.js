@@ -28,6 +28,11 @@
   var SEASON_Q = '';
   var SEASON_ERR = '';
   var seasonRequest = 0;
+  var ORIGINAL = {};
+  var originalRequest = null;
+  var originalKey = '';
+  var originalAt = 0;
+  var originalWarning = '';
   /** 本季筛选条件（放在这里，refresh 重绘后不会被 reset） */
   var SEASON_FILTER = { onlyTv: true, hideWatching: false, onlyTodo: false, sortBy: 'weekday' };
   var COVER = { sm: [28, 38], md: [36, 48], lg: [46, 62], xl: [58, 78] };
@@ -164,15 +169,6 @@
   }
   function paintClock() { $('#clockBtn').textContent = CLOCK === '30h' ? '30h' : '24h'; }
 
-  /** 用原始北京时间判断是否开播，显示制式只影响排版。 */
-  function airStatus(time, weekday) {
-    if (!STATE || Number(weekday) !== Number(STATE.weekday)) return '';
-    var m = /^(\d{1,2}):(\d{2})$/.exec(String(time || ''));
-    if (!m) return '';
-    var now = new Date(Date.now() + 8 * 3600000);
-    return Number(m[1]) * 60 + Number(m[2]) <= now.getUTCHours() * 60 + now.getUTCMinutes() ? 'aired' : 'next';
-  }
-
   /** 封面尺寸：小 / 中 / 大 / 特大（记在 localStorage） */
   function setCover(key) {
     var size = COVER[key] || COVER.md;
@@ -257,6 +253,7 @@
           (STATE.generated ? new Date(STATE.generated).toLocaleTimeString('zh-CN', { hour12: false }) : '—') +
           (STATE.server && STATE.server.pid ? ' · pid ' + STATE.server.pid : '');
         render();
+        loadOriginal();
       })
       .catch(function (e) {
         if (STATE) return offlineNote(e);   // 已经有内容：只提示，不拆页面
@@ -265,6 +262,30 @@
           '<br /><br />先跑 <b>node server.mjs --port 7788</b>，或用「打开番组表.bat」。<br />' +
           '起好服务后点上面的「重试」。</div></div>';
       });
+  }
+
+  function loadOriginal() {
+    var ids = new Set((STATE.watching || []).map(function (w) { return String(w.id); }));
+    Object.values(STATE.weekly || {}).forEach(function (rows) {
+      rows.forEach(function (row) { ids.add(String(row.id)); });
+    });
+    var key = Array.from(ids).filter(function (id) { return /^\d+$/.test(id); }).sort().join(',');
+    if (!key || originalRequest || (key === originalKey && Date.now() - originalAt < 10 * 60 * 1000)) return;
+    originalRequest = json('/api/schedule/original').then(function (result) {
+      ORIGINAL = result.airings || {};
+      originalKey = key;
+      originalAt = Date.now();
+      originalWarning = '';
+      if ((TAB === 'week' || TAB === 'today') && !$('#view').contains(document.activeElement)) render();
+    }).catch(function (error) {
+      originalWarning = scheduleErrorText(error);
+    }).finally(function () {
+      originalRequest = null;
+      var warning = $('#weekScheduleStatus');
+      if (warning) warning.textContent = originalWarning;
+      var originalLabel = $('#watchOriginal');
+      if (originalLabel) originalLabel.textContent = watchOriginalText(originalLabel.dataset.id);
+    });
   }
 
   // ---------------- 渲染 ----------------
@@ -323,18 +344,19 @@
     }
     var timeHtml = '<div class="show-time"><span class="t' + (x.time ? '' : ' unknown') + '">' +
       esc(x.time || '时刻未定') + '</span>' +
-      (opts.wdLabel ? '<span class="wk">' + esc(opts.wdLabel) + '</span>' : '') +
-      (x.status ? '<span class="air-state ' + x.status + '">' + (x.status === 'aired' ? '已播' : '待播') + '</span>' : '') + '</div>';
-    return '<div class="show' + (x.mine ? '' : ' dim') + (x.sel ? ' sel' : '') + '"' +
+      (x.timeLabel ? '<span class="time-label">' + esc(x.timeLabel) + '</span>' : '') +
+      (opts.wdLabel ? '<span class="wk">' + esc(opts.wdLabel) + '</span>' : '') + '</div>';
+    return '<div class="show' + (opts.ticket ? ' show-ticket' : '') + (x.mine ? '' : ' dim') + (x.sel ? ' sel' : '') + '"' +
       (x.mine ? ' data-card="' + esc(x.id) + '"' : '') + '>' +
+      (opts.ticket ? timeHtml : '') +
       cover(x.id, x.name) +
-      '<div class="body">' + timeHtml +
+      '<div class="body">' + (opts.ticket ? '' : timeHtml) +
       '<div class="nm" title="' + esc(x.name) + '">' + watchTitle(x.id, x.name, x.mine) +
       (x.fresh ? ' <span class="chip fresh" title="总话数刚变多">新</span>' : '') + '</div>' +
       (meta.length ? '<div class="meta">' + esc(meta.join(' · ')) + '</div>' : '') +
       (x.mine && x.total ? '<div class="prog' + (pct >= 100 ? ' full' : '') + '"><i style="width:' + pct + '%"></i></div>' : '') +
-      ops +
-      '</div></div>';
+      (opts.ticket ? '' : ops) +
+      '</div>' + (opts.ticket ? ops : '') + '</div>';
   }
 
   function watchTitle(id, name, editable) {
@@ -365,29 +387,43 @@
     var t = STATE;
     var watch = {};
     (t.watching || []).forEach(function (w) { watch[String(w.id)] = w; });
-    var buckets = {};
+    var buckets = { 0: [] };
+    var listed = new Set();
     WEEK_ORDER.forEach(function (d) { buckets[d] = []; });
-    WEEK_ORDER.forEach(function (d) {
-      ((t.week && t.week[d]) || []).forEach(function (x) {
-        var w = watch[String(x.id)];
-        var mine = !!w;
-        if (!all && !mine) return;
-        if (!match(x) && !(mine && match(w))) return;
-        var dd = dispShow(x.time_cst, d);
-        var bucket = dd.wd || d;
-        if (!buckets[bucket]) return;
-        var total = w ? num(w.eps) : 0;
-        var watched = w ? num(w.ep_status) : 0;
-        buckets[bucket].push({
-          id: x.id, name: x.name_cn || x.name || String(x.id),
-          time: dd.time, status: airStatus(x.time_cst, d), mine: mine, watched: watched, total: total,
-          left: w ? watchGap(w, total) : 0,
-          behind: w ? watchGap(w, w.expected_eps) : 0,
-          priority: w && w.priority,
-          fresh: isFresh(w),
-          sel: SEL === String(x.id)
-        });
+    function add(x, w, day, time) {
+      if (!match(x) && !(w && match(w))) return;
+      var id = String(x.id);
+      var origin = ORIGINAL[id];
+      var fromPlatform = w && /^bangumi-data ·/.test(w.schedule_source || '');
+      if (origin) {
+        day = origin.weekday;
+        time = origin.time_cst;
+      } else if (fromPlatform) {
+        day = 0;
+        time = '';
+      }
+      var slot = dispShow(time, day);
+      var total = w ? num(w.eps) : 0;
+      var watched = w ? num(w.ep_status) : 0;
+      (buckets[slot.wd] || buckets[0]).push({
+        id: x.id, name: x.name_cn || x.name || String(x.id),
+        time: slot.time, timeLabel: origin ? '原播更新' : time ? '自订排片' : '', mine: !!w, watched: watched, total: total,
+        left: w ? watchGap(w, total) : 0, behind: w ? watchGap(w, w.expected_eps) : 0,
+        priority: w && w.priority, fresh: isFresh(w), sel: SEL === id
       });
+      listed.add(id);
+    }
+    WEEK_ORDER.forEach(function (d) {
+      ((t.weekly && t.weekly[d]) || []).forEach(function (x) {
+        var id = String(x.id);
+        var w = watch[id];
+        if ((!all && !w) || listed.has(id)) return;
+        add(x, w, d, x.time_cst);
+      });
+    });
+    Object.values(watch).forEach(function (w) {
+      if (listed.has(String(w.id)) || w.schedule_ended) return;
+      add(w, w, num(w.air_weekday), w.air_time_cst);
     });
     Object.keys(buckets).forEach(function (d) {
       buckets[d].sort(function (a, b) {
@@ -400,25 +436,22 @@
     return buckets;
   }
 
-  function boardHtml(buckets, opts) {
-    opts = opts || {};
+  function boardHtml(buckets) {
     var today = num(STATE.weekday);
     var total = 0;
-    var cols = WEEK_ORDER.map(function (d) {
+    var cols = WEEK_ORDER.concat(buckets[0].length ? [0] : []).map(function (d) {
       var list = buckets[d] || [];
       total += list.length;
       var isToday = today === d;
-      var day = new Date(Date.parse(STATE.date + 'T00:00:00Z') + (d - today) * 86400000);
-      var shortDate = isNaN(day.getTime()) ? '' : (day.getUTCMonth() + 1) + '/' + day.getUTCDate();
-      var head = '<div class="dhead"><b>周' + CN[d] + '</b><span class="day-date">' + shortDate + '</span>' +
+      var head = '<div class="dhead"><b>' + (d ? '周' + CN[d] : '时段待定') + '</b>' +
         (isToday ? '<span class="now">今天</span>' : '') +
         '<span class="n">' + list.length + ' 部</span></div>';
       var body = list.length
-        ? list.map(function (x) { return showCard(x, { now: isToday, wdLabel: '' }); }).join('')
+        ? list.map(function (x) { return showCard(x, { ticket: true }); }).join('')
         : '<div class="dempty">' + (q() ? '没有匹配' : '—') + '</div>';
-      return '<section class="dcol' + (isToday ? ' today' : '') + (list.length ? '' : ' day-empty') + '">' + head + '<div class="dbody">' + body + '</div></section>';
+      return '<section id="weekDay' + d + '" class="dcol' + (isToday ? ' today' : '') + (list.length ? '' : ' day-empty') + '">' + head + '<div class="dbody">' + body + '</div></section>';
     }).join('');
-    if (!total && !opts.keepEmpty) {
+    if (!total) {
       if (q()) {
         return '<div class="panel"><div class="empty">没有匹配「' + esc(QUERY.trim()) + '」的番。' +
           '<br />换个关键词，或把搜索框清空。</div></div>';
@@ -428,16 +461,27 @@
         '<div class="empty-actions"><button class="primary" data-new-watch>手动添加</button>' +
         '<button data-goto="season">去本季选番</button></div></div></div>';
     }
-    return '<div class="board">' + cols + '</div>';
+    return '<div class="board board-week">' + cols + '</div>';
   }
 
   function viewWeek() {
     var buckets = weekBuckets(WEEK_ALL);
-    var bar = '<div class="fbar">' +
-      '<label><input type="checkbox" id="weekAll"' + (WEEK_ALL ? ' checked' : '') + ' /> 连本季一起看</label>' +
-      '<span class="sep"></span><span>' + (WEEK_ALL ? '整季排片，灰的是没在追的' : '只列在追的番') + '</span>' +
+    var today = num(STATE.weekday);
+    var index = WEEK_ORDER.map(function (d) {
+      var count = buckets[d].length;
+      return '<button type="button" data-week-day="' + d + '"' + (d === today ? ' class="is-today"' : '') +
+        (count ? '' : ' disabled') + '><span>周' + CN[d] + '</span><b>' + count + '</b></button>';
+    }).join('');
+    var bar = '<div class="fbar week-controls">' +
+      '<label><input type="checkbox" id="weekAll"' + (WEEK_ALL ? ' checked' : '') + ' /> 同时显示未追番剧</label>' +
+      '<span>' + (WEEK_ALL ? '放送表与在追番剧' : '我的在追番剧') + '</span>' +
       '</div>';
-    return '<div class="sec"><div class="sec-head"><h2>本周排片</h2></div>' + bar + boardHtml(buckets) + '</div>';
+    return '<section class="sec week-view"><div class="week-hero">' +
+      '<div><span class="view-kicker">TIARA / 每周放送簿</span><h2>我的排片</h2>' +
+      '<p>原播周档 · 北京时间</p><p id="weekScheduleStatus" role="status">' + esc(originalWarning) + '</p></div>' +
+      '<div class="hero-stamp"><span>今日 · 周' + CN[today] + '</span><strong>' + (buckets[today] || []).length +
+      '</strong><span>部原播或自订排片</span></div></div>' +
+      '<nav class="week-index" aria-label="按星期跳转">' + index + '</nav>' + bar + boardHtml(buckets) + '</section>';
   }
 
   function viewToday() {
@@ -448,14 +492,16 @@
 
     var todayList = today.length
       ? today.map(function (s) {
+        var origin = ORIGINAL[String(s.id)];
+        var slot = origin ? dispShow(origin.time_cst, origin.weekday) : dispShow(s.time_cst, t.weekday);
         return showCard({
-          id: s.id, name: s.name_cn || s.name, time: dispShow(s.time_cst, t.weekday).time,
-          status: s.time_cst ? (s.aired ? 'aired' : 'next') : '',
+          id: s.id, name: s.name_cn || s.name, time: slot.time,
+          timeLabel: origin ? '周' + CN[slot.wd] + '原播' : '提醒',
           mine: true, watched: num(s.watched_eps), total: num(s.total_eps),
           left: watchGap({ ep_status: s.watched_eps, start_episode: s.start_episode }, s.total_eps), behind: num(s.behind), priority: s.priority
         });
       }).join('')
-      : '<div class="empty" style="padding:14px 16px;text-align:left">今天没有你的番。去「本季」挑几部，或用「本周」看整周排片。</div>';
+      : '<div class="empty" style="padding:14px 16px;text-align:left">今天没有排定提醒。去「我的排片」看整周放送。</div>';
 
     // 接下来：优先三天卡片；能播的日子太少就摊成本周剩下的列表
     var b = weekBuckets(false);
@@ -467,14 +513,14 @@
       strip = '<div class="board" style="grid-template-columns: repeat(' + Math.min(3, upcoming.length) + ', minmax(0, 1fr))">' +
         upcoming.slice(0, 3).map(function (x) {
           var d = x.d;
-          var label = d === order[0] ? '明天' : (d <= num(t.weekday) ? '下周' : '周') + CN[d];
+          var label = '周' + CN[d];
           return '<div class="dcol">' +
             '<div class="dhead"><b>' + label + '</b><span class="n">' + x.list.length + ' 部</span></div>' +
             '<div class="dbody">' + x.list.map(function (s) { return showCard(s, {}); }).join('') + '</div></div>';
         }).join('') + '</div>';
     } else if (upcoming.length) {
       strip = '<div class="panel"><div class="pb tight list">' + upcoming.map(function (x) {
-        var label = x.d === order[0] ? '明天' : (x.d <= num(t.weekday) ? '下周' : '周') + CN[x.d];
+        var label = '周' + CN[x.d];
         return '<div class="dayrow" style="padding:6px 12px">' + label +
           '<span style="float:right;color:var(--mute)">' + x.list.length + ' 部</span></div>' +
           x.list.map(function (s) { return showCard(s, {}); }).join('');
@@ -496,16 +542,18 @@
       : '<div class="empty" style="padding:4px 0;text-align:left">统计读不到（历史日志可能不在了），不影响记一话。</div>';
 
     var watching = watch.map(function (w) {
+      var origin = ORIGINAL[String(w.id)];
+      var slot = origin && dispShow(origin.time_cst, origin.weekday);
       return showCard({
         id: w.id, name: w.name_cn || w.name,
-        time: dispShow(w.air_time_cst, w.air_weekday).time,
+        time: slot && slot.time,
         mine: true, watched: num(w.ep_status), total: num(w.eps),
         left: watchGap(w, w.eps),
         behind: watchGap(w, w.expected_eps),
         priority: w.priority,
         fresh: isFresh(w),
         sel: SEL === String(w.id)
-      }, { wdLabel: w.air_weekday ? '周' + CN[w.air_weekday] : '不定期' });
+      }, { wdLabel: slot ? '周' + CN[slot.wd] + '原播' : '' });
     }).join('');
 
     var catchupHtml = catchup.map(function (w) {
@@ -550,9 +598,9 @@
 
     return '<div class="cols">' +
       '<div>' + welcome +
-      '<div class="sec"><div class="sec-head"><h2>今天放送</h2><span class="count">' + today.length + '</span></div>' +
+      '<div class="sec"><div class="sec-head"><h2>今日提醒清单</h2><span class="count">' + today.length + '</span></div>' +
       '<div class="panel"><div class="pb tight list">' + todayList + '</div></div></div>' +
-      (strip ? '<div class="sec"><div class="sec-head"><h2>接下来</h2><span class="note">只列在追的</span></div>' +
+      (strip ? '<div class="sec"><div class="sec-head"><h2>在追周档</h2><span class="note">北京时间</span></div>' +
         strip + '</div>' : '') +
       '</div>' + aside + '</div>';
   }
@@ -608,7 +656,7 @@
       '<button class="primary" id="applyBtn">加入在追</button>' +
       '</div>';
     return '<div class="sec"><div class="sec-head"><h2>本季番剧</h2>' +
-      '<span class="note">选番加入在追，开播时刻可在行内补充</span></div>' +
+      '<span class="note">原播周档 · 北京时间</span></div>' +
       '<div class="panel">' + bar + '<div id="seasonBody">' + seasonBodyHtml() + '</div></div></div>';
   }
 
@@ -652,10 +700,14 @@
       });
     }
     if (QUERY) list = list.filter(match);
+    function broadcastDay(x) {
+      var airing = (j.airings || {})[String(x.id)];
+      return airing ? dispShow(airing.time_cst, airing.weekday).wd : x.weekday || 0;
+    }
     list.sort(function (a, b) {
       if (sortBy === 'rating') return num(b.rating) - num(a.rating);
       if (sortBy === 'name') return String(a.name_cn || a.name).localeCompare(String(b.name_cn || b.name), 'zh');
-      var aw = a.weekday || 9, bw = b.weekday || 9;
+      var aw = broadcastDay(a) || 9, bw = broadcastDay(b) || 9;
       return aw - bw || String(a.date || '').localeCompare(String(b.date || ''));
     });
 
@@ -664,7 +716,7 @@
 
     // 分组计数先算一遍，别在每一行里再 filter 整表
     var perDay = {};
-    list.forEach(function (x) { var d = x.weekday || 0; perDay[d] = (perDay[d] || 0) + 1; });
+    list.forEach(function (x) { var d = broadcastDay(x); perDay[d] = (perDay[d] || 0) + 1; });
 
     // 按放送日分组（只有按放送日排序时才分组）
     var rows = '';
@@ -675,7 +727,7 @@
       var inactive = inactiveById.get(id);
       var tracked = w || (inactive && inactive.entry);
       var mark = !!SEASON_MARK[id];
-      var wd = x.weekday || 0;
+      var wd = broadcastDay(x);
       if (sortBy === 'weekday' && wd !== lastW) {
         lastW = wd;
         var label = wd ? '周' + CN[wd] : '放送日未定';
@@ -684,8 +736,8 @@
         rows += '<tr class="dayrow' + (isToday ? ' today' : '') + '"><td colspan="6">' + label +
           '<span class="n">' + n + ' 部</span></td></tr>';
       }
-      var meta = [x.date ? '首播 ' + x.date : '', (x.tags || []).slice(0, 3).join(' / '), x.platform || ''].filter(Boolean).join(' · ');
-      var airing = w && w.airing || (!tracked || w && !w.schedule_manual && !w.schedule_ended ? (j.airings || {})[id] : null);
+      var meta = [(x.tags || []).slice(0, 3).join(' / '), x.platform || ''].filter(Boolean).join(' · ');
+      var airing = (j.airings || {})[id];
       var opCell;
       if (w) {
         var tt = num(w.eps);
@@ -711,7 +763,7 @@
         '<td class="nm-cell">' +
         '<div class="nm" title="' + esc(x.name_cn || x.name) + '">' + watchTitle(id, tracked ? tracked.name_cn || tracked.name : x.name_cn || x.name, !!tracked) + '</div>' +
         '<div class="meta">' + esc(meta) + '</div>' +
-        (!inactive ? '<div class="meta season-airing">' + esc(formatAiring(airing) || '更新时间未公布') + '</div>' : '') +
+        '<div class="meta season-airing">' + esc(formatAiring(airing) || (j.airings ? '暂无原播周档' : '—')) + '</div>' +
         '<div class="meta season-mobile-meta">' +
         (x.eps ? esc(x.eps) + ' 话' : '话数未定') + (x.rating ? ' · 评分 ' + num(x.rating).toFixed(1) : '') + '</div></td>' +
         '<td class="cn">' + (x.eps ? esc(String(x.eps)) + ' 话' : '—') + '</td>' +
@@ -721,7 +773,7 @@
 
     // 服务端会把拉取失败的原始错误塞进 warning（含 ECONNREFUSED 127.0.0.1:7890 这种），
     // 对用户没意义：换成一句能照做的，细节留给「诊断」页。
-    var warn = j.warning ? String(j.warning) : SEASON_ERR || j.airingWarning;
+    var warn = j.warning ? String(j.warning) : SEASON_ERR;
     var warnText = '';
     if (warn) {
       warnText = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|proxy|socket hang up/i.test(warn)
@@ -730,7 +782,8 @@
     }
     var info = '<div class="fbar" style="padding:10px 14px;border-bottom:1px solid var(--line)">' +
       esc(j.q || '') + ' 共 ' + (j.total || list.length) + ' 部 · 显示 ' + list.length + ' 部 · ' +
-      (j.source === 'net' ? '刚拉取' : '来自缓存') + esc(warnText) + '</div>';
+      (j.source === 'net' ? '刚拉取' : '来自缓存') + esc(warnText) +
+      '<span id="seasonScheduleStatus" role="status">' + esc(seasonScheduleStatus(j)) + '</span></div>';
 
     return info + '<table class="grid">' +
       '<thead><tr><th class="ck"></th><th class="pc"></th><th>番名</th>' +
@@ -758,18 +811,22 @@
           bindSeason();
         }
         if (!SEASON || !SEASON.items.length) return;
-        return json('/api/season/airing?q=' + encodeURIComponent(SEASON_Q)).then(function (schedule) {
+        return json('/api/schedule/original?q=' + encodeURIComponent(SEASON_Q)).then(function (schedule) {
           if (request !== seasonRequest || !SEASON) return;
           SEASON.airings = schedule.airings || {};
-          SEASON.airingWarning = schedule.warning;
-          if (TAB === 'season') {
-            var current = $('#seasonBody');
-            if (current && !current.contains(document.activeElement)) {
-              current.innerHTML = seasonBodyHtml();
-              bindSeason();
-            }
+        }).catch(function (error) {
+          if (request === seasonRequest && SEASON) SEASON.airingWarning = scheduleErrorText(error);
+        }).then(function () {
+          if (request !== seasonRequest || TAB !== 'season' || !SEASON) return;
+          var current = $('#seasonBody');
+          if (current && !current.contains(document.activeElement)) {
+            current.innerHTML = seasonBodyHtml();
+            bindSeason();
+          } else {
+            var status = $('#seasonScheduleStatus');
+            if (status) status.textContent = seasonScheduleStatus(SEASON);
           }
-        }).catch(function () {});
+        });
       })
       .catch(function (e) {
         if (request !== seasonRequest) return;
@@ -783,17 +840,36 @@
   }
 
   function formatAiring(airing) {
-    if (!airing || !airing.next) return '';
-    var at = new Date(airing.next);
-    if (!Number.isFinite(+at)) return '';
-    var date = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric',
-      weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
-    return '预计 ' + date + ' · ' + (airing.source || '本地排期');
+    if (!airing || !CN[airing.weekday] || !airing.time_cst) return '';
+    var slot = dispShow(airing.time_cst, airing.weekday);
+    return '每周' + CN[slot.wd] + ' ' + slot.time + ' 更新';
+  }
+
+  function scheduleErrorText(error) {
+    return error.status === 404
+      ? '网页服务版本较旧，请退出 TIARA 后重新打开，再刷新网页。'
+      : '原播周档暂时无法读取，请稍后重试。';
+  }
+
+  function seasonScheduleStatus(season) {
+    if (season.airingWarning) return season.airingWarning;
+    return !season.airings && season.items.length ? '正在读取原播周档…' : '';
+  }
+
+  function watchOriginalText(id) {
+    return formatAiring(ORIGINAL[id]) || (/^\d+$/.test(String(id)) &&
+      (originalWarning || (originalRequest ? '正在读取原播周档…' : ''))) || '暂无原播周档';
   }
 
   // ---------------- 交互 ----------------
   function bind() {
     var v = $('#view');
+    v.querySelectorAll('[data-week-day]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var section = $('#weekDay' + button.dataset.weekDay);
+        if (section) section.scrollIntoView({ block: 'start' });
+      });
+    });
 
     v.querySelectorAll('[data-goto]').forEach(function (el) {
       el.addEventListener('click', function () {
@@ -1243,7 +1319,7 @@
     var marker = $('#watchLoading');
     flushAllBumps();
     POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
-      if (marker.isConnected) showWatchForm(j.detail, j.airing);
+      if (marker.isConnected) showWatchForm(j.detail);
     }).catch(function (e) {
       if (marker.isConnected) openDlg('读不到番剧详情', '<p role="alert">' + esc(e.message || '请刷新后再试') + '</p>');
     });
@@ -1261,7 +1337,7 @@
     });
   }
 
-  function showWatchForm(detail, airing) {
+  function showWatchForm(detail) {
     var archived = detail.state === 'archived';
     var controls = '';
     if (detail.id) {
@@ -1286,9 +1362,10 @@
       (detail.start_episode > 1 ? '<p class="watch-wide watch-hint">补番从第 ' + esc(detail.start_episode) + ' 话开始。</p>' : '') +
       '<label class="watch-field">开播星期<select id="watchDay">' + opts + '</select></label>' +
       '<label class="watch-field">开播时间（北京时间）<input id="watchTime" type="text" maxlength="12" placeholder="如 23:30" aria-describedby="watchTimeHint" value="' + esc(detail.air_time_cst) + '" /></label>' +
-      (!archived && detail.id ? '<p class="watch-wide watch-hint">' +
-        esc(detail.schedule_ended ? '已停止排片，可继续补番' : formatAiring(airing) || '下一次更新时间未公布') +
-        (detail.reminder_muted ? ' · 提醒已静音' : '') + '</p>' : '') +
+      (detail.id ? '<p class="watch-wide original-note"><b>原播周档 · 北京时间</b><span id="watchOriginal" data-id="' +
+        esc(detail.id) + '">' + esc(watchOriginalText(detail.id)) + '</span></p>' : '') +
+      (!archived && (detail.schedule_ended || detail.reminder_muted) ? '<p class="watch-wide watch-hint">' +
+        (detail.schedule_ended ? '已停止排片，可继续补番' : '提醒已静音') + '</p>' : '') +
       '<p id="watchTimeHint" class="watch-wide watch-hint">时间可留空。周一 25:30 会排到周二 01:30。修改已看集数不会增加今日观看统计。</p>' +
       (archived ? '' : '<div class="watch-wide watch-lookup"><button type="button" id="watchLookup">联网查时刻</button>' +
       '<span class="watch-hint">来源 <a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">bangumi-data</a>（CC BY 4.0）</span></div>' +
@@ -1352,14 +1429,17 @@
       lookup.disabled = true;
       matches.textContent = '正在查周播时刻…';
       // This request only searches; it does not change the last library write or its undo target.
-      sendPost('/api/schedule/lookup', { id: detail.id, name: query }).then(function (j) {
+      sendPost('/api/schedule/lookup', { id: detail.id, name: query, original_only: true }).then(function (j) {
         if (!form.isConnected) return;
         if (!j.ok) { matches.textContent = j.error || '查时刻失败，可以手填后保存。'; return; }
         var candidates = j.candidates || [];
-        if (!candidates.length) { matches.textContent = '没有找到明确的周播时刻。可试试原名，或手填后保存。'; return; }
+        if (!candidates.length) {
+          matches.textContent = '暂无可用的原播周档。可检查番名，或手动设置提醒。';
+          return;
+        }
         matches.textContent = '';
         var hint = document.createElement('p');
-        hint.textContent = '请选择同一部番的周播时段（北京时间），临时调档以播放平台为准。';
+        hint.textContent = '原播周档 · 北京时间';
         matches.appendChild(hint);
         candidates.forEach(function (item) {
           var button = document.createElement('button');
@@ -1367,7 +1447,7 @@
           var label = document.createElement('strong');
           label.textContent = item.name;
           var caption = document.createElement('span');
-          caption.textContent = formatAiring(item) + (item.regions && item.regions.length ? ' · ' + item.regions.join('/') : '') +
+          caption.textContent = formatAiring(item) +
             (item.original_name !== item.name ? ' · ' + item.original_name : '');
           button.appendChild(label);
           button.appendChild(caption);
@@ -1420,7 +1500,9 @@
     });
     openDlg('调档与提醒',
       '<form id="scheduleForm"><p>' + esc(detail.name) + '</p>' +
-      (pending ? '<p class="note">' + esc(pending.at ? '已改期 · ' + formatAiring({ next: pending.at }) : '已跳过 ' + pending.date + ' 的周播档') + '</p>' : '') +
+      (pending ? '<p class="note">' + esc(pending.at ? '提醒已改到 ' + new Date(pending.at).toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai', hour12: false
+      }) : '已跳过 ' + pending.date + ' 的周播档') + '</p>' : '') +
       '<label class="row"><span>操作</span><select id="scheduleAction">' +
       '<option value="mute">' + (detail.reminder_muted ? '恢复单番提醒' : '静音此番') + '</option>' +
       (detail.schedule_ended ? '<option value="restart">恢复排片</option>' :
@@ -1757,7 +1839,7 @@
     function paintThemeChrome(t) {
       var eff = t === 'auto' ? (systemIsDark() ? 'dark' : 'light') : t;
       var meta = document.getElementById('themeColor');
-      if (meta) meta.setAttribute('content', eff === 'light' ? '#f4f6fa' : '#0e1116');
+      if (meta) meta.setAttribute('content', eff === 'light' ? '#f4effa' : '#161320');
     }
     function applyTheme(t) {
       var html = document.documentElement;

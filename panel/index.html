@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>TIARA · 番组表</title>
+<title>TIARA · 追番放送簿</title>
 <link rel="icon" type="image/png" sizes="64x64" href="./icon-64.png" />
 <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
-<meta name="theme-color" id="themeColor" content="#0e1116" />
+<meta name="theme-color" id="themeColor" content="#161320" />
 <meta name="description" content="TIARA：本地离线的番组管家。今天看什么、还差几话、下一集什么时候。" />
 <link rel="stylesheet" href="./style.css" />
 </head>
@@ -16,9 +16,9 @@
     <button id="netbarRetry" type="button">重试</button>
   </div>
   <header class="bar" id="panelHeader">
-    <div class="brand"><img class="avatar" src="./icon-64.png" alt="TIARA" width="26" height="26" /><span class="mark">TIARA</span><h1>番组表</h1></div>
+    <div class="brand"><img class="avatar" src="./icon-64.png" alt="" width="38" height="38" /><div><span class="mark">TIARA</span><h1>追番放送簿</h1></div></div>
     <nav class="tabs" aria-label="番组视图">
-      <button class="tab on" data-tab="week" aria-current="page">本周<span class="kbd" aria-hidden="true">1</span></button>
+      <button class="tab on" data-tab="week" aria-current="page">我的排片<span class="kbd" aria-hidden="true">1</span></button>
       <button class="tab" data-tab="today">今天<span class="kbd" aria-hidden="true">2</span></button>
       <button class="tab" data-tab="season">本季<span class="kbd" aria-hidden="true">3</span></button>
       <button class="tab" data-tab="library">番库<span class="kbd" aria-hidden="true">4</span></button>
@@ -27,8 +27,8 @@
     <div class="tools">
       <span class="date" id="dateLabel">—</span>
       <button id="pendingBtn" class="ghost" title="落后至少一话的番，点开看是哪几部" hidden>待看 0</button>
-      <input type="search" id="q" aria-label="筛选番剧" placeholder="筛番名 / 优先级 / 别名" />
-      <button id="clockBtn" title="30 小时制：凌晨 00:00–04:59 记为前一天 24:00–28:59">30h</button>
+      <input type="search" id="q" aria-label="筛选番剧" placeholder="搜索番名或别名" />
+      <button id="clockBtn" title="切换排期和提醒的时制。30 小时制将凌晨 00:00–04:59 显示为前一天 24:00–28:59">30h</button>
       <button id="addWatchBtn" data-new-watch class="primary" aria-label="手动添加番剧">新增</button>
       <button id="syncBtn">同步</button>
     </div>
