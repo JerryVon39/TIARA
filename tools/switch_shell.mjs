@@ -45,7 +45,7 @@ async function main() {
     console.error(`没有这套立绘：${want}（可选：${sets.join(', ')}）`);
     process.exit(1);
   }
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i <= 6; i++) {
     const src = path.join(SHELL, want, `surface${i}.png`);
     const dst = path.join(TARGET, `surface${i}.png`);
     try {

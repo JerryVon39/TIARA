@@ -61,20 +61,17 @@
 │  └─ archive/            # 历史 PLAN（v0.4–v0.9）与旧审查，只留档
 ├─ ghost/master/
 │  ├─ descript.txt        # SSP 人格描述
-│  ├─ words.txt           # 生成的台词事件（里々 兼容）
-│  └─ today.txt           # 生成的今日数据（键=值）
-├─ ghost-yaya/master/
 │  ├─ yaya.txt            # YAYA 配置（dic / charset）
-│  ├─ basis.dic           # 生成的台词事件（YAYA 写法，含 OnSecondChange 到点提醒）
+│  ├─ basis.dic           # 生成的台词事件（含 OnSecondChange 到点提醒）
+│  ├─ today.txt           # 桌宠读取的今日数据（键=值）
 │  └─ today.json          # 生成的整周排片表（含 all_shows）
 ├─ shell/
-│  ├─ master/             # 当前生效的立绘（surface0-5.png + talk.png）
+│  ├─ master/             # 当前生效的立绘（surface0-6.png + talk.png）
 │  └─ tiara2/             # 备用立绘组（switch_shell 可切）
 ├─ tools/
 │  ├─ build_today.mjs     # library.json → today.txt / today.json
-│  ├─ build_ghost.mjs     # talks.json + today → ghost/master/words.txt
-│  ├─ build_yaya.mjs      # talks.json + today → ghost-yaya/master/basis.dic
-│  ├─ pack_ssp.mjs        # 打 SSP 包（--yaya 出 YAYA 版）
+│  ├─ build_ghost.mjs     # talks.json + today → ghost/master/basis.dic、today.json
+│  ├─ pack_ssp.mjs        # 生成 SSP 人格安装包
 │  ├─ build_pet.mjs       # Pet.cs → Pet.exe（用系统自带 csc）
 │  ├─ sync_bangumi.mjs    # Bangumi 放送表 / 收藏 → library.json
 │  ├─ doctor.mjs          # 一键自检
@@ -511,90 +508,26 @@ node tools/switch_shell.mjs
 
 ## 10. SSP 伪春菜人格
 
-`ghost/` + `shell/master/` 就是一份标准的 SSP 人格目录：
+Ghost 使用 YAYA，从 `data/talks.json` 和番组库生成。双击 TIARA 打开案件簿，可以查看今日排片、今天下一部、补番清单，也可以闲聊、摸头和听自我介绍。困倦、思考、害羞分别使用 `surface4.png`、`surface5.png`、`surface6.png`，害羞用于 SSP 人格的互动台词。
 
-```
-ghost/master/descript.txt   # 名字等
-ghost/master/words.txt      # 事件 + 台词（里々 写法）
-ghost/master/today.txt      # 数据快照
-shell/master/               # 立绘
-```
-
-安装：把 `ghost/`、`shell/` 两个目录拷进 SSP 的对应位置（或解压打好的包），在 SSP 里选「TIARA」。
+### 10.1 生成与安装
 
 ```bash
-node tools/pack_ssp.mjs                # → dist/TIARA-ssp.zip（里々 版）
-node tools/pack_ssp.mjs --yaya         # → dist/TIARA-yaya.zip（YAYA 版，能到点提醒）
-node tools/pack_ssp.mjs --list         # 只看会打进去哪些文件
+node tools/build_today.mjs
+node tools/build_ghost.mjs
+node tools/pack_ssp.mjs
 ```
 
-- 是 **zip** 不是 `.nar`：`.nar` 得装 NSIS + narc 才能做；SSP 同样认「zip 里带 `ghost/` 和 `shell/`」，解压到 SSP 根目录即可。
-- **必须先有 SHIORI**：SSP 本体不带 SHIORI。里々 版把里々放进 `ghost/master/shiori/`（`shiori.dll` + `辞書.txt`）；YAYA 版放 `yaya.dll`。
-- `today.txt` / `today.json` 是快照，改完番组库记得 `build_today` + `build_ghost`（+ `build_yaya`）再重开 SSP。
+- 输出 `dist/TIARA-ssp.zip`。需要 `yaya.dll`（Tc608-3 或兼容版本）和 SHIORIES 的 `dic/system/yaya_base` 目录。
+- 把 ZIP 拖入 SSP，或把包内的 `ghost/` 和 `shell/` 解到 `SSP/ghost/tiara-yaya/`。DLL 放在该人格的 `ghost/master/`，系统字典放在 `ghost/master/yaya_base/`。下载地址见包内 `readme.txt`。
+- 包沿用原 YAYA 版的人格名称和目录，可原位更新。若 SSP 中还装有旧里々人格，可从 SSP 卸载 `tiara-satori`。
+- 改库、称呼或时制后，重新生成并更新已安装的人格，在 SSP 中重载。包内会带当次生成的排片和称呼快照。
 
-### 10.1 两个版本的区别
+### 10.2 YAYA 开播提醒
 
-| | 里々 版 | YAYA 版 |
-| --- | --- | --- |
-| 脚本 | `ghost/master/words.txt` | `ghost-yaya/master/basis.dic` |
-| 生成器 | `tools/build_ghost.mjs` | `tools/build_yaya.mjs` |
-| 读文件 | 不能 | 能（`FREADJSON`） |
-| 到点提醒 | 做不到，只能启动时念一次 | ✅ `OnSecondChange` 每 30 秒比对 |
-| 台词来源 | `data/talks.json` | 同一份 `data/talks.json` |
+YAYA 在 SSP 允许说话时每 30 秒读取一次 `today.json`。只处理北京时间快照所覆盖的七天内、自己在追且未静音的排片，并遵守临时调档日期。开播后五分钟内可播报，同一天同一部只提醒一次。
 
-`words.txt` / `basis.dic` 里现在有这些段：
-
-| 事件 | 内容 |
-| --- | --- |
-| `＊OnFirstBoot` / `OnFirstBoot` | 初次启动 |
-| `＊OnBoot` / `OnBoot` | 每次启动（随机一条问候 + 今日播报，几条轮换） |
-| `＊自己紹介` / `自己紹介` | 自我介绍 |
-| `＊OnNadeNade` / `OnNadeNade` | 摸头 |
-| `＊OnMouseWheel` / `OnMouseWheel` | 滚轮 |
-| `＊朝` / `＊昼` / `＊夜` | 时段问候（里々 里手动点也能测） |
-| `＊OnClose` / `OnClose` | 关闭 |
-| `＊OnMouseDoubleClick` / `OnMouseDoubleClick` | 双击 |
-| `＊ランダム` | 日常随机（里々 会随机挑一句） |
-| `＊積み` | 积压提醒，一部一条（名字和话数都写死，不依赖脚本） |
-| `＊今日` / `＊つづき` | 今日播报 / 下一部（方便手动测） |
-| `OnSecondChange` | 仅 YAYA 版：到点提醒 |
-
-### 10.2 YAYA 版怎么做到点提醒
-
-```
-ghost-yaya/master/yaya.txt     # dic, basis.dic / charset, UTF-8
-ghost-yaya/master/basis.dic    # 事件脚本（生成物，别手改）
-ghost-yaya/master/today.json   # 整周排片表快照（data/today.json 的副本）
-```
-
-`OnSecondChange` 每 30 秒跑一次：读 `today.json` 里的 `all_shows`，挑出「今天、这个周几、时间刚过去 0–4 分钟」且没提醒过的番，念一句「XX 开播了。别装没看见。」然后把这个 key 记进 `yayaDone`，同一话不会念第二遍。
-
-- `all_shows` 由 `lib/today.mjs` 的 `allShows()` 合并「在追列表」与「手写整周排片表」，按周几 + 时间排序、自动去重。
-- `FREADJSON` 的路径相对 `yaya.dll`，所以包里的 `today.json` 必须和 `yaya.txt` 同目录（`ghost/master/`）。
-- 缓存 10 分钟（`yayaAge > 600` 才重读），SSP 挂后台也不会一直读盘。
-
-**限制**：`today.txt` / `today.json` 都是**生成那一刻**的快照。改了番组库要重跑生成脚本并让 SSP 重新加载人格（见第 11 节）。
-
-### 10.3 和 SSP 共存（不是二选一）
-
-桌宠和 SSP **可以同时开**，两边读的是同一份数据，互不写对方：
-
-| | 桌宠 `pet/Pet.exe` | SSP 里的 TIARA |
-| --- | --- | --- |
-| 立绘 | `shell/master/` 的 6 个表情 + 分层叠加（`faces.json`） | 同一套 `surface0-5.png` |
-| 数据 | 实时读 `today.txt`，`data/library.json` 一改就重算 | 读打包进去的 `today.txt` 快照，要重新生成 |
-| 记账 | 能（点行 / 托盘「记一话」→ 本地面板服务） | 不能（SSP 侧只读） |
-| 到点提醒 | ✅ 60 秒轮询 | 只有 YAYA 版有（`OnSecondChange`） |
-| 启动 | 开机自启可勾 | 手动开 SSP |
-| 主题外观 | 一个窗口，随 `faces.json` | SSP 的 balloon / shell 由 SSP 决定 |
-
-共存时要注意三件小事：
-
-1. **别让两边同时改数据**。改库统一在面板或托盘做，SSP 侧只念不写，就不会打架。
-2. **重新生成再拾取**。改了番组库后跑 `node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_yaya.mjs`，然后在 SSP 里「重新载入人格」；桌宠不用重启，它 4 秒轮询 `today.txt` 的 mtime。
-3. **端口**。桌宠找面板服务时会从 `7788` 往上探到 `7799`，并读 `cache/panel_port.txt`；SSP 不碰端口，两边不会抢。
-
-桌面版补不了的「传统味」——分层立绘、事件总线、分区判定、变量与规则——已经按传统伪春菜的写法补进桌宠了（见 §7.2）；**SSP 侧保留「能塞进里々/YAYA 的最小集」**，不做重型移植，这样两套壳都能用同一份人格数据。
+SSP 的案件簿按快照展示。观看进度在桌宠或网页面板记录。
 
 ## 11. 命令行手册
 
@@ -604,9 +537,8 @@ ghost-yaya/master/today.json   # 整周排片表快照（data/today.json 的副�
 | --- | --- | --- |
 | `node server.mjs` | 起面板服务（同一份数据只跑一个；已在跑就打印地址退出） | `--port 9000` 指定端口并允许多开、`--root D:\data` 换数据目录、`--no-portfile` 不改写端口指针文件 |
 | `node tools/build_today.mjs` | 重算 `today.txt` / `today.json` | `--date 2026-11-06`（模拟某天）`--root`（算别的目录） |
-| `node tools/build_ghost.mjs` | 重算 `words.txt`（里々 版） | `--date …` |
-| `node tools/build_yaya.mjs` | 重算 `basis.dic` + `today.json`（YAYA 版） | `--check` 只做静态检查 |
-| `node tools/pack_ssp.mjs` | 打 SSP 包 | `--yaya`（YAYA 版）`--out` `--list` |
+| `node tools/build_ghost.mjs` | 重算 SSP 字典和提醒快照 | `--date …` `--check` |
+| `node tools/pack_ssp.mjs` | 打 SSP 包 | `--out` `--list` |
 | `node tools/build_pet.mjs` | 编译 `Pet.cs → Pet.exe` | – |
 | `node tools/sync_bangumi.mjs` | 从 Bangumi 拉放送表 + 收藏 | `--user`（中途也认库里的 user.bgm_user）`--proxy http://127.0.0.1:7890` `--take-progress` `--dry-run` `--fixture tools/fixtures` `--weekday-all` |
 | `node tools/season.mjs` | 命令行版本季表：列 / 勾 / 加入在追 | `--q 2026Q4` `--list` `--add 622288,665390` `--net` |
@@ -699,7 +631,7 @@ node tools/check_panel_ui.mjs   # 需要 Edge，会自己起一个无头实例�
 - Bangumi 日历提供放送星期和首播日。分钟级时刻来自手填或独立排期源，地区平台可能晚于原播。例行排期可写成 `23:30` 或次日的 `25:30`（上限 28:59）。
 - 面板要用 `http://127.0.0.1:<port>/` 打开。没有服务时桌宠会提示、面板会显示「读不到本地服务」加重试条——`file://` 下浏览器的同源策略挡掉 `fetch`，这是浏览器的规矩，不是 bug。
 - 服务端是**单实例**的：不显式 `--port` 启动时，发现已经有一只在跑就直接打印地址退出。想并存两只，加 `--force-new`（端口自己顺延，`cache/panel_port.txt` 跟着最后一只走）。
-- SSP 里：里々 版只能念生成时的快照；YAYA 版（§10.2）能到点提醒，但同样读的是快照，改了库要重新生成并重载人格。
+- SSP 里：案件簿和开播提醒使用生成时的快照，改库后需重新生成并重载人格（§10.2）。
 - 立绘只有 4 个表情；`sleepy` / `think` 是回退的（`sleepy→sad`、`think→normal`）。
 - 自动化测试覆盖写库、日程计算、发行包、撤销统计和 HTTP 接口。服务端测试使用临时库，部分用例运行真实的日程和人格生成脚本。
 

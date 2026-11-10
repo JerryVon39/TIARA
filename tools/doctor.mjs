@@ -44,7 +44,6 @@ const critical = [
   ['panel/index.html', true],
   ['data/library.json', true],
   ['data/talks.json', false],
-  ['ghost/master/words.txt', false],
   ['ghost/master/today.txt', false],
   ['pet/Pet.exe', false],
   ['pet/Pet.cs', false],
@@ -397,28 +396,28 @@ if (livePort != null && livePort !== PORT) {
   }
 }
 
-// ---------- 11. YAYA 版人格（到点提醒） ----------
+// ---------- 11. SSP 人格（到点提醒） ----------
 {
-  const yayaFiles = ['ghost-yaya/master/yaya.txt', 'ghost-yaya/master/basis.dic', 'ghost-yaya/master/today.json'];
+  const yayaFiles = ['ghost/master/yaya.txt', 'ghost/master/basis.dic', 'ghost/master/today.json'];
   const lack = [];
   for (const f of yayaFiles) if (!(await exists(f))) lack.push(f);
   if (lack.length) {
-    add('warn', 'YAYA 版人格', `缺 ${lack.join(', ')}（跑 node tools/build_yaya.mjs）`);
+    add('warn', 'SSP 人格', `缺 ${lack.join(', ')}（跑 node tools/build_ghost.mjs）`);
   } else {
-    const dic = await fs.readFile(path.join(ROOT, 'ghost-yaya/master/basis.dic'), 'utf8');
+    const dic = await fs.readFile(path.join(ROOT, 'ghost/master/basis.dic'), 'utf8');
     const hasTick = dic.includes('OnSecondChange');
     let shows = -1;
     try {
-      const j = await readJson('data/today.json');
+      const j = await readJson('ghost/master/today.json');
       shows = Array.isArray(j.all_shows) ? j.all_shows.length : -1;
     } catch {
-      /* today.json 缺失会在上一节报 */
+      /* 无法读取提醒快照时，下面会报告警告。 */
     }
     add(
       hasTick && shows > 0 ? 'ok' : 'warn',
-      'YAYA 版人格',
+      'SSP 人格',
       hasTick
-        ? `OnSecondChange 在，all_shows ${shows} 部（提醒靠 data/today.json）`
+        ? `OnSecondChange 在，all_shows ${shows} 部（提醒靠 ghost/master/today.json）`
         : 'basis.dic 里没有 OnSecondChange，到点不会提醒'
     );
   }
@@ -427,12 +426,12 @@ if (livePort != null && livePort !== PORT) {
 // ---------- 11.5 产物是否同步 ----------
 try {
   const a = await fs.stat(path.join(ROOT, 'data', 'today.json'));
-  const b = await fs.stat(path.join(ROOT, 'ghost-yaya/master/today.json'));
+  const b = await fs.stat(path.join(ROOT, 'ghost/master/today.json'));
   const lagMin = (a.mtimeMs - b.mtimeMs) / 60000;
   if (lagMin > 60) {
-    add('warn', 'YAYA 产物', `ghost-yaya 的 today.json 比 data/today.json 旧 ${Math.round(lagMin)} 分钟（跑 node tools/build_yaya.mjs）`);
+    add('warn', 'SSP 产物', `ghost/master/today.json 比 data/today.json 旧 ${Math.round(lagMin)} 分钟（跑 node tools/build_ghost.mjs）`);
   } else {
-    add('ok', 'YAYA 产物', 'today.json 与 data/today.json 同步');
+    add('ok', 'SSP 产物', 'ghost/master/today.json 与 data/today.json 同步');
   }
 } catch {
   /* 缺文件已在上一节报过 */

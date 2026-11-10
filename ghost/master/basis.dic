@@ -1,0 +1,163 @@
+// 番组管家 · tools/build_ghost.mjs 生成
+
+OnFirstBoot {
+    '\1\s[-1]\0\s[1]初次见面。学生会副会长，馬剃天愛星。……以后，请多指教。\n记录簿我收下了。以后 会長 的观看进度，由我来登记。……有意见吗？\n\n\q[今日排片,OnTiaraToday]\n\q[今天下一部,OnTiaraNext]\n\q[补番清单,OnTiaraBacklog]\n\q[聊一句,OnTiaraChat]\n\q[摸摸头,OnNadeNade]\n\q[关于副会长,OnTiaraIntro]\e'
+}
+
+OnBoot {
+    '\1\s[-1]\0\s[0]学生会，开始办公。……会長，今天的案件我确认过了。\n2026-11-10 周二 · 今天没有在追的排片。\e'
+    '\1\s[-1]\0\s[1]副会长，到任。……我回来了，会長。\n2026-11-10 周二 · 今天没有在追的排片。\e'
+    '\1\s[-1]\0\s[4]……会長。昨晚几点睡的，记录上可写着呢。\n2026-11-10 周二 · 今天没有在追的排片。\e'
+}
+
+OnMouseDoubleClick {
+    '\0\s[1]案件簿。……0 件，我陪你一件件看。\n\n\q[今日排片,OnTiaraToday]\n\q[今天下一部,OnTiaraNext]\n\q[补番清单,OnTiaraBacklog]\n\q[聊一句,OnTiaraChat]\n\q[摸摸头,OnNadeNade]\n\q[关于副会长,OnTiaraIntro]\e'
+    '\0\s[0]未处理 0 件。……不急，我记着。\n\n\q[今日排片,OnTiaraToday]\n\q[今天下一部,OnTiaraNext]\n\q[补番清单,OnTiaraBacklog]\n\q[聊一句,OnTiaraChat]\n\q[摸摸头,OnNadeNade]\n\q[关于副会长,OnTiaraIntro]\e'
+}
+
+OnTiaraToday {
+    '\0\s[4]2026-11-10 周二 · 今天没有在追的排片。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+}
+
+OnTiaraNext {
+    '\0\s[4]今天没有下一部已定时的番。……要不要看看补番清单？\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+}
+
+OnTiaraBacklog {
+    '\0\s[1]记录簿上没有积压。……今天可以休息了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+}
+
+OnTiaraChat {
+    '\0\s[6]……靠这么近，我会当真的。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[6]……手，牵着吧。就今天。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[6]……别走开。……再待一会儿。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[6]……！突然抱过来……不行，太狡猾了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[6]……就、就一小会儿。别人看不见吧。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[6]……会長 的味道。……咳，没什么。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]记录核对完了。……你也，早点休息。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]今天 0 件。……我陪你一起看。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……今天的 会長，有点可靠。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]……咳。没什么。只是觉得，这样也不错。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]这份记录，边角折了。……不过，我替你抚平了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]……累了就靠一会儿。学生会室，现在只有我们。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[3]……两个人的伞，那种事。……也不是不能想。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[3]……！刚、刚才那是业务之外的话。忘掉。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]今天的效率，我认可。……手，要握一下吗。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]记录要准确。……但你的事，我记得更清楚。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[3]……纸巾。……不、不是因为那个。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]这份资料相当不错。……跟你一样。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]……嗯？\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]在。……怎么了。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]……叫我做什么。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]手边的事先放下也行。……我等你。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……唔。手，别停。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[3]……这样，会让我分心的。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[1]……再一下。就一下。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+}
+
+OnTiaraIntro {
+    '\0\s[0]馬剃天愛星。学生会副会长。……会長 的观看记录，我保管着。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+    '\0\s[0]副会长为什么管番组表？……因为是工作。\n\n\q[返回案件簿,OnMouseDoubleClick]\e'
+}
+
+OnNadeNade {
+    '\0\s[0]……手放在头上是什么意思。……解释一下。\e'
+    '\0\s[6]……随你便。反正，我也不会躲。\e'
+    '\0\s[6]……那个。也不是……讨厌。\e'
+}
+
+OnMouseWheel {
+    '\0\s[3]……放大是要干什么。\e'
+    '\0\s[0]看着舒服就好。……随你。\e'
+}
+
+OnClose {
+    '\0\s[0]下班。……案件，别攒着。\-'
+}
+
+OnAiTalk {
+    '\0\s[0]记录核对完了。……你也，早点休息。\e'
+    '\0\s[0]今天 0 件。……我陪你一起看。\e'
+    '\0\s[1]……今天的 会長，有点可靠。\e'
+    '\0\s[0]……咳。没什么。只是觉得，这样也不错。\e'
+    '\0\s[0]这份记录，边角折了。……不过，我替你抚平了。\e'
+    '\0\s[0]……累了就靠一会儿。学生会室，现在只有我们。\e'
+    '\0\s[3]……两个人的伞，那种事。……也不是不能想。\e'
+    '\0\s[3]……！刚、刚才那是业务之外的话。忘掉。\e'
+    '\0\s[1]今天的效率，我认可。……手，要握一下吗。\e'
+    '\0\s[1]记录要准确。……但你的事，我记得更清楚。\e'
+    '\0\s[3]……纸巾。……不、不是因为那个。\e'
+    '\0\s[1]这份资料相当不错。……跟你一样。\e'
+    '\0\s[0]……嗯？\e'
+    '\0\s[0]在。……怎么了。\e'
+    '\0\s[0]……叫我做什么。\e'
+    '\0\s[0]手边的事先放下也行。……我等你。\e'
+    '\0\s[1]……唔。手，别停。\e'
+    '\0\s[3]……这样，会让我分心的。\e'
+    '\0\s[1]……再一下。就一下。\e'
+}
+
+自己紹介 {
+    '\0\s[0]馬剃天愛星。学生会副会长。……会長 的观看记录，我保管着。\e'
+    '\0\s[0]副会长为什么管番组表？……因为是工作。\e'
+}
+
+朝 {
+    '\0\s[1]早上好。……昨晚睡得好吗。\e'
+    '\0\s[1]早上了。先喝水。……我看着你喝完。\e'
+}
+
+昼 {
+    '\0\s[1]中午了。……吃过饭再说案子，我等你。\e'
+    '\0\s[1]午休时间。……趴一会儿也行，我看着。\e'
+}
+
+夜 {
+    '\0\s[1]傍晚了。今天也辛苦了。\e'
+    '\0\s[1]放学时间。……确认完案件，一起回去？\e'
+}
+
+今日 {
+    '\0\s[4]2026-11-10 周二 · 今天没有在追的排片。\e'
+}
+
+積み {
+    '\0\s[1]记录簿上没有积压。……今天可以休息了。\e'
+}
+
+つづき {
+    '\0\s[4]今天没有下一部已定时的番。……要不要看看补番清单？\e'
+}
+
+OnSecondChange {
+    if reference[3] != 1 { return }
+    _stamp = GETSECCOUNT
+    if _stamp >= tiaraLastPoll && _stamp - tiaraLastPoll < 30 { return }
+    tiaraLastPoll = _stamp
+    _data = FREADJSON("today.json")
+    if GETTYPE(_data) != 5 { return }
+    _list = _data["all_shows"]
+    if GETTYPEEX("_list") != 4 { return }
+    _t = GETTIME(_stamp, "+08:00")
+    _now = _t[4] * 60 + _t[5]
+    _day = _stamp - _now * 60 - _t[6]
+    _snapshot = GETSECCOUNT(_data["date"] + "T00:00:00+08:00")
+    if _snapshot < 0 || _day < _snapshot || _day >= _snapshot + 604800 { return }
+    _wd = _t[3]
+    if _wd == 0 { _wd = 7 }
+    if tiaraReminderDay != _day {
+        tiaraReminderDay = _day
+        tiaraReminderIds = ","
+    }
+    foreach _list ; _show {
+        if !_show["mine"] || _show["reminder_muted"] || _show["weekday"] != _wd { continue }
+        if _show["on_date"] && GETSECCOUNT(_show["on_date"] + "T00:00:00+08:00") != _day { continue }
+        _delay = _now - _show["min"]
+        if _delay < 0 || _delay > 4 { continue }
+        _key = "," + _show["id"] + ","
+        if _key _in_ tiaraReminderIds { continue }
+        tiaraReminderIds += _show["id"] + ","
+        '\0\s[1]' + SHIORI3FW.EscapeAllTags(_show["name_cn"]) + ' 开播了。……一起看？\e'
+        break
+    }
+}

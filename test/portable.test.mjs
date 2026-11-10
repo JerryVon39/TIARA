@@ -17,10 +17,11 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   await fs.mkdir(path.join(root, 'runtime'));
   await fs.copyFile(process.execPath, path.join(root, 'runtime', 'node.exe'));
   const secret = 'PRIVATE_FIXTURE_92726';
-  for (const rel of ['data/library.json', 'data/bgm.json', 'data/history.jsonl', 'data/state.json', 'data/backups/2026-11-09/bgm.json', 'data/undo/step-1.json', 'ghost/master/words.txt', 'ghost-yaya/master/basis.dic']) {
+  for (const rel of ['data/library.json', 'data/bgm.json', 'data/history.jsonl', 'data/state.json', 'data/backups/2026-11-09/bgm.json', 'data/undo/step-1.json', 'ghost/master/basis.dic', 'ghost/master/today.json', 'ghost/master/words.txt', 'ghost-yaya/master/basis.dic']) {
     await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
     await fs.writeFile(path.join(root, rel), JSON.stringify({ secret }));
   }
+  await fs.copyFile(path.join(source, 'ghost/master/descript.txt'), path.join(root, 'ghost/master/descript.txt'));
   await fs.copyFile(path.join(source, 'data/talks.json'), path.join(root, 'data/talks.json'));
   await pack();
   const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json')));
@@ -29,6 +30,7 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   assert.deepEqual(zip.filter(x => x.name.startsWith('data/')).map(x => x.name).sort(), allowed.sort());
   assert.equal(zip.some(x => x.data.includes(Buffer.from(secret))), false);
   assert.deepEqual(JSON.parse(zip.find(x => x.name === 'data/library.json').data).watching, []);
-  assert.ok(zip.some(x => x.name === 'ghost/master/today.txt'));
+  assert.deepEqual(zip.filter(x => x.name.startsWith('ghost')).map(x => x.name).sort(),
+    ['basis.dic', 'descript.txt', 'today.json', 'today.txt', 'yaya.txt'].map(name => `ghost/master/${name}`));
   assert.ok(zip.some(x => x.name === 'runtime/node.exe' && x.data.length > 0));
 });

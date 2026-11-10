@@ -1,6 +1,6 @@
 {
   "name": "tiara",
-  "version": "0.27.7",
+  "version": "0.27.8",
   "private": true,
   "description": "TIARA · 伪春菜番组管家（桌宠 + 本地网页面板 + SSP 人格）",
   "type": "module",
@@ -13,8 +13,8 @@
     "doctor": "node tools/doctor.mjs",
     "ci": "node tools/ci.mjs",
     "ui": "node tools/check_panel_ui.mjs",
-    "build": "node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_yaya.mjs && node tools/build_pet.mjs",
-    "pack": "node tools/pack_ssp.mjs && node tools/pack_ssp.mjs --yaya && node tools/pack_portable.mjs",
+    "build": "node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_pet.mjs",
+    "pack": "node tools/pack_ssp.mjs && node tools/pack_portable.mjs",
     "pack:portable": "node tools/pack_portable.mjs",
     "clean": "node tools/clean_cache.mjs",
     "restore": "node tools/restore_library.mjs --list",
