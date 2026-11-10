@@ -283,25 +283,165 @@ test('调档只移动一档、结束排片仍可补番、静音只取消提醒',
   const slots = async () => Object.values((await state()).week).flat().filter(row => String(row.id) === id);
   const recurring = async () => Object.values((await state()).weekly).flat().find(row => String(row.id) === id);
   const schedule = (action, more) => post('/api/watch/schedule', { id, action, ...more });
+  const reminder = async () => (await req(srv.port, '/api/watch/detail?id=' + id)).json.reminder;
+  assert.equal((await reminder()).status, 'scheduled');
   assert.equal((await schedule('skip')).status, 200);
   assert.deepEqual(await slots(), []);
   assert.equal((await recurring()).time_cst, '23:30');
   const todayAt = cstParts(new Date(Date.now() + 3600000)).date + 'T23:45';
   const moved = await schedule('move', { at: todayAt });
   assert.equal(moved.status, 200);
+  const at = new Date(todayAt + ':00+08:00').toISOString();
+  assert.deepEqual(await reminder(), { status: 'scheduled', at, moved: true });
   assert.equal((await slots())[0].time_cst, '23:45');
   assert.equal((await recurring()).time_cst, '23:30');
   assert.equal((await schedule('mute', { muted: true })).json.detail.reminder_muted, true);
+  assert.deepEqual(await reminder(), { status: 'muted' });
   const calendar = (await req(srv.port, '/api/export')).text;
   assert.match(calendar, /T234500/);
   assert.ok(!calendar.includes('VALARM'));
   assert.equal((await schedule('end')).status, 200);
+  assert.deepEqual(await reminder(), { status: 'ended' });
   assert.deepEqual(await slots(), []);
   assert.ok((await state()).catchup.some(row => String(row.id) === id));
   assert.equal((await post('/api/progress', { id, delta: 1 })).json.ep_status, 1);
   assert.equal((await schedule('restart')).status, 200);
   assert.equal((await slots())[0].time_cst, '23:45');
   assert.equal((await post('/api/settings', { quiet_start: '23:00', quiet_end: '07:00' })).status, 200);
+  assert.equal((await schedule('mute', { muted: false })).status, 200);
+  assert.deepEqual(await reminder(), { status: 'quiet', at });
+});
+
+test('迁移导出排除凭据，预览锁定源数据与目标数据，导入前留备份', async t => {
+  const root = await makeFixture();
+  const file = name => path.join(root, 'data', name);
+  const old = await readLib(root);
+  const credentials = { token: 'only-in-local-config', proxy: 'http://user:pass@localhost:1' };
+  await fs.writeFile(file('bgm.json'), JSON.stringify(credentials));
+  await fs.writeFile(file('settings.json'), JSON.stringify({ clock: '24h', access_token: 'hidden-setting' }));
+  await fs.mkdir(file('undo'));
+  await fs.writeFile(file('undo/step-migration-test.json'), '{}');
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (body) => req(srv.port, '/api/migration', { method: 'POST', body });
+  const initial = await req(srv.port, '/api/migration');
+  assert.deepEqual(initial.json.migration.settings, { clock: '24h' });
+  assert.doesNotMatch(initial.text, /only-in-local-config|hidden-setting|user:pass/);
+
+  const data = {
+    ...initial.json.migration,
+    settings: { clock: '30h', quiet_start: '23:00', quiet_end: '07:00' },
+    library: { ...old, watching: [{ ...old.watching[0], ep_status: 4, accessToken: 'hidden-row' }],
+      paused: [{ id: 'local-pause', ep_status: 5 }], archived: [{ id: 'local-archive', ep_status: 12 }] },
+    history: { 'history-2025.jsonl': [{ id: 'local-archive', date: '2025-01-01', delta: 1 }] },
+  };
+  const preview = async () => (await post({ preview: true, migration: data })).json;
+  let result = await preview();
+  const apply = (migration = data) => post({ migration, source: result.source, target: result.target });
+  assert.deepEqual(result.incoming, { watching: 1, paused: 1, archived: 1, history: 1 });
+  assert.equal((await apply({ ...data, settings: { clock: '24h' } })).status, 409);
+  assert.equal((await req(srv.port, '/api/settings', { method: 'POST', body: { clock: '30h' } })).status, 200);
+  assert.equal((await apply()).status, 409);
+  result = await preview();
+  const applied = await apply();
+  assert.equal(applied.status, 200);
+  const backup = JSON.parse(await fs.readFile(file('backups/' + applied.json.backup), 'utf8'));
+  assert.deepEqual(backup.library, old);
+  assert.equal((await readLib(root)).watching[0].ep_status, 4);
+  assert.deepEqual(JSON.parse(await fs.readFile(file('bgm.json'), 'utf8')), credentials);
+  assert.deepEqual(await fs.readdir(file('undo')), []);
+  const exported = (await req(srv.port, '/api/migration')).json.migration;
+  assert.deepEqual(exported.history, data.history);
+  assert.deepEqual(exported.settings, data.settings);
+  assert.doesNotMatch(JSON.stringify(exported), /hidden-row|hidden-setting|only-in-local-config/);
+});
+
+test('观看链接可新增、保留和清除，网页与桌宠只展示有效网址', async t => {
+  const root = await makeFixture();
+  await fs.writeFile(path.join(root, 'data/library.json'), '{"watching":[],"weekday":{}}');
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const base = { name: '观看入口验收番', eps: 3, ep_status: 1, air_weekday: 2, air_time_cst: '23:00' };
+  for (const watch_url of ['javascript:alert(1)', 'file:///C:/Windows/', 'https://user:password@example.org/',
+    'https://example.org/has space', 'https://example.org/\\bad', 42]) {
+    assert.equal((await post('/api/watch/detail', { ...base, watch_url })).status, 400);
+  }
+  const url = 'https://example.org/show?ep=2&quality=hd';
+  const add = await post('/api/watch/detail', { ...base, watch_url: url });
+  assert.equal(add.status, 201);
+  const id = add.json.detail.id;
+  const get = route => req(srv.port, route);
+  const detail = () => get('/api/watch/detail?id=' + id).then(r => r.json.detail);
+  assert.equal((await detail()).watch_url, url);
+  assert.equal((await get('/api/schedule/desktop')).json.rows[0].watch_url, url);
+  assert.equal((await get('/api/state')).json.watching[0].watch_url, url);
+  assert.equal((await post('/api/watch/detail', { ...base, id, ep_status: 3 })).json.detail.watch_url, url);
+  await post('/api/watch/lifecycle', { id, action: 'archive' });
+  assert.equal((await detail()).watch_url, url);
+  await post('/api/watch/lifecycle', { id, action: 'resume' });
+  assert.equal((await post('/api/watch/detail', { ...base, id, watch_url: null })).json.detail.watch_url, null);
+  assert.equal((await get('/api/schedule/desktop')).json.rows[0].watch_url, undefined);
+});
+
+test('导入中断后启动面板会回滚番库、设置和历史', async t => {
+  const root = await makeFixture();
+  const file = name => path.join(root, 'data', name);
+  const library = await fs.readFile(file('library.json'), 'utf8');
+  const original = { 'library.json': library, 'settings.json': '{"clock":"24h"}\n',
+    'history.jsonl': '{"date":"2026-01-01","delta":1}\n', 'history-2025.jsonl': null };
+  await fs.writeFile(file('.migration-pending.json'), JSON.stringify({ files: original }));
+  await fs.writeFile(file('library.json'), '{"watching":[]}\n');
+  await fs.writeFile(file('settings.json'), '{"clock":"30h"}\n');
+  await fs.writeFile(file('history-2025.jsonl'), '{"delta":99}\n');
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  assert.equal((await req(srv.port, '/api/state')).json.watching.length, 1);
+  for (const [name, data] of Object.entries(original)) {
+    if (data === null) await assert.rejects(fs.access(file(name)), { code: 'ENOENT' });
+    else assert.equal(await fs.readFile(file(name), 'utf8'), data);
+  }
+  await assert.rejects(fs.access(file('.migration-pending.json')), { code: 'ENOENT' });
+});
+
+test('迁移手账只带首次见面、好感和剧情，运行状态变化不会使预览失效', async t => {
+  const root = await makeFixture();
+  const file = name => path.join(root, 'data', name);
+  const writeState = state => fs.writeFile(file('state.json'), JSON.stringify(state));
+  const state = { vars: { first_seen: '2026-07-08', affinity: '27', token: 'local-only' },
+    left: 30, reminded: ['a'], recent_lines: ['on-this-machine'], focus_until: 123 };
+  await writeState(state);
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = body => req(srv.port, '/api/migration', { method: 'POST', body });
+  const get = async () => (await req(srv.port, '/api/migration')).json.migration;
+  const old = await get();
+  assert.deepEqual(old.companion, { first_seen: '2026-07-08', affinity: 27, stories: {} });
+  assert.doesNotMatch(JSON.stringify(old), /local-only|on-this-machine|focus_until/);
+  const companion = { first_seen: '2026-04-09', affinity: 64, stories: { 'first-page': 2, 'after-credits': 0 } };
+  const migration = { ...old, companion: { ...companion, stories: { ...companion.stories, injected: 1 }, access_token: 'hidden' } };
+  const preview = async () => (await post({ preview: true, migration })).json;
+  let plan = await preview();
+  assert.deepEqual(plan.incoming.companion, { first_seen: '2026-04-09', affinity: 64, stories: 2 });
+  const apply = () => post({ migration, source: plan.source, target: plan.target });
+  state.vars.affinity = '28';
+  await writeState(state);
+  assert.equal((await apply()).status, 409);
+  plan = await preview();
+  state.left = 60;
+  state.recent_lines.push('ambient update');
+  await writeState(state);
+  const applied = await apply();
+  assert.equal(applied.status, 200);
+  assert.deepEqual(JSON.parse(await fs.readFile(file('state.json'), 'utf8')), state);
+  assert.deepEqual((await get()).companion, companion);
+  const pending = JSON.parse(await fs.readFile(file('companion-import.json'), 'utf8'));
+  assert.deepEqual(pending.companion, companion);
+  const backup = JSON.parse(await fs.readFile(file('backups/' + applied.json.backup), 'utf8'));
+  assert.equal(backup.companion.affinity, 28);
+  await writeState({ ...state, companion_import: pending.id,
+    vars: { first_seen: companion.first_seen, affinity: '65' }, stories: { ...companion.stories, 'after-credits': 1 } });
+  assert.deepEqual((await get()).companion, { ...companion, affinity: 65, stories: { 'first-page': 2, 'after-credits': 1 } });
 });
 
 test('离线新增和详情编辑共用备份与撤销，跨日排期按实际日期生成', async t => {
