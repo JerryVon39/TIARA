@@ -48,7 +48,7 @@ if (!/^v\d+\.\d+\.\d+/.test(runtimeVersion) || Number(runtimeVersion.slice(1).sp
 
 /** 目录白名单：只有这些目录会被整目录带走 */
 const DIRS = [
-  'lib', 'panel', 'tools', 'ghost', 'ghost-yaya', 'shell', 'test', 'assets', 'docs',
+  'lib', 'panel', 'tools', 'ghost', 'shell', 'test', 'assets', 'docs',
 ];
 /** 根目录下的散文件 */
 const FILES = [
@@ -57,8 +57,8 @@ const FILES = [
 /** 永不打包 */
 const SKIP_EXT = new Set(['.log', '.bak', '.tmp', '.zip']);
 const SKIP_NAME = new Set(['node_modules', '.git', '.vscode', 'dist', 'cache', 'obj', 'bin']);
-const GENERATED = new Set(['ghost/master/today.txt', 'ghost/master/words.txt',
-  'ghost-yaya/master/today.json', 'ghost-yaya/master/basis.dic', 'ghost-yaya/master/yaya.txt']);
+const GENERATED = new Set(['ghost/master/today.txt', 'ghost/master/today.json',
+  'ghost/master/basis.dic', 'ghost/master/yaya.txt']);
 
 function walk(abs, rel, out) {
   let st;
@@ -73,10 +73,12 @@ function walk(abs, rel, out) {
     return;
   }
   const ext = path.extname(abs).toLowerCase();
-  if (GENERATED.has(rel.replace(/\\/g, '/'))) return;
+  const name = rel.replace(/\\/g, '/');
+  // 覆盖安装留下的旧里々字典可能包含个人台词和番组数据。
+  if (GENERATED.has(name) || name === 'ghost/master/words.txt') return;
   if (SKIP_EXT.has(ext)) return;
   if (/_portable|library\.json\.bak/.test(path.basename(abs))) return;
-  out.push({ name: rel.replace(/\\/g, '/'), data: fs.readFileSync(abs) });
+  out.push({ name, data: fs.readFileSync(abs) });
 }
 
 const files = [];
@@ -91,7 +93,7 @@ try {
   for (const [name, value] of Object.entries(defaults)) fs.writeFileSync(path.join(stage, 'data', name), JSON.stringify(value, null, 2) + '\n');
   fs.copyFileSync(path.join(ROOT, 'data/talks.json'), path.join(stage, 'data/talks.json'));
   if (fs.existsSync(path.join(ROOT, 'shell/master'))) fs.cpSync(path.join(ROOT, 'shell/master'), path.join(stage, 'shell/master'), { recursive: true });
-  for (const tool of ['build_today.mjs', 'build_ghost.mjs', 'build_yaya.mjs']) {
+  for (const tool of ['build_today.mjs', 'build_ghost.mjs']) {
     execFileSync(process.execPath, [path.join(ROOT, 'tools', tool), '--root', stage], { windowsHide: true, stdio: 'pipe' });
   }
   for (const name of ['data/library.json', 'data/settings.json', 'data/talks.json', 'data/today.json', ...GENERATED]) {

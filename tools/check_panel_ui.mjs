@@ -90,10 +90,10 @@ function restoreFiles() {
       }
     } catch (e) { /* ignore */ }
   }
-  // 库被还原了，但 today.txt / words.txt / basis.dic 还是测试期间生成的版本。
+  // 库被还原了，但桌宠快照与 SSP 字典仍是测试期间生成的版本。
   // 不重算就留下一份「跟库对不上」的产物，下次桌宠读到会念错数。
   if (dirty) {
-    for (const tool of ['build_today.mjs', 'build_ghost.mjs', 'build_yaya.mjs']) {
+    for (const tool of ['build_today.mjs', 'build_ghost.mjs']) {
       try { execFileSync(process.execPath, [path.join(root, 'tools', tool)], { cwd: root, stdio: 'ignore' }); }
       catch (e) { console.log('产物重算失败：' + tool + '（' + e.message + '）'); }
     }

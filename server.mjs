@@ -662,8 +662,7 @@ async function doRebuildToday() {
     return false;
   }
   const okGhost = await runTool('build_ghost.mjs');
-  await runTool('build_yaya.mjs'); // YAYA 版没装也不影响面板/桌宠
-  if (!okGhost) LAST_REBUILD_ERROR = 'build_ghost 失败，ghost/master/today.txt 没更新';
+  if (!okGhost) LAST_REBUILD_ERROR = 'build_ghost 失败，SSP 人格没能更新（细节见 诊断 → 服务日志）';
   return okGhost;
 }
 

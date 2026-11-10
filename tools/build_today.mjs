@@ -6,7 +6,7 @@
  *   node tools/build_today.mjs --date 2026-11-07
  *
  * 产出：
- *   ghost/master/today.txt   key=value 变量表（Pet.exe / YAYA / 自写 DLL 读这个）
+ *   ghost/master/today.txt   key=value 变量表（Pet.exe 读取）
  *   data/today.json          结构化快照（面板 / 调试 / 外部脚本用）
  *
  * 为什么要中间落一层文本：Pet.exe 是 .NET Framework 4 的 WPF 程序，
@@ -182,7 +182,7 @@ async function main() {
     catchup: t.catchup,
     reminders: rem,
     timeline: { aired: tl.aired, upcoming: tl.upcoming, next: tl.next, last: tl.last },
-    // 扁平整周表：YAYA 版 SSP 直接读它，按 weekday + min 和当前时间比
+    // 扁平整周表：build_ghost 会将快照复制给 SSP 按 weekday + min 提醒。
     all_shows: t.allShows ?? [],
     week,
   };

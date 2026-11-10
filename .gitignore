@@ -21,7 +21,7 @@ runtime/
 TIARA.nar
 
 dist/
-ghost-yaya/master/today.json
+ghost/master/today.json
 
 # ===== 个人配置与缓存（含 token / 可重拉，不入库）=====
 data/bgm.json

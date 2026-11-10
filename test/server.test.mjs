@@ -53,7 +53,7 @@ async function makeFixture() {
     await fs.writeFile(abs, text, 'utf8');
   }
   // 重建工具用桩：测试里不关心 today.txt，只关心接口的 rebuilt 语义
-  for (const name of ['build_today.mjs', 'build_ghost.mjs', 'build_yaya.mjs']) {
+  for (const name of ['build_today.mjs', 'build_ghost.mjs']) {
     await fs.mkdir(path.join(root, 'tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'tools', name), 'process.exit(0);\n', 'utf8');
   }
@@ -155,7 +155,7 @@ async function readLib(root) {
 
 async function installBuildTools(root) {
   await fs.cp(path.join(ROOT, 'lib'), path.join(root, 'lib'), { recursive: true });
-  for (const name of ['build_today.mjs', 'build_ghost.mjs', 'build_yaya.mjs']) {
+  for (const name of ['build_today.mjs', 'build_ghost.mjs']) {
     await fs.copyFile(path.join(ROOT, 'tools', name), path.join(root, 'tools', name));
   }
   await fs.copyFile(path.join(ROOT, 'data/talks.json'), path.join(root, 'data/talks.json'));
@@ -415,7 +415,11 @@ test('第五轮：标量、设置保留、撤销版本和真实重建', async t 
   assert.equal(a.json.rebuilt, true);
   assert.match(await fs.readFile(path.join(root, 'ghost/master/today.txt'), 'utf8'), /date=\d{4}-\d{2}-\d{2}/);
   assert.ok(JSON.parse(await fs.readFile(path.join(root, 'data/today.json'))));
-  assert.ok((await fs.stat(path.join(root, 'ghost-yaya/master/basis.dic'))).size > 0);
+  assert.match(await fs.readFile(path.join(root, 'ghost/master/basis.dic'), 'utf8'), /OnSecondChange/);
+  assert.deepEqual(
+    await fs.readFile(path.join(root, 'ghost/master/today.json')),
+    await fs.readFile(path.join(root, 'data/today.json')),
+  );
   await post('/api/progress', { id: 554779, delta: 1 });
   assert.equal((await post('/api/undo', { expected_revision: a.json.revision })).status, 409);
   assert.equal((await readLib(root)).watching[0].ep_status, 2);

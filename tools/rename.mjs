@@ -15,7 +15,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /**
  * 跳过：版本库/缓存/依赖/二进制目录。
  * `dist/` 里是 zip（二进制，改了就坏），改名后重打一遍即可：
- *   npm run pack   →  dist/TIARA-ssp.zip + dist/TIARA-yaya.zip + dist/TIARA-portable-*.zip
+ *   npm run pack   →  dist/TIARA-ssp.zip + dist/TIARA-portable-*.zip
  */
 const SKIP_DIRS = new Set([
   '.git', 'cache', 'node_modules', 'dist', 'runtime',
@@ -132,7 +132,7 @@ function main() {
     fs.renameSync(path.join(ROOT, from), path.join(ROOT, toName));
   }
   console.log(`\n已写入 ${hits.length} 个文件${renames.length ? '，并改名 ' + renames.length + ' 个' : ''}。`);
-  console.log('下一步：node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_yaya.mjs && node tools/build_pet.mjs');
+  console.log('下一步：node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_pet.mjs');
 }
 
 main();

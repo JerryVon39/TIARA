@@ -63,7 +63,7 @@ async function listBackups() {
 }
 
 function rebuild() {
-  const tools = ['build_today.mjs', 'build_ghost.mjs', 'build_yaya.mjs'];
+  const tools = ['build_today.mjs', 'build_ghost.mjs'];
   return tools.reduce((p, t) => p.then(() => new Promise((resolve) => {
     execFile(process.execPath, [path.join(ROOT, 'tools', t)], { timeout: 20000 }, (err, stdout, stderr) => {
       if (err) console.log(`  ✗ ${t}：${String(stderr || err.message).trim().split('\n').pop()}`);
