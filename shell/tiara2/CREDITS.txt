@@ -15,7 +15,7 @@ talk               ← 02_talking.png           说话（打字机吐字期间�
 说明
 ----
 · 五张原图都是 887×1774 RGBA、像素级对齐，所以不需要 --norm 归一，切换时不会有位移。
-· sleepy / think 没有对应素材，Pet 与面板都会自动退回 normal。
+· 本套附四张表情和一张口型帧。缺少专用表情时，程序使用现有表情代替。
 · talk.png 是这套新加的机制：Pet 在打字机吐字期间换成这张，打完再切回台词对应的表情
   （见 pet/Pet.cs 的 _talkImg 与 panel/index.html 的 setTalkingFace()）；
   别的立绘组没有 talk.png 就自动不启用，行为跟以前一样。

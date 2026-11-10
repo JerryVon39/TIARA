@@ -33,27 +33,6 @@
       "source": "03_surprised.png"
     },
     {
-      "face": "sleepy",
-      "idx": 4,
-      "file": "surface4.png",
-      "bytes": 159196,
-      "source": "05_sleepy.png"
-    },
-    {
-      "face": "think",
-      "idx": 5,
-      "file": "surface5.png",
-      "bytes": 160495,
-      "source": "06_thinking.png"
-    },
-    {
-      "face": "bashful",
-      "idx": 6,
-      "file": "surface6.png",
-      "bytes": 161324,
-      "source": "07_bashful.png"
-    },
-    {
       "face": "talk",
       "idx": -1,
       "file": "talk.png",
