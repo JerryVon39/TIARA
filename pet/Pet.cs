@@ -906,6 +906,7 @@ namespace UkagakaBangumi
             return new MenuItem
             {
                 Header = text,
+                Tag = "summary",
                 IsEnabled = false,
                 FontSize = size,
                 FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
@@ -926,101 +927,201 @@ namespace UkagakaBangumi
             return mi;
         }
 
-        /// <summary>
-        /// 右键菜单。
-        ///
-        /// 和以前那版平铺 11 项的区别：先给状态（今天几件、还没处理几件），
-        /// 再给「案件」子菜单——每一项一部番，点一下就是 +1 话；
-        /// 排障动作收进「上級」，不再和「说句话」并排。
-        /// </summary>
+        ResourceDictionary _petMenuStyles;
+
+        ResourceDictionary PetMenuStyles()
+        {
+            if (_petMenuStyles != null) return _petMenuStyles;
+            _petMenuStyles = (ResourceDictionary)System.Windows.Markup.XamlReader.Parse(@"
+<ResourceDictionary xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+                    xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+    <Style TargetType='ContextMenu'>
+        <Setter Property='OverridesDefaultStyle' Value='True'/>
+        <Setter Property='Template'>
+            <Setter.Value>
+                <ControlTemplate TargetType='ContextMenu'>
+                    <Border Background='#FFFFFF' BorderBrush='#C5D1DA' BorderThickness='1' CornerRadius='9' Padding='6'>
+                        <ScrollViewer MaxHeight='{TemplateBinding MaxHeight}' CanContentScroll='True' VerticalScrollBarVisibility='Auto'>
+                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation='Cycle'/>
+                        </ScrollViewer>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType='Separator'>
+        <Setter Property='Template'>
+            <Setter.Value>
+                <ControlTemplate TargetType='Separator'>
+                    <Border Height='1' Margin='7,4' Background='#DFE5EB'/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType='MenuItem'>
+        <Setter Property='Foreground' Value='#263440'/>
+        <Setter Property='MinWidth' Value='212'/>
+        <Setter Property='Template'>
+            <Setter.Value>
+                <ControlTemplate TargetType='MenuItem'>
+                    <Grid>
+                        <Border x:Name='Row' CornerRadius='5' MinHeight='31' Padding='5,3,9,3' Background='Transparent'>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width='21'/>
+                                    <ColumnDefinition Width='*'/>
+                                    <ColumnDefinition Width='18'/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name='Check' Visibility='Collapsed' Foreground='#16739D' VerticalAlignment='Center' Text='✓'/>
+                                <ContentPresenter Grid.Column='1' ContentSource='Header' RecognizesAccessKey='True' VerticalAlignment='Center'/>
+                                <TextBlock x:Name='Arrow' Grid.Column='2' Visibility='Collapsed' Foreground='#16739D' HorizontalAlignment='Right' VerticalAlignment='Center' Text='›'/>
+                            </Grid>
+                        </Border>
+                        <Popup x:Name='PART_Popup' Placement='Right' PlacementTarget='{Binding ElementName=Row}'
+                               IsOpen='{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}' AllowsTransparency='True'
+                               Focusable='False' PopupAnimation='None'>
+                            <Border Background='#FFFFFF' BorderBrush='#C5D1DA' BorderThickness='1' CornerRadius='8' Padding='5'>
+                                <ScrollViewer MaxHeight='420' CanContentScroll='True' VerticalScrollBarVisibility='Auto'>
+                                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation='Cycle'/>
+                                </ScrollViewer>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property='HasItems' Value='True'>
+                            <Setter TargetName='Arrow' Property='Visibility' Value='Visible'/>
+                        </Trigger>
+                        <Trigger Property='IsChecked' Value='True'>
+                            <Setter TargetName='Check' Property='Visibility' Value='Visible'/>
+                        </Trigger>
+                        <Trigger Property='IsHighlighted' Value='True'>
+                            <Setter TargetName='Row' Property='Background' Value='#FDEDF0'/>
+                        </Trigger>
+                        <Trigger Property='IsSubmenuOpen' Value='True'>
+                            <Setter TargetName='Row' Property='Background' Value='#FDEDF0'/>
+                        </Trigger>
+                        <Trigger Property='IsKeyboardFocused' Value='True'>
+                            <Setter TargetName='Row' Property='BorderBrush' Value='#16739D'/>
+                            <Setter TargetName='Row' Property='BorderThickness' Value='1'/>
+                        </Trigger>
+                        <Trigger Property='IsEnabled' Value='False'>
+                            <Setter Property='Foreground' Value='#5B6A75'/>
+                        </Trigger>
+                        <Trigger Property='Tag' Value='summary'>
+                            <Setter TargetName='Row' Property='Background' Value='#E7F2F8'/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>");
+            return _petMenuStyles;
+        }
+
+        sealed class MenuShow
+        {
+            public string Id, Name, Progress;
+            public bool Today;
+        }
+
+        List<MenuShow> ReadMenuShows()
+        {
+            var today = new HashSet<string>();
+            for (int i = 1; i <= I("count"); i++) today.Add(V("show" + i + "_id", ""));
+            var shows = new List<MenuShow>();
+            try
+            {
+                var lib = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(Path.Combine(_root, "data", "library.json"), Encoding.UTF8));
+                object entries;
+                var watching = lib != null && lib.TryGetValue("watching", out entries) ? AsList(entries) : null;
+                if (watching == null) return shows;
+                foreach (object entry in watching)
+                {
+                    var row = entry as Dictionary<string, object>;
+                    object id, name, seen, total;
+                    if (row == null || !row.TryGetValue("id", out id) || string.IsNullOrEmpty(Str(id))) continue;
+                    if (!row.TryGetValue("name_cn", out name) || string.IsNullOrEmpty(Str(name))) row.TryGetValue("name", out name);
+                    row.TryGetValue("ep_status", out seen);
+                    row.TryGetValue("eps", out total);
+                    shows.Add(new MenuShow
+                    {
+                        Id = Str(id), Name = string.IsNullOrEmpty(Str(name)) ? Str(id) : Str(name),
+                        Progress = (seen == null ? "0" : Str(seen)) + "/" + (total == null || Str(total) == "0" ? "?" : Str(total)),
+                        Today = today.Contains(Str(id))
+                    });
+                }
+            }
+            catch (Exception ex) { Log("read menu shows: " + ex.Message); }
+            return shows;
+        }
+
+        string MenuShowCaption(MenuShow show)
+        {
+            string name = show.Name.Length > 18 ? show.Name.Substring(0, 18) + "…" : show.Name;
+            return name + "   " + show.Progress + "   ＋1";
+        }
+
+        IEnumerable<MenuShow> QuickMenuShows(List<MenuShow> shows)
+        {
+            foreach (var show in shows) if (show.Today) yield return show;
+            foreach (var show in shows) if (!show.Today) yield return show;
+        }
+
         void BuildMenu()
         {
             var menu = new ContextMenu
             {
-                Background = Paper,
-                BorderBrush = Ink,
-                BorderThickness = new Thickness(2),
                 FontFamily = new FontFamily("Microsoft YaHei UI"),
                 FontSize = 13,
+                MaxHeight = Math.Max(160, CurrentWorkAreaDip().Height - 24),
                 Placement = PlacementMode.Mouse
             };
+            if (!SystemParameters.HighContrast)
+            {
+                var styles = PetMenuStyles();
+                menu.Resources.MergedDictionaries.Add(styles);
+                menu.Style = (Style)styles[typeof(ContextMenu)];
+            }
 
             int todayCount = I("count");
-            int pending = I("behind_count");
-
-            // —— 表头：她是谁、现在什么状况 ——
-            menu.Items.Add(Head(M("header", "{nickname} · 副会長室"), Ink, 12, true));
-            menu.Items.Add(Head(
-                todayCount > 0
-                    ? M("header_count", "今日 {count} 件 · 未処理 {pending} 件").Replace("{pending}", pending.ToString())
-                    : M("header_empty", "今日は静かです"),
-                pending > 0 ? Brushes.Firebrick : Brushes.Gray, 11, false));
+            menu.Items.Add(Head("TIARA  ·  今日提醒 " + todayCount + " 部",
+                SystemParameters.HighContrast ? SystemColors.MenuTextBrush : new SolidColorBrush(Color.FromRgb(0x16, 0x73, 0x9D)), 12, true));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Item("查看我的排片", (s, e) => { if (!PanelOpen) TogglePanel(); }));
+            menu.Items.Add(Item("打开网页面板", (s, e) => OpenWebPanel()));
+            var quick = new MenuItem { Header = "记一话" };
+            var shows = ReadMenuShows();
+            foreach (var show in QuickMenuShows(shows))
+            {
+                if (quick.Items.Count >= 8) break;
+                var item = Item(MenuShowCaption(show), (s, e) => BumpShow(show.Id, show.Name, 1));
+                item.ToolTip = show.Name;
+                quick.Items.Add(item);
+            }
+            if (quick.Items.Count == 0) quick.Items.Add(new MenuItem { Header = "还没有在追番剧", IsEnabled = false });
+            if (shows.Count > 8) quick.Items.Add(Item("在网页查看全部", (s, e) => OpenWebPanel()));
+            menu.Items.Add(quick);
+            menu.Items.Add(Item("撤销上一次记账", (s, e) => UndoLast()));
             menu.Items.Add(new Separator());
 
-            // —— 案件：一部番一行，点一下就记一话 ——
-            var cases = new MenuItem { Header = M("cases", "案件") };
-            if (todayCount == 0)
-            {
-                cases.Items.Add(new MenuItem { Header = M("case_none", "今日は案件なし"), IsEnabled = false });
-            }
-            else
-            {
-                for (int i = 1; i <= todayCount; i++)
-                {
-                    string sid = V("show" + i + "_id", "");
-                    string sname = V("show" + i + "_name", "第 " + i + " 部");
-                    string stime = TimeCell(V("show" + i + "_time_disp", V("show" + i + "_time", "")));
-                    var item = new MenuItem { Header = stime + "  " + sname };
-                    if (sid.Length == 0) { item.IsEnabled = false; }
-                    else
-                    {
-                        string cid = sid, cname = sname;
-                        item.Click += delegate { BumpShow(cid, cname, 1); };
-                    }
-                    cases.Items.Add(item);
-                }
-            }
-            menu.Items.Add(cases);
-
-            // —— 番組表 ——
-            menu.Items.Add(Sub(M("panel", "番組表"),
-                Item(M("panel_bubble", "气泡番組表"), (s, e) => TogglePanel()),
-                Item(M("panel_web", "網頁番組表"), (s, e) => OpenWebPanel()),
-                new Separator(),
-                Item(M("panel_refresh", "再計算"), (s, e) => RefreshData(true))));
-
-            menu.Items.Add(Item(M("say", "説句話"), (s, e) => { Say(PickRandom(), true); ScheduleIdleTalk(); }));
-            menu.Items.Add(Item(M("nade", "摸摸頭"), (s, e) => NadeSay()));
-            menu.Items.Add(new Separator());
-
-            // —— 業務：同步 + 上級（排障与开发动作） ——
-            var adv = Sub(M("advanced", "上級"),
-                Item(M("recalc", "重算今日数据"), (s, e) => RefreshData(true)),
-                Item(M("openfolder", "打开数据文件夹"), (s, e) => OpenFolder("data")),
-                Item(M("logs", "看服务日志"), (s, e) => OpenFolder("cache", "server.log")));
-
-            menu.Items.Add(Sub(M("biz", "業務"),
-                Item(M("sync", "同步 Bangumi"), (s, e) => SyncBangumi()),
-            Item(M("undo", "撤销上一次记账"), (s, e) => UndoLast()),
-                adv));
-
-            // —— 表示：层级 / 尺寸 ——
-            var layer = new MenuItem { Header = M("layer", "層級") };
+            menu.Items.Add(Sub("和她聊聊",
+                Item("说句话", (s, e) => { Say(PickRandom(), true); ScheduleIdleTalk(); }),
+                Item("摸摸头", (s, e) => NadeSay())));
+            var layer = new MenuItem { Header = "窗口层级" };
             AddLayerItem(layer, "置顶显示", "top");
             AddLayerItem(layer, "普通（会被其他窗口盖住）", "normal");
             AddLayerItem(layer, "沉底（贴桌面）", "bottom");
 
-            var size = new MenuItem { Header = M("size", "尺寸") };
+            var size = new MenuItem { Header = "桌宠尺寸" };
             AddScaleItem(size, "小（70%）", 0.7);
             AddScaleItem(size, "偏小（85%）", 0.85);
             AddScaleItem(size, "标准（100%）", 1.0);
             AddScaleItem(size, "偏大（125%）", 1.25);
             AddScaleItem(size, "大（150%）", 1.5);
 
-            menu.Items.Add(Sub(M("view", "表示"), layer, size));
-            menu.Items.Add(new Separator());
-
-            var power = new MenuItem { Header = "省电模式（不呼吸、4 帧）", IsCheckable = true, IsChecked = _powerSave };
+            var power = new MenuItem { Header = "省电模式", IsCheckable = true, IsChecked = _powerSave };
             power.Click += delegate
             {
                 _powerSave = power.IsChecked;
@@ -1029,8 +1130,6 @@ namespace UkagakaBangumi
                 SavePowerToSettings(_powerSave);
                 Say(new Line(_powerSave ? "……電力、節約します。" : "……呼吸、再開します。", 0), true);
             };
-            menu.Items.Add(power);
-
             var auto = new MenuItem { Header = "开机自启", IsCheckable = true, IsChecked = IsAutostartEnabled() };
             auto.Click += delegate
             {
@@ -1038,11 +1137,15 @@ namespace UkagakaBangumi
                 Log("autostart=" + auto.IsChecked);
                 Say(new Line(auto.IsChecked ? "……毎朝、出席します。" : "……朝は、不在にします。", 0), true);
             };
-            menu.Items.Add(auto);
-
-            menu.Items.Add(Item(M("hide", "隱藏到托盤"), (s, e) => HideToTray()));
+            menu.Items.Add(Sub("桌宠设置", layer, size, new Separator(), power, auto));
+            menu.Items.Add(Item("同步 Bangumi", (s, e) => SyncBangumi()));
+            menu.Items.Add(Sub("帮助与排错",
+                Item("重算今日数据", (s, e) => RefreshData(true)),
+                Item("打开数据文件夹", (s, e) => OpenFolder("data")),
+                Item("查看服务日志", (s, e) => OpenFolder("cache", "server.log"))));
             menu.Items.Add(new Separator());
-            menu.Items.Add(Item(M("quit", "退出"), (s, e) => BeginQuit()));
+            menu.Items.Add(Item("隐藏到托盘", (s, e) => HideToTray()));
+            menu.Items.Add(Item("退出 TIARA", (s, e) => BeginQuit()));
             ContextMenu = menu;
         }
 
@@ -1145,13 +1248,11 @@ namespace UkagakaBangumi
         {
             _popupCard = new Border
             {
-                Background = Paper,
-                BorderBrush = Ink,
-                BorderThickness = new Thickness(2),
-                Padding = new Thickness(0),
-                Width = 322,
-                MaxHeight = Math.Max(320, CurrentWorkAreaDip().Height * 0.78),
-                Effect = null
+                Background = ScheduleCanvas,
+                BorderBrush = ScheduleLine,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(4)
             };
             _popup = new Popup
             {
@@ -1162,6 +1263,11 @@ namespace UkagakaBangumi
                 AllowsTransparency = true,
                 HorizontalOffset = -12,
                 VerticalOffset = 0
+            };
+            _popup.Opened += delegate
+            {
+                Button first;
+                if (_scheduleControls.TryGetValue("schedule-week", out first)) first.Focus();
             };
         }
 
@@ -2722,145 +2828,316 @@ namespace UkagakaBangumi
         void TogglePanel()
         {
             if (_popup.IsOpen) { _popup.IsOpen = false; return; }
+            _showReminderList = false;
+            _scheduleDay = -1;
+            _scheduleFeedback = "";
             RefreshDesktopSchedule();
-            RefreshPopup();
+            RefreshPopup(false);
             _popup.IsOpen = true;
             Post("OnOpenPanel");
         }
 
+        static readonly Brush ScheduleInk = (Brush)new BrushConverter().ConvertFromString("#263440");
+        static readonly Brush ScheduleMuted = (Brush)new BrushConverter().ConvertFromString("#546674");
+        static readonly Brush ScheduleBlue = (Brush)new BrushConverter().ConvertFromString("#166B90");
+        static readonly Brush ScheduleWash = (Brush)new BrushConverter().ConvertFromString("#E7F2F8");
+        static readonly Brush SchedulePink = (Brush)new BrushConverter().ConvertFromString("#F09199");
+        static readonly Brush SchedulePinkWash = (Brush)new BrushConverter().ConvertFromString("#FDF0F2");
+        static readonly Brush ScheduleCanvas = (Brush)new BrushConverter().ConvertFromString("#F7F8FA");
+        static readonly Brush ScheduleLine = (Brush)new BrushConverter().ConvertFromString("#D7E2EA");
+        static readonly string[] ScheduleDays = { "待定", "周一", "周二", "周三", "周四", "周五", "周六", "周日" };
+
+        bool _showReminderList;
+        int _scheduleDay = -1;
+        ScrollViewer _scheduleScroll;
+        ControlTemplate _scheduleButtonTemplate;
+        readonly Dictionary<string, Button> _scheduleControls = new Dictionary<string, Button>();
+        readonly HashSet<string> _progressPending = new HashSet<string>();
+        string _scheduleFeedback = "";
+        int _scheduleRevision;
+
         UIElement BuildPanel()
         {
-            var root = new StackPanel { Background = Paper };
-            var head = new Border
+            var root = new DockPanel { Background = ScheduleCanvas, ClipToBounds = true };
+            root.SetValue(TextBlock.FontFamilyProperty, new FontFamily("Microsoft YaHei UI, Segoe UI"));
+            KeyboardNavigation.SetTabNavigation(root, KeyboardNavigationMode.Cycle);
+            root.PreviewKeyDown += delegate (object sender, KeyEventArgs e)
             {
-                Background = Paper,
-                BorderBrush = Ink,
-                BorderThickness = new Thickness(0, 0, 0, 2),
-                Padding = new Thickness(14, 10, 14, 9)
+                if (e.Key != Key.Escape) return;
+                _popup.IsOpen = false;
+                e.Handled = true;
             };
-            var hg = new Grid();
-            hg.Children.Add(new TextBlock
-            {
-                Text = M("panel_title", "今日案件"),
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 15,
-                FontWeight = FontWeights.Bold,
-                Foreground = Ink,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            hg.Children.Add(new TextBlock
-            {
-                Text = V("weekday_cn", "") + " · " + V("date", ""),
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 11.5,
-                Foreground = InkSoft,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            head.Child = hg;
-            root.Children.Add(head);
+            var toolbar = new StackPanel();
+            var titleBar = new DockPanel { Margin = new Thickness(13, 9, 10, 7) };
+            var close = ScheduleButton("×", "关闭排片", "schedule-close", false, () => _popup.IsOpen = false);
+            close.Width = 29;
+            DockPanel.SetDock(close, Dock.Right);
+            titleBar.Children.Add(close);
+            var title = new StackPanel();
+            title.Children.Add(ScheduleText("我的排片", 20, ScheduleInk, true));
+            var clock = _desktopSchedule == null ? V("clock", "30h") : _desktopSchedule.clock;
+            title.Children.Add(ScheduleText("原播周档   ·   北京时间   ·   " + (clock == "24h" ? "24 小时制" : "30 小时制"), 11, ScheduleMuted));
+            titleBar.Children.Add(title);
+            toolbar.Children.Add(titleBar);
 
-            int count = I("count");
-            root.Children.Add(SectionLabel("今日提醒 " + count + " 部"));
-            if (count > 0)
+            var tabs = new UniformGrid { Rows = 1, Margin = new Thickness(10, 0, 10, 7) };
+            tabs.Children.Add(ScheduleButton("每周排片", "每周排片", "schedule-week", !_showReminderList, () => SelectSchedule(false, -1)));
+            tabs.Children.Add(ScheduleButton("提醒与待补", "提醒与待补", "schedule-reminders", _showReminderList, () => SelectSchedule(true, -1)));
+            toolbar.Children.Add(tabs);
+            if (!_showReminderList)
             {
-                for (int i = 1; i <= count; i++)
+                var days = new UniformGrid { Columns = _popupCard.Width < 310 ? 4 : 8, Margin = new Thickness(10, 0, 10, 7) };
+                for (int d = -1; d <= 7; d++)
                 {
-                    string name = V("show" + i + "_name", "");
-                    if (name.Length == 0) continue;
-                    string eps = V("show" + i + "_eps", "");
-                    int behind = 0;
-                    int.TryParse(V("show" + i + "_behind", "0"), out behind);
-                    root.Children.Add(Row(TimeCell(V("show" + i + "_time_disp", V("show" + i + "_time", ""))), name, eps, behind > 0 ? "落后 " + behind : "在追", V("show" + i + "_id", "")));
+                    if (d == 0) continue;
+                    int day = d;
+                    string label = d < 0 ? "全周" : ScheduleDays[d];
+                    var button = ScheduleButton(label, label + (d == I("weekday") ? "，今天" : ""), "schedule-day-" + d,
+                        _scheduleDay == d, () => SelectSchedule(false, day));
+                    if (d == I("weekday") && _scheduleDay != d) button.Background = SchedulePinkWash;
+                    days.Children.Add(button);
                 }
+                toolbar.Children.Add(days);
             }
-            else
+            var header = new Border
             {
-                root.Children.Add(Note(M("panel_empty", "今天没有案件。要不要先清一点积压？")));
+                Background = Brushes.White, BorderBrush = ScheduleLine,
+                BorderThickness = new Thickness(0, 0, 0, 1), Child = toolbar
+            };
+            DockPanel.SetDock(header, Dock.Top);
+            root.Children.Add(header);
+
+            if (_scheduleFeedback.Length != 0)
+            {
+                var feedback = ScheduleText(_scheduleFeedback, 11, ScheduleBlue);
+                feedback.Margin = new Thickness(12, 6, 12, 5);
+                feedback.TextWrapping = TextWrapping.Wrap;
+                DockPanel.SetDock(feedback, Dock.Bottom);
+                root.Children.Add(feedback);
             }
 
-            // 欠着的：昨天以前该看没看的，放在「今天」和「接下来」之间——这才是每天真要做的事
-            int pending = I("behind_count");
-            if (pending > 0)
+            var list = new StackPanel { Margin = new Thickness(11, 4, 11, 9) };
+            if (_showReminderList) BuildReminderList(list);
+            else BuildWeeklyList(list);
+            _scheduleScroll = new ScrollViewer
             {
-                root.Children.Add(SectionLabel(M("panel_pending", "欠着的 " + pending + " 部")));
-                for (int i = 1; i <= Math.Min(pending, 5); i++)
-                {
-                    string pid = V("behind" + i + "_id", "");
-                    string pname = V("behind" + i + "_name", "");
-                    if (pname.Length == 0) continue;
-                    string pe = V("behind" + i + "_eps", "0");
-                    root.Children.Add(Row("+" + pe, pname, V("behind" + i + "_watched", "") + "/" + V("behind" + i + "_expected", ""), "欠 " + pe, pid));
-                }
-                if (pending > 5) root.Children.Add(Note("还有 " + (pending - 5) + " 部，在网页面板里看全表。"));
-            }
+                Content = list, Focusable = false,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            root.Children.Add(_scheduleScroll);
+            return root;
+        }
 
-            root.Children.Add(SectionLabel("我的排片 · 原播周档"));
-            if (_desktopScheduleError.Length > 0) root.Children.Add(Note(_desktopScheduleError));
-            if (_desktopSchedule == null)
+        void SelectSchedule(bool reminders, int day)
+        {
+            if (_showReminderList == reminders && _scheduleDay == day) return;
+            _showReminderList = reminders;
+            _scheduleDay = day;
+            RefreshPopup(false);
+        }
+
+        void BuildWeeklyList(Panel list)
+        {
+            if (_desktopScheduleError.Length > 0) list.Children.Add(ScheduleNote(_desktopScheduleError));
+            var schedule = _desktopSchedule;
+            if (schedule == null)
             {
                 if (_desktopSchedulePending && _desktopScheduleError.Length == 0)
-                    root.Children.Add(Note("正在读取原播周档…"));
+                    list.Children.Add(ScheduleNote("正在读取原播周档…"));
+                return;
             }
-            else
+            if (!string.IsNullOrEmpty(schedule.warning)) list.Children.Add(ScheduleNote(schedule.warning));
+            int last = -1;
+            foreach (var show in schedule.rows)
             {
-                var schedule = _desktopSchedule;
-                root.Children.Add(Note("北京时间 · " + (schedule.clock == "30h" ? "30 小时制" : "24 小时制")));
-                if (!string.IsNullOrEmpty(schedule.warning)) root.Children.Add(Note(schedule.warning));
-                if (schedule.rows.Count == 0) root.Children.Add(Note("还没有在追番剧的排片。"));
-                string[] days = { "时段待定", "周一", "周二", "周三", "周四", "周五", "周六", "周日" };
-                int index = 0;
-                while (index < schedule.rows.Count)
+                if (_scheduleDay >= 0 && show.weekday != _scheduleDay) continue;
+                if (show.weekday != last)
                 {
-                    int day = schedule.rows[index].weekday;
-                    int first = index;
-                    while (index < schedule.rows.Count && schedule.rows[index].weekday == day) index++;
-                    root.Children.Add(DayBar(days[day], index - first));
-                    for (int i = first; i < index; i++)
-                    {
-                        var show = schedule.rows[i];
-                        string label = show.source == "original" ? "原播更新" : show.source == "custom" ? "自订排片" : "";
-                        string eps = show.total > 0 ? show.seen + "/" + show.total : "已看 " + show.seen + " 话";
-                        root.Children.Add(Row(TimeCell(show.time), show.name, eps, label, show.id));
-                    }
+                    last = show.weekday;
+                    list.Children.Add(ScheduleHeading(last == 0 ? "时段待定" : ScheduleDays[last], last == I("weekday")));
                 }
+                string source = show.source == "original" ? "原播更新" : show.source == "custom" ? "自订排片" : "时刻待定";
+                list.Children.Add(ScheduleRow(TimeCell(show.time), source, show.name, show.seen, show.total, show.id));
+            }
+            if (last != -1) return;
+            list.Children.Add(ScheduleNote(_scheduleDay < 0 ? "还没有可展示的排片。可以到网页添加番剧或编辑排期。" : "这一天没有排片。"));
+            if (_scheduleDay < 0) list.Children.Add(ScheduleButton("打开网页面板", "打开网页面板", "schedule-web", false, OpenWebPanel));
+        }
+
+        void BuildReminderList(Panel list)
+        {
+            int count = I("count");
+            list.Children.Add(ScheduleHeading("今日提醒 · " + count + " 部", true));
+            if (count == 0) list.Children.Add(ScheduleNote("今天没有排定提醒。"));
+            var shown = new HashSet<string>();
+            for (int i = 1; i <= count; i++)
+            {
+                string key = "show" + i;
+                string id = V(key + "_id", "");
+                string name = V(key + "_name", "");
+                if (name.Length == 0) continue;
+                shown.Add(id);
+                list.Children.Add(SnapshotScheduleRow(key, TimeCell(V(key + "_time_disp", V(key + "_time", ""))), "提醒", name, id));
             }
 
-            int ch = I("catchup_count");
-            if (ch > 0)
+            int pending = I("behind_count");
+            if (pending > 0) list.Children.Add(ScheduleHeading("进度落后 · " + pending + " 部", false));
+            for (int i = 1; i <= pending; i++)
             {
-                root.Children.Add(SectionLabel("待补完 " + ch + " 部"));
-                for (int i = 1; i <= ch; i++)
+                string key = "behind" + i;
+                string id = V(key + "_id", "");
+                string name = V(key + "_name", "");
+                if (name.Length == 0) continue;
+                if (shown.Contains(id))
                 {
-                    string name = V("catchup" + i + "_name", "");
-                    if (name.Length == 0) continue;
-                    root.Children.Add(Row("补", name, "差 " + V("catchup" + i + "_eps", "?" ) + " 话", ""));
+                    list.Children.Add(ScheduleNote(name + " · 还差 " + V(key + "_eps", "0") + " 话"));
+                    continue;
                 }
+                var show = _desktopSchedule == null ? null : _desktopSchedule.rows.Find(row => row.id == id);
+                int seen = show == null ? I(key + "_watched") : show.seen;
+                list.Children.Add(ScheduleRow("差 " + V(key + "_eps", "0"), "待追", name, seen, show == null ? 0 : show.total, id));
             }
 
-            string quote = V("quote", "");
+            var catchup = new List<string>();
+            for (int i = 1; i <= I("catchup_count"); i++)
+            {
+                string key = "catchup" + i;
+                string name = V(key + "_name", "");
+                if (name.Length == 0) continue;
+                string id = V(key + "_id", "");
+                // 未设置本地提醒的在播番仍有原播周档，不算待补完。
+                if (_desktopSchedule != null && _desktopSchedule.rows.Exists(row => row.id == id && row.source == "original")) continue;
+                catchup.Add(name + " · 剩 " + V(key + "_eps", "?") + " 话");
+            }
+            if (catchup.Count > 0) list.Children.Add(ScheduleHeading("待补完 · " + catchup.Count + " 部", false));
+            foreach (string entry in catchup) list.Children.Add(ScheduleNote(entry));
+            var quote = V("quote", "");
             if (quote.Length > 0)
             {
-                root.Children.Add(SectionLabel(M("panel_quote", "今日一句")));
-                root.Children.Add(Note(quote));
+                list.Children.Add(ScheduleHeading("今日一句", false));
+                list.Children.Add(ScheduleNote(quote));
+            }
+        }
+
+        UIElement SnapshotScheduleRow(string key, string time, string source, string name, string id)
+        {
+            string[] progress = V(key + "_eps", "").Split('/');
+            int seen, total = 0;
+            int.TryParse(progress[0], out seen);
+            if (progress.Length > 1) int.TryParse(progress[1], out total);
+            return ScheduleRow(time, source, name, seen, total, id);
+        }
+
+        static TextBlock ScheduleText(string text, double size, Brush ink, bool bold = false)
+        {
+            return new TextBlock { Text = text, FontSize = size, Foreground = ink,
+                FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal };
+        }
+
+        static TextBlock ScheduleNote(string text)
+        {
+            var note = ScheduleText(text, 12, ScheduleMuted);
+            note.TextWrapping = TextWrapping.Wrap;
+            note.Margin = new Thickness(3, 8, 3, 5);
+            return note;
+        }
+
+        static UIElement ScheduleHeading(string day, bool today)
+        {
+            var heading = ScheduleText(today ? day + (day.StartsWith("周") ? "   ·   今天" : "") : day, 12, today ? ScheduleInk : ScheduleBlue, true);
+            return new Border
+            {
+                Background = today ? SchedulePinkWash : ScheduleWash,
+                CornerRadius = new CornerRadius(5), Margin = new Thickness(0, 7, 0, 5),
+                Padding = new Thickness(9, 4, 9, 4), Child = heading
+            };
+        }
+
+        Button ScheduleButton(string label, string accessibleName, string id, bool selected, Action action)
+        {
+            if (_scheduleButtonTemplate == null)
+            {
+                _scheduleButtonTemplate = (ControlTemplate)System.Windows.Markup.XamlReader.Parse(@"
+<ControlTemplate TargetType='Button' xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+  <Border x:Name='Face' CornerRadius='5' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' Padding='{TemplateBinding Padding}'>
+    <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+  </Border>
+  <ControlTemplate.Triggers>
+    <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='Face' Property='BorderBrush' Value='#16739D'/></Trigger>
+    <Trigger Property='IsKeyboardFocused' Value='True'><Setter TargetName='Face' Property='BorderBrush' Value='#16739D'/></Trigger>
+    <Trigger Property='IsPressed' Value='True'><Setter TargetName='Face' Property='Background' Value='#D5EAF5'/></Trigger>
+    <Trigger Property='IsEnabled' Value='False'><Setter TargetName='Face' Property='Opacity' Value='0.48'/></Trigger>
+  </ControlTemplate.Triggers>
+</ControlTemplate>");
+            }
+            var button = new Button
+            {
+                Content = label, Template = _scheduleButtonTemplate, Foreground = ScheduleBlue,
+                FontSize = 12, FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal,
+                Background = selected ? ScheduleWash : Brushes.White, BorderBrush = selected ? ScheduleBlue : ScheduleLine,
+                MinHeight = 28, Padding = new Thickness(2, 2, 2, 2), Margin = new Thickness(1.5, 0, 1.5, 0)
+            };
+            AutomationProperties.SetName(button, accessibleName);
+            AutomationProperties.SetAutomationId(button, id);
+            _scheduleControls[id] = button;
+            button.Click += delegate { action(); };
+            return button;
+        }
+
+        UIElement ScheduleRow(string time, string source, string name, int seen, int total, string id)
+        {
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(61) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var slot = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            var clock = ScheduleText(time, 16, ScheduleInk, true);
+            clock.FontFamily = new FontFamily("Consolas, Microsoft YaHei UI");
+            slot.Children.Add(clock);
+            slot.Children.Add(ScheduleText(source, 10, ScheduleMuted));
+            grid.Children.Add(slot);
+
+            var details = new StackPanel { Margin = new Thickness(0, 0, 5, 0) };
+            var title = ScheduleText(name, 13, ScheduleInk, true);
+            title.TextTrimming = TextTrimming.CharacterEllipsis;
+            title.ToolTip = name;
+            details.Children.Add(title);
+            details.Children.Add(ScheduleText(total > 0 ? "已看 " + seen + " / " + total + " 话" : "已看 " + seen + " 话", 11, ScheduleMuted));
+            if (total > 0)
+            {
+                var track = new Grid { Height = 3, Background = ScheduleLine, Margin = new Thickness(0, 4, 1, 0) };
+                var ratio = Math.Max(0, Math.Min(1, (double)seen / total));
+                track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
+                track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1 - ratio, GridUnitType.Star) });
+                track.Children.Add(new Border { Background = SchedulePink, CornerRadius = new CornerRadius(2) });
+                details.Children.Add(track);
+            }
+            Grid.SetColumn(details, 1);
+            grid.Children.Add(details);
+
+            if (!string.IsNullOrEmpty(id))
+            {
+                var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                foreach (int delta in new[] { -1, 1 })
+                {
+                    int change = delta;
+                    string verb = delta < 0 ? "减一话" : "记一话";
+                    string key = (_showReminderList ? "reminder-" : "weekly-") + delta + "-" + id;
+                    var button = ScheduleButton(delta < 0 ? "−1" : "+1", verb + " · " + name, key, delta > 0,
+                        () => BumpShow(id, name, change));
+                    button.Width = 32;
+                    button.ToolTip = verb;
+                    button.IsEnabled = delta < 0 ? seen > 0 : total <= 0 || seen < total;
+                    actions.Children.Add(button);
+                }
+                Grid.SetColumn(actions, 2);
+                grid.Children.Add(actions);
             }
 
-            var foot = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(0xF2, 0xEC, 0xE0)),
-                BorderBrush = Ink,
-                BorderThickness = new Thickness(0, 2, 0, 0),
-                Padding = new Thickness(14, 7, 14, 8)
-            };
-            foot.Child = new TextBlock
-            {
-                Text = "TIARA · 追番放送簿",
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 10.5,
-                Foreground = InkSoft
-            };
-            root.Children.Add(foot);
-            return root;
+            return new Border { Background = Brushes.White, BorderBrush = ScheduleLine, BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(7), Padding = new Thickness(8, 7, 7, 7), Margin = new Thickness(0, 0, 0, 5), Child = grid };
         }
 
         /// <summary>没写开播时刻的番给个「—」，别摆一串 --:-- 占位置。</summary>
@@ -2960,168 +3237,6 @@ namespace UkagakaBangumi
                 catch (Exception ex) { Log("selftest step " + step + " failed: " + ex.Message); }
             };
             t.Start();
-        }
-
-        TextBlock SectionLabel(string s)
-        {
-            return new TextBlock
-            {
-                Text = s,
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 11,
-                Foreground = InkSoft,
-                Margin = new Thickness(14, 12, 14, 6)
-            };
-        }
-
-        /// <summary>天分隔条：左边「明天 / 周三」，右边「N 部」，下面一条细虚线。</summary>
-        UIElement DayBar(string label, int n)
-        {
-            var g = new Grid { Margin = new Thickness(14, 8, 14, 3) };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            var l = new TextBlock
-            {
-                Text = label,
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 11,
-                FontWeight = FontWeights.Bold,
-                Foreground = Ink,
-                Margin = new Thickness(0, 0, 0, 3)
-            };
-            Grid.SetColumn(l, 0);
-            g.Children.Add(l);
-
-            var r = new TextBlock
-            {
-                Text = n + " 部",
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 10.5,
-                Foreground = InkSoft,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Margin = new Thickness(0, 0, 0, 3)
-            };
-            Grid.SetColumn(r, 1);
-            g.Children.Add(r);
-
-            var box = new StackPanel();
-            box.Children.Add(g);
-            box.Children.Add(new Border
-            {
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0xD8, 0xCB, 0xB6)),
-                BorderThickness = new Thickness(0, 0, 0, 1),
-                Margin = new Thickness(14, 0, 14, 2),
-                Height = 1
-            });
-            return box;
-        }
-
-        TextBlock Note(string s)
-        {
-            return new TextBlock
-            {
-                Text = s,
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 12.5,
-                Foreground = InkSoft,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(14, 2, 14, 4),
-                LineHeight = 20
-            };
-        }
-
-        /// <summary>
-        /// 一行番。给了 id 就是「可点」的：点一下记一话。
-        /// 桌宠这边以前是纯展示，记账必须跑去网页——可桌宠才是每天开着的东西，
-        /// 所以这里把行本身做成按钮（悬停变色 + 手型光标 + 右侧＋）。
-        /// </summary>
-        UIElement Row(string left, string name, string eps, string badge, string id = null)
-        {
-            var g = new Grid { Margin = new Thickness(14, 3, 14, 3) };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            var l = new TextBlock
-            {
-                Text = left,
-                FontFamily = new FontFamily("Consolas, Microsoft YaHei UI"),
-                FontSize = 11.5,
-                Foreground = InkSoft,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Grid.SetColumn(l, 0);
-            g.Children.Add(l);
-
-            var stack = new StackPanel();
-            stack.Children.Add(new TextBlock
-            {
-                Text = name,
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 13,
-                Foreground = Ink,
-                TextWrapping = TextWrapping.Wrap
-            });
-            if (eps.Length > 0)
-                stack.Children.Add(new TextBlock
-                {
-                    Text = eps,
-                    FontFamily = new FontFamily("Microsoft YaHei UI"),
-                    FontSize = 10.5,
-                    Foreground = InkSoft
-                });
-            Grid.SetColumn(stack, 1);
-            g.Children.Add(stack);
-
-            if (badge.Length > 0)
-            {
-                var b = new Border
-                {
-                    BorderBrush = Ink,
-                    BorderThickness = new Thickness(1.4),
-                    Padding = new Thickness(6, 1, 6, 2),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(6, 0, 0, 0)
-                };
-                b.Child = new TextBlock
-                {
-                    Text = badge,
-                    FontFamily = new FontFamily("Microsoft YaHei UI"),
-                    FontSize = 10,
-                    Foreground = badge.StartsWith("落后") ? Red : InkSoft
-                };
-                Grid.SetColumn(b, 2);
-                g.Children.Add(b);
-            }
-
-            if (string.IsNullOrEmpty(id)) return g;
-
-            // 可点：右侧补一个「＋」，整行都能点
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var plus = new TextBlock
-            {
-                Text = "＋",
-                FontFamily = new FontFamily("Microsoft YaHei UI"),
-                FontSize = 13,
-                Foreground = InkSoft,
-                Margin = new Thickness(8, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Grid.SetColumn(plus, g.ColumnDefinitions.Count - 1);
-            g.Children.Add(plus);
-
-            var box = new Border { Child = g, Background = Brushes.Transparent, Cursor = Cursors.Hand };
-            string showName = name;
-            string showId = id;
-            box.MouseEnter += delegate { box.Background = PaperWarm; plus.Foreground = Red; };
-            box.MouseLeave += delegate { box.Background = Brushes.Transparent; plus.Foreground = InkSoft; };
-            box.MouseLeftButtonUp += delegate
-            {
-                box.Background = Brushes.Transparent;
-                BumpShow(showId, showName, 1);
-            };
-            return box;
         }
 
         // ================= 交互 =================
@@ -4207,6 +4322,7 @@ namespace UkagakaBangumi
         {
             if (_desktopSchedulePending || _closing || _panelHost == null || _selfTest) return;
             _desktopSchedulePending = true;
+            int revision = _scheduleRevision;
             _panelHost.EnsureStarted().ContinueWith(task =>
             {
                 DesktopSchedule schedule = null;
@@ -4234,6 +4350,11 @@ namespace UkagakaBangumi
                 {
                     _desktopSchedulePending = false;
                     if (_closing) return;
+                    if (revision != _scheduleRevision)
+                    {
+                        if (PanelOpen) RefreshDesktopSchedule();
+                        return;
+                    }
                     if (schedule != null) _desktopSchedule = schedule;
                     _desktopScheduleError = error;
                     if (PanelOpen) RefreshPopup();
@@ -4241,32 +4362,42 @@ namespace UkagakaBangumi
             });
         }
 
-        void RefreshPopup()
+        void RefreshPopup(bool keepScroll = true)
         {
             if (_popupCard == null) return;
-            var oldScroll = _popupCard.Child as ScrollViewer;
-            var scroll = new ScrollViewer
-            {
-                Content = BuildPanel(),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                MaxHeight = Math.Max(320, CurrentWorkAreaDip().Height * 0.78),
-                Background = Paper
-            };
-            _popupCard.Child = scroll;
-            if (PanelOpen && oldScroll != null) scroll.ScrollToVerticalOffset(oldScroll.VerticalOffset);
+            var focus = Keyboard.FocusedElement as Button;
+            string focusId = focus == null ? "" : AutomationProperties.GetAutomationId(focus);
+            bool restoreFocus = PanelOpen && focusId.Length > 0 && _scheduleControls.ContainsValue(focus);
+            double offset = keepScroll && _scheduleScroll != null ? _scheduleScroll.VerticalOffset : 0;
+            var area = CurrentWorkAreaDip();
+            _popupCard.Width = Math.Min(408, Math.Max(250, area.Width - 24));
+            _popupCard.MaxHeight = Math.Max(170, Math.Min(660, area.Height * 0.86));
+            _scheduleControls.Clear();
+            _popupCard.Child = BuildPanel();
+            if (offset > 0) _scheduleScroll.ScrollToVerticalOffset(offset);
+            Button button;
+            if (restoreFocus && _scheduleControls.TryGetValue(focusId, out button)) button.Focus();
         }
 
-        void UsePanel(Action<int> ready, bool showError)
+        void UsePanel(Action<int> ready, bool showError, Action failed = null)
         {
-            if (_panelHost == null || _closing) return;
+            if (_panelHost == null || _closing)
+            {
+                if (failed != null) failed();
+                return;
+            }
             _panelHost.EnsureStarted().ContinueWith(task =>
             {
                 if (task.IsFaulted)
                 {
                     string message = task.Exception.GetBaseException().Message;
                     Log("panel unavailable: " + message);
-                    if (showError) Dispatcher.BeginInvoke(new Action(delegate { if (!_closing) Say(new Line(message, 2), true); }));
+                    if (showError || failed != null) Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        if (_closing) return;
+                        if (failed != null) failed();
+                        if (showError) Say(new Line(message, 2), true);
+                    }));
                     return;
                 }
                 if (ready != null) Dispatcher.BeginInvoke(new Action(delegate { if (!_closing) ready(task.Result); }));
@@ -4296,7 +4427,22 @@ namespace UkagakaBangumi
         {
             if (string.IsNullOrEmpty(id)) return;
             if (_selfTest) { Log("selftest: BumpShow dry-run id=" + id + " delta=" + delta); return; }
-            UsePanel(delegate (int port) { BumpOnPanel(port, id, name, delta); }, true);
+            if (!_progressPending.Add(id)) return;
+            ScheduleFeedback("正在保存《" + name + "》的进度…");
+            UsePanel(delegate (int port) { BumpOnPanel(port, id, name, delta); }, true, () => ProgressFailed(id));
+        }
+
+        void ScheduleFeedback(string message)
+        {
+            _scheduleFeedback = message;
+            if (PanelOpen) RefreshPopup();
+        }
+
+        void ProgressFailed(string id)
+        {
+            _progressPending.Remove(id);
+            ScheduleFeedback("暂时无法确认进度，请核对后再试。");
+            if (PanelOpen) RefreshDesktopSchedule();
         }
 
         void BumpOnPanel(int port, string id, string name, int delta)
@@ -4305,19 +4451,18 @@ namespace UkagakaBangumi
             // 后台发请求：本地服务卡住时也不能把 UI 线程一起拖住（原来能冻 5 分钟）
             PostJsonAsync("http://127.0.0.1:" + port + "/api/progress", body, delegate (string resp)
             {
-                if (resp == null)
+                int seen, total;
+                if (resp == null || !int.TryParse(JsonField(resp, "ep_status"), out seen))
                 {
-                    Say(new Line("没记上……网页服务可能退出了。", 1));
+                    ProgressFailed(id);
+                    Say(new Line("暂时无法确认进度，等我再读一下。", 1));
                     return;
                 }
-                // 服务端回来的 ep_status 最准，用它说话
-                int seen = 0, total = 0;
-                try
-                {
-                    int.TryParse(JsonField(resp, "ep_status"), out seen);
-                    int.TryParse(JsonField(resp, "eps"), out total);
-                }
-                catch { }
+                int.TryParse(JsonField(resp, "eps"), out total);
+                _progressPending.Remove(id);
+                _scheduleRevision++;
+                var row = _desktopSchedule == null ? null : _desktopSchedule.rows.Find(item => item.id == id);
+                if (row != null) { row.seen = seen; row.total = total; }
                 string who = string.IsNullOrEmpty(name) ? "这" : name;
                 if (delta > 0)
                 {
@@ -4331,7 +4476,8 @@ namespace UkagakaBangumi
 
                 // 立刻重算 + 重画弹层（不然点完还是旧数字）；回调已经在 UI 线程上
                 LoadData();
-                if (PanelOpen) RefreshPopup();
+                ScheduleFeedback("已保存 · " + who + " 已看 " + seen + (total > 0 ? " / " + total : "") + " 话");
+                if (PanelOpen) RefreshDesktopSchedule();
             });
         }
 
@@ -4424,33 +4570,28 @@ namespace UkagakaBangumi
             {
                 var menu = new System.Windows.Forms.ContextMenuStrip();
                 menu.Items.Add("显示 / 隐藏", null, delegate { ToggleVisibleFromTray(); });
-                menu.Items.Add("番组表", null, delegate { ShowFromTray(); TogglePanel(); });
+                menu.Items.Add("查看我的排片", null, delegate { ShowFromTray(); if (!PanelOpen) TogglePanel(); });
 
-                // 记一话：托盘里直接记，不用先开弹层（今天没番时不显示这项）
                 var bumpMenu = new System.Windows.Forms.ToolStripMenuItem("记一话");
-                int todayCount = I("count");
-                if (todayCount > 0)
-                {
-                    for (int i = 1; i <= todayCount && i <= 8; i++)
-                    {
-                        string sid = V("show" + i + "_id", "");
-                        string snm = V("show" + i + "_name", "");
-                        if (sid.Length == 0 || snm.Length == 0) continue;
-                        string caption = snm.Length > 18 ? snm.Substring(0, 18) + "…" : snm;
-                        bumpMenu.DropDownItems.Add(caption + "  ＋1", null,
-                            delegate { BumpShow(sid, snm, 1); });
-                    }
-                }
-                if (bumpMenu.DropDownItems.Count == 0)
-                {
-                    bumpMenu.DropDownItems.Add("今天没有番");
-                    bumpMenu.Enabled = false;
-                }
                 menu.Items.Add(bumpMenu);
+                menu.Opening += delegate
+                {
+                    bumpMenu.DropDownItems.Clear();
+                    var shows = ReadMenuShows();
+                    foreach (var show in QuickMenuShows(shows))
+                    {
+                        if (bumpMenu.DropDownItems.Count >= 8) break;
+                        bumpMenu.DropDownItems.Add(MenuShowCaption(show), null,
+                            delegate { BumpShow(show.Id, show.Name, 1); });
+                    }
+                    if (shows.Count > 8) bumpMenu.DropDownItems.Add("在网页查看全部", null, delegate { OpenWebPanel(); });
+                    bumpMenu.Enabled = bumpMenu.DropDownItems.Count > 0;
+                };
 
-                menu.Items.Add("打开网页番组表", null, delegate { OpenWebPanel(); });
+                menu.Items.Add("打开网页面板", null, delegate { OpenWebPanel(); });
+                menu.Items.Add("撤销上一次记账", null, delegate { UndoLast(); });
                 menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
-                menu.Items.Add("退出", null, delegate { ShowFromTray(); BeginQuit(); });
+                menu.Items.Add("退出 TIARA", null, delegate { ShowFromTray(); BeginQuit(); });
 
                 _tray = new System.Windows.Forms.NotifyIcon
                 {

@@ -134,11 +134,13 @@ const guide = `TIARA 便携版 v${pkg.version}
   cache/server.log        服务日志（出问题时先看这个，网页里「诊断」按钮也能看）
 
 四、桌宠
-  pet/Pet.exe 双击即可；右键有菜单（摸头、说话、窗口层级、省电模式、退出）。
+  右键桌宠可查看排片、打开网页面板、记一话或撤销。尺寸、省电和开机自启都在「桌宠设置」。
   摸头 = 点头顶，拖动 = 按住身体任意处。
+  详细上手步骤见 README.md；开发与构建说明见 docs/DEVELOPMENT.md。
 
 五、升级
-  覆盖时保留 data/ 和 shell/ 即可；其余文件直接替换。
+  先退出 TIARA 并备份旧目录的 data/。把新版解压到另一个目录，再复制旧版的 data/ 到新版。
+  自己换过立绘时，也可以把旧版的 shell/ 复制过去。
 `;
 
 files.push({ name: '安装说明-便携版.txt', data: Buffer.from(guide, 'utf8') });
