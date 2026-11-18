@@ -15,6 +15,7 @@ import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { expectedEpisode } from '../lib/today.mjs';
 import { DEFAULT_NICKNAME, normalizeNickname } from '../lib/persona.mjs';
+import { launchDiagnostics } from '../lib/launch-diagnostics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const AS_JSON = process.argv.includes('--json');
@@ -72,6 +73,10 @@ try {
 
 try {
   const pkg = await readJson('package.json');
+  const { script, binary } = await launchDiagnostics(ROOT);
+  add(script.exists && script.target && script.binary?.exists && script.binary.version === pkg.version ? 'ok' : 'warn', '桌宠启动脚本',
+    script.path + (script.target ? ' → ' + script.target + ' · ' + (script.binary.version || '版本未读到') : ' · 找不到可识别的启动目标'));
+  add(binary.version === pkg.version ? 'ok' : 'warn', '磁盘桌宠', binary.path + ' · ' + (binary.version || '版本未读到'));
   const readme = await fs.readFile(path.join(ROOT, 'README.md'), 'utf8');
   const m = /^当前版本 v([\d.]+) · (\d{4}-\d{2}-\d{2})$/m.exec(readme);
   if (!m) add('warn', 'README 版本行', '找不到「当前版本 vX · YYYY-MM-DD」，跑 node tools/sync_docs.mjs');
@@ -83,8 +88,8 @@ try {
 }
 
 try {
-  await fs.access(path.join(ROOT, 'dist', 'manifest.json'));
-  const man = await readJson('dist/manifest.json');
+  const { version } = await readJson('package.json');
+  const man = await readJson(`dist/v${version}/manifest.json`);
   const built = String(man.built_at || '').slice(0, 10);
   const t = new Date(Date.now() + 8 * 3600e3);
   const todayStr = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;

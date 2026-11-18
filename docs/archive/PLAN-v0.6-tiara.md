@@ -156,7 +156,7 @@ node tools/rename.mjs --to TIARA --apply       # 落盘 + 重命名 bat + 重建
   `TIARA → TIARA`；`Tiara → Tiara`；`tiara → tiara`；
   `启动TIARA.bat → 启动TIARA.bat`、`停止TIARA.bat → 停止TIARA.bat`；
 - **不动**：`data/*.json` 的字段名与键、`settings.json`、`state.json`、`ghost/master` 目录名、`today.txt` 变量名（避免破坏已有数据与契约）；
-- **不动**：`C:\Projects\TIARA` 这层目录名（改它会让 git 根、快捷方式、正在运行的进程全部失效；要改另说）；
+- **不动**：`现有的 TIARA 项目路径` 这层目录名（改它会让 git 根、快捷方式、正在运行的进程全部失效；要改另说）；
 - 改完自动执行：`node tools/build_today.mjs && node tools/build_ghost.mjs && node tools/build_yaya.mjs && node tools/build_pet.mjs`，再跑 `doctor` + 43 例单测 + 面板截图比对；
 - 单独一个 commit：`refactor(rename): TIARA → TIARA`，便于回滚。
 

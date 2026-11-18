@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN" class="board-page">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>排片看板 · TIARA</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body class="board">
+  <main class="board-main">
+    <header class="board-head">
+      <h1>排片看板</h1>
+      <nav aria-label="看板操作">
+        <button type="button" id="boardFullscreen">全屏</button>
+        <a href="/" id="boardBack">返回面板</a>
+      </nav>
+    </header>
+    <p id="boardStatus" role="status">正在读取排片…</p>
+    <section class="board-next" aria-labelledby="boardNextHeading">
+      <h2 id="boardNextHeading">下一档</h2>
+      <p id="boardNext"></p>
+    </section>
+    <section aria-labelledby="boardWeekHeading">
+      <h2 id="boardWeekHeading">接下来七天 <small>北京时间</small></h2>
+      <div id="boardWeek"></div>
+    </section>
+  </main>
+  <script src="./board.js"></script>
+</body>
+</html>

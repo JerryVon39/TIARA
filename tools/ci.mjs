@@ -109,11 +109,16 @@ if (FAST) {
   record('面板拆分（经典脚本 + 外部 css）', problems.length === 0, problems.join('；'));
 }
 
+{
+  const result = run(['tools/validate_talks.mjs', '--release']);
+  record('发行台词与立绘', result.code === 0, result.out.trim());
+}
+
 // ---------- 5. today.txt 新鲜度 ----------
 {
   const p = path.join(ROOT, 'ghost', 'master', 'today.txt');
   if (!fs.existsSync(p)) {
-    record('today.txt 存在', false, 'ghost/master/today.txt 不存在，跑 node tools/build_today.mjs');
+    record('today.txt 是今天的', true, '干净源码未生成本机快照，发包时会生成公开快照', 'warn');
   } else {
     const head = fs.readFileSync(p, 'utf8').split('\n', 12).join('\n');
     const m = /^date=(\d{4}-\d{2}-\d{2})$/m.exec(head);

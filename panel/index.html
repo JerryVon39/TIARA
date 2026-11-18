@@ -22,19 +22,24 @@
       <button class="tab" data-tab="today">今天<span class="kbd" aria-hidden="true">2</span></button>
       <button class="tab" data-tab="season">本季<span class="kbd" aria-hidden="true">3</span></button>
       <button class="tab" data-tab="library">番库<span class="kbd" aria-hidden="true">4</span></button>
+      <button class="tab" data-tab="catchup">补番<span class="kbd" aria-hidden="true">5</span></button>
     </nav>
     <span class="grow"></span>
     <div class="tools">
       <span class="date" id="dateLabel">—</span>
       <button id="pendingBtn" class="ghost" title="落后至少一话的番，点开看是哪几部" hidden>待看 0</button>
-      <input type="search" id="q" aria-label="筛选番剧" placeholder="搜索番名或别名" />
+      <input type="search" id="q" aria-label="搜索全番库" placeholder="搜索番名或别名" />
       <button id="clockBtn" title="切换排期和提醒的时制。30 小时制将凌晨 00:00–04:59 显示为前一天 24:00–28:59">30h</button>
       <button id="addWatchBtn" data-new-watch class="primary" aria-label="手动添加番剧">新增</button>
+      <button id="animeSearchBtn" type="button">跨季度找番</button>
       <button id="syncBtn">同步</button>
     </div>
   </header>
 
-  <main id="panelMain"><div class="wrap" id="view"><div class="panel empty" role="status">正在读取本地番组库…</div></div></main>
+  <main id="panelMain">
+    <section class="wrap" id="globalSearch" aria-label="全番库搜索结果" hidden></section>
+    <div class="wrap" id="view"><div class="panel empty" role="status">正在读取本地番组库…</div></div>
+  </main>
 
   <footer class="dock" id="panelFooter">
     <div class="dock-group" aria-label="数据工具">
@@ -45,7 +50,11 @@
     <button id="tokenBtn">Bangumi 账号</button>
     <button id="nickBtn">桌宠称呼</button>
     <button id="reminderBtn">提醒设置</button>
+    <button id="reminderHistoryBtn">提醒记录</button>
+    <button id="watchHistoryBtn">观看历史</button>
+    <button id="watchReportBtn">本地周报</button>
     <button id="diagBtn">诊断</button>
+    <button id="settingsNav">设置</button>
     </div>
     <div class="dock-group" aria-label="显示偏好">
     <label for="scaleSel">桌宠尺寸</label>

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Automation;
@@ -20,6 +22,10 @@ namespace UkagakaBangumi
             public string ShowId { get; set; }
             public string ShowName { get; set; }
             public bool Done { get; set; }
+            public long DueAt { get; set; }
+            public long NotifiedAt { get; set; }
+
+            public DesktopNote Copy() { return (DesktopNote)MemberwiseClone(); }
         }
 
         sealed class BubbleTheme
@@ -50,6 +56,11 @@ namespace UkagakaBangumi
         Window _notesWindow, _appearanceWindow;
         StackPanel _notesContent;
         bool _showCompletedNotes;
+        bool _editingNote;
+        string _notesQuery = "";
+        int _notesSort;
+        long _nextNoteCheck;
+        const long LastNoteSecond = 253402214399L;
         string _shellName = "master";
         int _bubbleThemeIndex, _bubbleSizeIndex = 1;
         TextBlock _bubbleHeading;
@@ -61,24 +72,65 @@ namespace UkagakaBangumi
         void LoadDesktopExtras(JavaScriptSerializer serializer, Dictionary<string, object> state)
         {
             var notes = StateValue<List<DesktopNote>>(serializer, state, "desktop_notes");
-            if (notes != null)
-            {
-                var ids = new HashSet<string>();
-                foreach (var note in notes)
-                {
-                    Guid id;
-                    if (note == null || !Guid.TryParseExact(note.Id, "N", out id) || !ids.Add(note.Id) ||
-                        string.IsNullOrWhiteSpace(note.Text) || note.Text.Length > 240) continue;
-                    _notes.Add(note);
-                    if (_notes.Count == NoteLimit) break;
-                }
-            }
+            if (notes != null) ReplaceDesktopNotes(notes);
+            _notesSort = Math.Max(0, Math.Min(2, StateValue<int>(serializer, state, "notes_sort")));
             string shell = StateValue<string>(serializer, state, "desktop_shell");
             if (ShellOptions().Contains(shell)) _shellName = shell;
             if (state.ContainsKey("bubble_theme"))
                 _bubbleThemeIndex = Math.Max(0, Math.Min(BubbleThemes.Length - 1, StateValue<int>(serializer, state, "bubble_theme")));
             if (state.ContainsKey("bubble_size"))
                 _bubbleSizeIndex = Math.Max(0, Math.Min(BubbleFontFactors.Length - 1, StateValue<int>(serializer, state, "bubble_size")));
+        }
+
+        void ReplaceDesktopNotes(List<DesktopNote> notes)
+        {
+            var restored = new List<DesktopNote>();
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var note in notes)
+            {
+                Guid id;
+                if (note == null || !Guid.TryParseExact(note.Id, "N", out id) || !ids.Add(note.Id) ||
+                    string.IsNullOrWhiteSpace(note.Text) || note.Text.Length > 240) continue;
+                if (note.DueAt < 0 || note.DueAt > LastNoteSecond) note.DueAt = 0;
+                if (note.DueAt == 0 || note.NotifiedAt < note.DueAt || note.NotifiedAt > LastNoteSecond) note.NotifiedAt = 0;
+                restored.Add(note);
+                if (restored.Count == NoteLimit) break;
+            }
+            _notes = restored;
+        }
+
+        void ApplyDesktopImport(JavaScriptSerializer serializer, Dictionary<string, object> desktop)
+        {
+            var notes = StateValue<List<DesktopNote>>(serializer, desktop, "notes");
+            if (notes != null)
+            {
+                ReplaceDesktopNotes(notes);
+                RefreshNotes();
+            }
+            var appearance = StateValue<Dictionary<string, object>>(serializer, desktop, "appearance");
+            if (appearance == null) return;
+            string requested = StateValue<string>(serializer, appearance, "shell");
+            string shell = ShellOptions().Contains(requested) ? requested : "master";
+            bool changedShell = shell != _shellName;
+            _shellName = shell;
+            _bubbleThemeIndex = Math.Max(0, Math.Min(BubbleThemes.Length - 1, StateValue<int>(serializer, appearance, "theme")));
+            _bubbleSizeIndex = Math.Max(0, Math.Min(BubbleFontFactors.Length - 1, StateValue<int>(serializer, appearance, "size")));
+            if (appearance.ContainsKey("bubble_time"))
+                _bubbleTimeIndex = Math.Max(0, Math.Min(3, StateValue<int>(serializer, appearance, "bubble_time")));
+            if (appearance.ContainsKey("reduce_motion")) _reduceMotion = StateValue<bool>(serializer, appearance, "reduce_motion");
+            if (appearance.ContainsKey("idle_chatter")) _idleChatter = StateValue<bool>(serializer, appearance, "idle_chatter");
+            if (appearance.ContainsKey("hourly_chatter")) _hourlyChatter = StateValue<bool>(serializer, appearance, "hourly_chatter");
+            double scale = ClampScale(StateValue<double>(serializer, appearance, "scale"));
+            if (_bubbleSkin == null)
+            {
+                if (!_scaleFromEnv) _scale = scale;
+                return;
+            }
+            if (_appearanceWindow != null) _appearanceWindow.Close();
+            DismissBubble();
+            if (!_scaleFromEnv) ApplyScale(scale, false, false);
+            if (changedShell) LoadShell();
+            ApplyBubbleTheme();
         }
 
         static Uri ViewingUri(string value)
@@ -105,12 +157,13 @@ namespace UkagakaBangumi
 
         void OpenNotes()
         {
+            RecordQuickUse("notes");
             if (_notesWindow != null) { _notesWindow.Activate(); return; }
             _notesWindow = UtilityWindow("TIARA · 桌面便条", out _notesContent);
             _notesWindow.WindowStartupLocation = WindowStartupLocation.Manual;
             _notesWindow.Width = 356;
             _notesWindow.SizeChanged += delegate { PlaceNotes(); };
-            _notesWindow.Closed += delegate { _notesWindow = null; _notesContent = null; };
+            _notesWindow.Closed += delegate { _notesWindow = null; _notesContent = null; _editingNote = false; };
             RefreshNotes();
             PlaceNotes();
             _notesWindow.Show();
@@ -132,6 +185,7 @@ namespace UkagakaBangumi
         {
             var panel = _notesContent;
             if (panel == null) return;
+            _editingNote = false;
             panel.Children.Clear();
             UtilityText(panel, "桌面便条", true);
             var tools = new WrapPanel();
@@ -144,12 +198,36 @@ namespace UkagakaBangumi
                 RefreshNotes();
             }).IsEnabled = done > 0;
             if (_notes.Count >= NoteLimit) UtilityText(panel, "便条已满。可在「已完成」里删除旧便条。");
-            if (_notes.Count == done) UtilityText(panel, "手边没有待办便条。");
-            foreach (var note in _notes)
+            var search = new TextBox { Text = _notesQuery, Margin = new Thickness(0, 0, 0, 6), MaxLength = 120 };
+            UtilityText(panel, "按便条内容或关联番剧搜索");
+            AutomationProperties.SetName(search, "搜索便条");
+            AutomationProperties.SetAutomationId(search, "note-search");
+            panel.Children.Add(search);
+            var sort = AppearanceOptions("排序便条", "note-sort", new[] { "新建在前", "到期在前", "按内容排序" }, _notesSort);
+            panel.Children.Add(sort);
+            var list = new StackPanel();
+            panel.Children.Add(list);
+            search.TextChanged += delegate { _notesQuery = search.Text.Trim(); RenderNotes(list); };
+            sort.SelectionChanged += delegate { _notesSort = sort.SelectedIndex; SaveState(); RenderNotes(list); };
+            RenderNotes(list);
+        }
+
+        void RenderNotes(StackPanel panel)
+        {
+            panel.Children.Clear();
+            IEnumerable<DesktopNote> matches = _notes.Where(note => (!note.Done || _showCompletedNotes) &&
+                (note.Text.IndexOf(_notesQuery, StringComparison.CurrentCultureIgnoreCase) >= 0 ||
+                (note.ShowName ?? "").IndexOf(_notesQuery, StringComparison.CurrentCultureIgnoreCase) >= 0));
+            if (_notesSort == 1) matches = matches.OrderBy(note => note.Done).ThenBy(note => note.DueAt == 0 ? long.MaxValue : note.DueAt);
+            else if (_notesSort == 2) matches = matches.OrderBy(note => note.Done).ThenBy(note => note.Text, StringComparer.CurrentCultureIgnoreCase);
+            var visible = matches.ToList();
+            if (visible.Count == 0) UtilityText(panel, _notesQuery.Length > 0 ? "没有匹配的便条。" : "手边没有待办便条。");
+            foreach (var note in visible)
             {
-                if (note.Done && !_showCompletedNotes) continue;
                 UtilityText(panel, (note.Done ? "✓ " : "") + note.Text);
                 if (!string.IsNullOrEmpty(note.ShowName)) UtilityText(panel, "关联番剧 · " + note.ShowName);
+                if (note.DueAt > 0)
+                    UtilityText(panel, (note.Done ? "原到期" : note.DueAt <= UnixNow() ? "已到期" : "到期") + " · " + NoteTime(note.DueAt));
                 var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
                 panel.Children.Add(actions);
                 if (!string.IsNullOrEmpty(note.ShowId))
@@ -157,11 +235,11 @@ namespace UkagakaBangumi
                 if (note.Done)
                 {
                     UtilityButton(actions, "恢复", "note-restore-" + note.Id, () => ChangeNote(() => note.Done = false));
-                    UtilityButton(actions, "删除", "note-delete-" + note.Id, () => ChangeNote(() =>
+                    UtilityButton(actions, "删除", "note-delete-" + note.Id, () =>
                     {
                         if (MessageBox.Show(_notesWindow, "删除这条已完成的便条？", "桌面便条", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
-                            _notes.Remove(note);
-                    }));
+                            ChangeNote(() => _notes.Remove(note));
+                    });
                 }
                 else
                 {
@@ -173,15 +251,46 @@ namespace UkagakaBangumi
 
         void ChangeNote(Action change)
         {
-            change();
-            bool saved = SaveState();
+            bool saved = CommitNoteChange(change);
             RefreshNotes();
             if (!saved) UtilityText(_notesContent, "暂时无法写入磁盘。请检查安装目录的写入权限。");
+        }
+
+        bool CommitNoteChange(Action change)
+        {
+            var previous = _notes.Select(note => note.Copy()).ToList();
+            change();
+            if (SaveState()) { _nextNoteCheck = 0; return true; }
+            _notes = previous;
+            return false;
+        }
+
+        static string NoteTime(long seconds)
+        {
+            return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(seconds).ToLocalTime()
+                .ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        }
+
+        void TickNotes()
+        {
+            if (_selfTest || _closing || _notes.Count == 0) return;
+            long now = UnixNow();
+            if (_nextNoteCheck > now && _nextNoteCheck <= now + 15) return;
+            _nextNoteCheck = now + 15;
+            if (AmbientQuiet) return;
+            var due = _notes.FindAll(note => !note.Done && note.DueAt > 0 && note.DueAt <= now && note.NotifiedAt == 0);
+            if (due.Count == 0 || ReminderQuiet(ReadReminderSettings(), now)) return;
+            if (!CommitNoteChange(() => due.ForEach(note => note.NotifiedAt = now))) return;
+            _nextNoteCheck = now + 15;
+            string preview = due[0].Text.Length <= 100 ? due[0].Text : due[0].Text.Substring(0, 99) + "…";
+            Notify("TIARA · 便条到期", due.Count == 1 ? preview : due.Count + " 条便条到期，请打开桌面便条查看。");
+            if (!_editingNote) RefreshNotes();
         }
 
         void EditNote(DesktopNote note)
         {
             var panel = _notesContent;
+            _editingNote = true;
             panel.Children.Clear();
             UtilityText(panel, note == null ? "新便条" : "编辑便条", true);
             var text = new TextBox { Text = note == null ? "" : note.Text, TextWrapping = TextWrapping.Wrap,
@@ -202,6 +311,13 @@ namespace UkagakaBangumi
             foreach (var show in items) select.Items.Add(show.Name);
             select.SelectedIndex = Math.Max(0, items.FindIndex(item => !string.IsNullOrEmpty(previous) && item.Id == previous));
             panel.Children.Add(select);
+            UtilityText(panel, "到期时间（本机时区，可留空）");
+            var deadline = new TextBox { Text = note != null && note.DueAt > 0 ? NoteTime(note.DueAt) : "",
+                MaxLength = 16, Margin = new Thickness(0, 0, 0, 8) };
+            AutomationProperties.SetName(deadline, "到期时间，格式 年-月-日 时:分");
+            AutomationProperties.SetAutomationId(deadline, "note-deadline");
+            panel.Children.Add(deadline);
+            UtilityText(panel, "例如 2026-12-01 20:30。专注和免打扰结束后再通知。");
             var actions = new WrapPanel();
             panel.Children.Add(actions);
             var status = ScheduleText("", 12, ScheduleMuted);
@@ -209,15 +325,31 @@ namespace UkagakaBangumi
             {
                 string value = text.Text.Trim();
                 if (value.Length == 0) { status.Text = "请写一点内容。"; text.Focus(); return; }
-                var chosen = items[Math.Max(0, select.SelectedIndex)];
-                ChangeNote(() =>
+                string time = deadline.Text.Trim();
+                long at = 0;
+                if (time.Length > 0)
                 {
-                    var edited = note ?? new DesktopNote { Id = Guid.NewGuid().ToString("N") };
+                    DateTime local;
+                    if (!DateTime.TryParseExact(time, "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out local) ||
+                        local.Year < 1971 || local.Year > 9998 || TimeZoneInfo.Local.IsInvalidTime(local))
+                    {
+                        status.Text = "请输入有效的本机日期和时间，例如 2026-12-01 20:30。"; deadline.Focus(); return;
+                    }
+                    at = (long)(local.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                }
+                var chosen = items[Math.Max(0, select.SelectedIndex)];
+                bool saved = CommitNoteChange(() =>
+                {
+                    var edited = note == null ? new DesktopNote { Id = Guid.NewGuid().ToString("N") } : _notes.Find(item => item.Id == note.Id);
                     edited.Text = value;
                     edited.ShowId = chosen.Id;
                     edited.ShowName = chosen.Id == null ? null : chosen.Name;
+                    if (edited.DueAt != at) edited.NotifiedAt = 0;
+                    edited.DueAt = at;
                     if (note == null) _notes.Insert(0, edited);
                 });
+                if (saved) RefreshNotes();
+                else status.Text = "暂时无法写入磁盘。可以重试保存。";
             });
             UtilityButton(actions, "取消", "note-cancel", RefreshNotes);
             panel.Children.Add(status);
@@ -280,6 +412,12 @@ namespace UkagakaBangumi
             var size = AppearanceOptions("气泡字号", "appearance-size", new[] { "小", "标准", "大" }, _bubbleSizeIndex);
             panel.Children.Add(theme);
             panel.Children.Add(size);
+            UtilityText(panel, "气泡停留时间");
+            var delay = AppearanceOptions("气泡停留时间", "appearance-bubble-time",
+                new[] { "按台词长度", "至少 15 秒", "30 秒", "手动关闭" }, _bubbleTimeIndex);
+            panel.Children.Add(delay);
+            bool reduceMotion = _reduceMotion;
+            CompanionOption(panel, "减弱动画（立即显示全文）", "appearance-reduce-motion", _reduceMotion, value => reduceMotion = value);
             var sample = new TextBlock { Text = "会长，今天的记录也写好了。", TextWrapping = TextWrapping.Wrap, Foreground = Ink };
             var bubble = new Border { Child = sample, Padding = new Thickness(12), Margin = new Thickness(0, 0, 0, 10),
                 CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1) };
@@ -295,6 +433,8 @@ namespace UkagakaBangumi
                 _shellName = selectedShell;
                 _bubbleThemeIndex = theme.SelectedIndex;
                 _bubbleSizeIndex = size.SelectedIndex;
+                _bubbleTimeIndex = delay.SelectedIndex;
+                _reduceMotion = reduceMotion;
                 DismissBubble();
                 if (changedShell) LoadShell();
                 ApplyBubbleTheme();

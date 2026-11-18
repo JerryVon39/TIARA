@@ -23,7 +23,7 @@ function walk(dir, base = dir, acc = []) {
 export function buildManifest(dir) {
   const files = walk(dir).sort((a, b) => (a.path < b.path ? -1 : 1));
   for (const f of files) f.sha256 = createHash('sha256').update(readFileSync(join(dir, f.path))).digest('hex');
-  return { built_at: new Date().toISOString(), dir: dir.replace(/\\/g, '/'), count: files.length, bytes: files.reduce((n, f) => n + f.size, 0), files };
+  return { built_at: new Date().toISOString(), dir: '.', count: files.length, bytes: files.reduce((n, f) => n + f.size, 0), files };
 }
 
 /** 拿现有 manifest 和实际文件比：返回 {ok, missing, changed, extra} */
@@ -34,7 +34,7 @@ export function checkManifest(dir, man) {
   const missing = [...have.keys()].filter((k) => !real.has(k));
   const extra = [...real.keys()].filter((k) => !have.has(k));
   const changed = [...have.keys()].filter((k) => real.has(k) && have.get(k) !== real.get(k));
-  return { ok: !missing.length && !changed.length, missing, changed, extra };
+  return { ok: !missing.length && !changed.length && !extra.length, missing, changed, extra };
 }
 
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('tools/manifest.mjs')) {

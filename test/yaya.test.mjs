@@ -4,6 +4,13 @@ import assert from 'node:assert/strict';
 
 import { yayaText, candidate, minutesOfHHMM, checkDic } from '../tools/build_ghost.mjs';
 import { allShows } from '../lib/today.mjs';
+import { validateTalks, validateTalkResources } from '../lib/talks-validation.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { inspectSspShell, renderSspPreview } from '../lib/ssp-shell-preview.mjs';
+import { inspectPersona, restorePersona, switchPersona } from '../lib/persona-trial.mjs';
 import { ghostDialogue, ghostScript } from '../lib/ghost.mjs';
 
 test('yayaText 转义引号、反斜杠与换行', () => {
@@ -66,7 +73,8 @@ test('Ghost 案件簿引用可用事件，并使用最新称呼、排期和补�
     user: { nickname_for_pet: '测试会长' },
     watching: [
       { id: 1, name_cn: '夜间番', air_weekday: 1, air_time_cst: '25:30' },
-      { id: 2, name_cn: '完结番', eps: 12, ep_status: 8, start_episode: 10 },
+      { id: 2, name_cn: '完结番', eps: 12, ep_status: 8, start_episode: 10, watch_mode: 'catchup' },
+      { id: 3, name_cn: '尚无周档', eps: 12, ep_status: 0 },
     ],
     weekday: { 1: [{ id: 1, time_cst: '25:30' }] },
   };
@@ -83,7 +91,10 @@ test('Ghost 案件簿引用可用事件，并使用最新称呼、排期和补�
   for (const [, event] of menu.matchAll(/\\q\[[^,]+,(On\w+)\]/g)) assert.ok(events[event]?.length, event);
   assert.match(ghostScript(events.OnBoot[0], faces), /欢迎，测试会长\\n.*01:30 夜间番/);
   assert.match(ghostScript(events.OnTiaraNext[0], faces), /\\s\[5\]夜间番，01:30/);
-  assert.match(ghostScript(events.OnTiaraBacklog[0], faces), /完结番 · 完结待补 3 话/);
+  const backlog = ghostScript(events.OnTiaraBacklog[0], faces);
+  assert.match(backlog, /完结番 · 待补 3 话/);
+  assert.equal(backlog.match(/完结番/g).length, 1);
+  assert.doesNotMatch(backlog, /尚无周档/);
   assert.deepEqual(events.OnNadeNade, [{ text: '……随你', face: 'bashful' }]);
 });
 
@@ -106,4 +117,78 @@ test('allShows 合并在追列表与整周排片表，按周几+时间排序去�
 test('allShows 容忍空数据', () => {
   assert.deepEqual(allShows({}), []);
   assert.deepEqual(allShows({ watching: [{ id: 9, air_weekday: null }] }), []);
+});
+
+test('台词验错覆盖上下文变量、条件分支与本地图片资源', () => {
+  const { issues, faces } = validateTalks({
+    random: [{ text: '计数 {seen}', face: 'happy' }, { text: '{nickname' }, { text: '未知表情', face: 'unknown' }],
+    bump: ['{name_cn} 到 {seen}/{total}'],
+    rules: [
+      { text: '夜间', when: { hour_min: 22, hour_max: 2, weekday: [1, 2] } },
+      { text: '非法', when: { weekday: [], hour_mix: 7, mood: 'calm', fluster_min: 40 } },
+    ],
+  });
+  assert.equal(issues.length, 6);
+  assert.deepEqual(Array.from(faces), ['normal', 'happy']);
+  assert.ok(issues.some(issue => issue.at === 'random[0]' && issue.message.includes('{seen}')));
+  assert.ok(issues.some(issue => issue.at === 'rules[1].when' && issue.message.includes('无法同时')));
+  assert.ok(!issues.some(issue => issue.at.startsWith('bump') || issue.at.startsWith('rules[0]')));
+  const folder = mkdtempSync(path.join(os.tmpdir(), 'tiara-talk-test-'));
+  writeFileSync(path.join(folder, 'surface0.png'), Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=', 'base64'));
+  writeFileSync(path.join(folder, 'faces.json'), JSON.stringify({
+    faces: { happy: { base: 'surface0.png', overlay: [{ src: 'missing.png' }] } },
+  }));
+  assert.deepEqual(validateTalkResources(folder, faces), [
+    { at: 'faces.json.faces.happy.overlay[0]', message: '找不到图片 missing.png' },
+  ]);
+});
+
+const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=', 'base64');
+
+test('SSP 转换试验读取 Shift_JIS、图层位置和碰撞区', async () => {
+  const folder = mkdtempSync(path.join(os.tmpdir(), 'tiara-ssp-preview-'));
+  await fs.writeFile(path.join(folder, 'surface0.png'), tinyPng);
+  await fs.writeFile(path.join(folder, 'overlay.png'), tinyPng);
+  await fs.writeFile(path.join(folder, 'surfaces.txt'), Buffer.concat([
+    Buffer.from('surface0\r\n{\r\nelement1,overlay,overlay.png,1,-2\r\ncollision0,0,0,1,1,'),
+    Buffer.from([0x82, 0xa0]), Buffer.from('\r\nanimation0.interval,sometimes\r\n}\r\n'),
+  ]));
+  const shape = await inspectSspShell(folder);
+  assert.equal(shape.encoding, 'Shift_JIS');
+  assert.deepEqual(shape.canvas, { left: 0, top: -2, width: 2, height: 3 });
+  assert.equal(shape.collisions[0].name, 'あ');
+  assert.equal(shape.layers[0].file, 'surface0.png');
+  assert.ok(shape.warnings.length);
+  assert.match(renderSspPreview(shape), /aspect-ratio:2\/3.*class="hit"/);
+  await fs.unlink(path.join(folder, 'overlay.png'));
+  await assert.rejects(inspectSspShell(folder), /找不到本地图片 overlay/);
+});
+
+test('人格素材静态预览有缺件反馈，切换与恢复只更新外观和台词', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'tiara-persona-trial-'));
+  const folder = path.join(root, 'pack');
+  for (const dir of ['pet', 'data', 'shell', 'pack/shell']) await fs.mkdir(path.join(root, dir), { recursive: true });
+  await fs.writeFile(path.join(root, 'pet/Pet.exe'), '');
+  const details = { desktop_shell: 'master', bubble_theme: 1, vars: { affinity: 42 } };
+  const prior = '{"random":["原有台词"]}';
+  await fs.writeFile(path.join(root, 'data/state.json'), JSON.stringify(details));
+  await fs.writeFile(path.join(root, 'data/talks.json'), prior);
+  await fs.writeFile(path.join(folder, 'persona.json'), JSON.stringify({
+    format: 'tiara-persona', schema: 1, id: 'fixture', name: '试验素材', theme: { bubble: 'blue', size: 'large' },
+  }));
+  await fs.writeFile(path.join(folder, 'talks.json'), '{"random":["样例：{nickname}"]}');
+  assert.ok((await inspectPersona(folder)).problems.length);
+  await assert.rejects(switchPersona(root, folder), /surface0/);
+  await fs.writeFile(path.join(folder, 'shell/surface0.png'), tinyPng);
+  const applied = await switchPersona(root, folder);
+  const state = JSON.parse(await fs.readFile(path.join(root, 'data/state.json')));
+  assert.equal(state.desktop_shell, applied.slot);
+  assert.equal(state.bubble_theme, 2);
+  assert.equal(state.bubble_size, 2);
+  state.vars.affinity = 56;
+  await fs.writeFile(path.join(root, 'data/state.json'), JSON.stringify(state));
+  await restorePersona(root);
+  assert.equal(await fs.readFile(path.join(root, 'data/talks.json'), 'utf8'), prior);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'data/state.json'))), { ...details, vars: { affinity: 56 } });
 });
