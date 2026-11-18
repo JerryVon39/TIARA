@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { coverIdOf, coverCachePath, isAllowedCoverUrl, pickCoverUrl, COVER_MAX_AGE } from '../lib/cover.mjs';
+import { coverIdOf, coverCachePath, coverMediaType, downloadCover, isAllowedCoverUrl, pickCoverUrl, COVER_MAX_AGE } from '../lib/cover.mjs';
 
 test('coverIdOf：只认 1–10 位数字', () => {
   assert.equal(coverIdOf('617452'), '617452');
@@ -45,4 +45,23 @@ test('pickCoverUrl：按 id 找封面，找不到或不合规返回 null', () =>
 
 test('COVER_MAX_AGE 是 30 天（浏览器缓存头用它）', () => {
   assert.equal(COVER_MAX_AGE, 2592000);
+});
+
+test('封面验格式并逐跳检查换址，损坏文件不能当图片', async () => {
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1sAAAAASUVORK5CYII=', 'base64');
+  assert.equal(coverMediaType(image), 'image/png');
+  assert.equal(coverMediaType(image.subarray(0, 48)), null);
+  assert.equal(coverMediaType(Buffer.from('<html>后台缓存了一段错误网页</html>')), null);
+  const seen = [];
+  const fetchImage = async url => {
+    seen.push(url);
+    return seen.length === 1 ? { status: 302, headers: { location: '/pic/new.png' } } : { status: 200, body: image };
+  };
+  assert.deepEqual(await downloadCover('https://lain.bgm.tv/pic/first.png', fetchImage), image);
+  assert.deepEqual(seen, ['https://lain.bgm.tv/pic/first.png', 'https://lain.bgm.tv/pic/new.png']);
+  let called = 0;
+  assert.equal(await downloadCover('https://lain.bgm.tv/pic/first.png', async () => {
+    called++; return { status: 302, headers: { location: 'https://example.com/pic/new.png' } };
+  }), null);
+  assert.equal(called, 1);
 });

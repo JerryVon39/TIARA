@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ghostScript, ghostSurface, loadGhost, sakuraText } from '../lib/ghost.mjs';
-import { writeFileAtomic } from '../lib/atomic.mjs';
+import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
+import { isCatchup } from '../lib/watch-lifecycle.mjs';
 
 const argv = process.argv.slice(2);
 const arg = name => argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined;
@@ -151,7 +152,15 @@ async function main() {
 
   const snapshot = path.join(root, 'data', 'today.json');
   if (fs.existsSync(snapshot)) {
-    await writeFileAtomic(path.join(out, 'today.json'), fs.readFileSync(snapshot));
+    const bytes = fs.readFileSync(snapshot);
+    const personal = today.catchup.filter(isCatchup);
+    if (personal.length) {
+      const data = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+      data.catchup = [...(data.catchup || []), ...personal.map(item => ({
+        id: item.id, name_cn: item.name_cn || item.name, eps: item.eps ?? null, ep_status: item.ep_status || 0,
+      }))];
+      await writeJsonAtomic(path.join(out, 'today.json'), data);
+    } else await writeFileAtomic(path.join(out, 'today.json'), bytes);
   } else {
     console.warn('[build_ghost] data/today.json 不存在，先运行 node tools/build_today.mjs');
   }

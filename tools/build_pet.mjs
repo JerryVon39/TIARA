@@ -31,6 +31,7 @@ const refs = [
   path.join(wpfDir, 'PresentationFramework.dll'),
   path.join(wpfDir, 'PresentationCore.dll'),
   path.join(wpfDir, 'WindowsBase.dll'), // 注意：WindowsBase 在 WPF 子目录，不在 Framework 根目录
+  path.join(wpfDir, 'System.Speech.dll'),
   path.join(fwDir, 'System.Xaml.dll'),
   path.join(fwDir, 'System.Web.Extensions.dll'), // JavaScriptSerializer：读 talks.json / state.json
   path.join(fwDir, 'System.Core.dll'),
@@ -62,8 +63,13 @@ const args = [
   ...refs.map((r) => `/r:${r}`),
   src,
   path.join(ROOT, 'pet', 'Companion.cs'),
+  path.join(ROOT, 'pet', 'CompanionPresentation.cs'),
   path.join(ROOT, 'pet', 'DesktopExtras.cs'),
+  path.join(ROOT, 'pet', 'DesktopWindow.cs'),
+  path.join(ROOT, 'pet', 'DesktopActivities.cs'),
   path.join(ROOT, 'pet', 'PanelHost.cs'),
+  path.join(ROOT, 'pet', 'ReminderHistory.cs'),
+  path.join(ROOT, 'pet', 'ReminderQueue.cs'),
   versionSource,
 ];
 

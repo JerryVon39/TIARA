@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cstParts, toMin, minutesOfDay, expectedEpisode, buildToday, timeline, WEEK_CN, displayClock, reminders, allShows } from '../lib/today.mjs';
+import { actualSchedule, cstParts, toMin, minutesOfDay, expectedEpisode, expectedEpisodes, buildToday, timeline, WEEK_CN, displayClock, reminders, allShows } from '../lib/today.mjs';
 
 const lib = () => ({
   user: { nickname_for_pet: '主人' },
@@ -47,6 +47,21 @@ test('expectedEpisode：没有 ep_expected 也没有 start_date 时返回 null�
   l.watching[0].air_weekday = 3;   // 周三，但周表里没有它
   const w = l.watching[0];
   assert.equal(expectedEpisode(w, l, new Date('2026-11-04T12:00:00+08:00')), null);
+});
+
+test('批量推算保留跨日档、首条手工话数及单次取消的口径', () => {
+  const sample = lib();
+  Object.assign(sample.watching[1], { air_time_cst: '25:30', schedule_adjustments: [
+    { date: '2026-11-07', original_at: '2026-11-06T17:30:00.000Z', at: null },
+  ] });
+  sample.weekday[5][0].time_cst = '25:30';
+  sample.weekday[5].push({ ...sample.weekday[5][0], ep_expected: 22 });
+  const normalized = actualSchedule(sample);
+  const now = new Date('2026-11-07T02:00:00+08:00');
+  const aired = new Set(['2']);
+  const batch = expectedEpisodes(normalized.watching, normalized, now, aired);
+  assert.deepEqual([...batch.values()], sample.watching.map(w => expectedEpisode(w, sample, now, aired)));
+  assert.equal(batch.get(normalized.watching[1]), 18);
 });
 
 test('buildToday：周三没有番，落后者照样能算出来（behindAll）', () => {

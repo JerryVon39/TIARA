@@ -20,8 +20,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildZip, readZip } from '../lib/zip.mjs';
-import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { withReleaseStage } from './release-stage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -48,11 +48,13 @@ if (!/^v\d+\.\d+\.\d+/.test(runtimeVersion) || Number(runtimeVersion.slice(1).sp
 
 /** 目录白名单：只有这些目录会被整目录带走 */
 const DIRS = [
-  'lib', 'panel', 'tools', 'ghost', 'shell', 'test', 'assets', 'docs',
+  'lib', 'panel', 'tools', 'test', 'assets',
 ];
 /** 根目录下的散文件 */
 const FILES = [
   'server.mjs', 'package.json', 'README.md', '启动TIARA.bat', '打开番组表.bat', '停止TIARA.bat',
+  'ghost/master/descript.txt', 'docs/DEVELOPMENT.md', 'docs/CHANGELOG.md', 'docs/PERSONA-TRIAL.md',
+  'docs/images/panel.png', 'docs/images/pet-menu.png',
 ];
 /** 永不打包 */
 const SKIP_EXT = new Set(['.log', '.bak', '.tmp', '.zip']);
@@ -83,27 +85,18 @@ function walk(abs, rel, out) {
 
 const files = [];
 // 发行数据只由此白名单生成；不读取本机的库、账号、历史、备份、撤销栈。
-const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'tiara-release-'));
-try {
-  fs.mkdirSync(path.join(stage, 'data'), { recursive: true });
-  const defaults = {
-    'library.json': { version: 1, updated: '', user: {}, watching: [], weekday: {}, dropped: [], trivia: {} },
-    'settings.json': { clock: '30h', pet_scale: 1 },
-  };
-  for (const [name, value] of Object.entries(defaults)) fs.writeFileSync(path.join(stage, 'data', name), JSON.stringify(value, null, 2) + '\n');
-  fs.copyFileSync(path.join(ROOT, 'data/talks.json'), path.join(stage, 'data/talks.json'));
-  if (fs.existsSync(path.join(ROOT, 'shell/master'))) fs.cpSync(path.join(ROOT, 'shell/master'), path.join(stage, 'shell/master'), { recursive: true });
-  for (const tool of ['build_today.mjs', 'build_ghost.mjs']) {
-    execFileSync(process.execPath, [path.join(ROOT, 'tools', tool), '--root', stage], { windowsHide: true, stdio: 'pipe' });
-  }
+withReleaseStage(ROOT, stage => {
   for (const name of ['data/library.json', 'data/settings.json', 'data/talks.json', 'data/today.json', ...GENERATED]) {
     files.push({ name, data: fs.readFileSync(path.join(stage, name)) });
   }
-} finally {
-  // mkdtemp 返回的、由本进程持有的暂存目录；不涉及工作区或用户数据。
-  if (path.dirname(stage) === path.resolve(os.tmpdir()) && path.basename(stage).startsWith('tiara-release-')) fs.rmSync(stage, { recursive: true, force: true });
-}
+});
 for (const d of DIRS) walk(path.join(ROOT, d), d, files);
+for (const d of ['shell/master', 'shell/tiara2']) {
+  const dir = path.join(ROOT, d);
+  if (!fs.existsSync(dir)) continue;
+  for (const name of fs.readdirSync(dir).filter(name => /^(?:surface\d+\.png|talk\.png|descript\.txt|surfaces\.json|faces\.json|CREDITS\.txt)$/.test(name)))
+    walk(path.join(dir, name), path.join(d, name), files);
+}
 for (const f of FILES) {
   const abs = path.join(ROOT, f);
   if (fs.existsSync(abs)) files.push({ name: f.replace(/\\/g, '/'), data: fs.readFileSync(abs) });

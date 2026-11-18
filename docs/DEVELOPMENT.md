@@ -6,7 +6,9 @@
 
 - 运行 `node tools/build_today.mjs` 生成今日快照，运行 `node server.mjs` 启动本地面板。终端会显示实际地址。
 - 改动桌宠后运行 `node tools/build_pet.mjs`。运行 `node tools/ci.mjs` 检查脚本、测试和文档版本。
-- 发布 Windows 便携包时，先运行 `node tools/fetch_runtime.mjs` 准备运行时，再运行 `npm run pack:portable`。打包脚本会生成一份空番库。
+- 发布时先运行 `node tools/fetch_runtime.mjs` 准备运行时，再运行 `npm run pack`。脚本编译桌宠，从空番库生成两个公开包，在 `dist/v<版本>/` 校验 SHA-256；可用 `node tools/pack_release.mjs --check` 复查。公开台词模板在 `tools/release/talks.json`。
+
+Windows release candidate 工作流从新检出运行 CI、构建两个包，并通过 SHA-256 取上一版做无系统 Node.js 的升级测试。产物是候选 ZIP 与清单。发布前在交互式 Windows 中运行 `tools/verify_release_windows.ps1`，传入 `-Manifest`、`-PreviousZip`、`-SspRoot` 和 `-YayaMaster`。SSP 路径指一份已完成引导的独立 SSP 测试环境，YAYA 路径下应有 `yaya.dll` 和 `yaya_base`。脚本在临时目录解压、写入样例进度、验证迁移和 SSP 启动。双屏混合缩放另走交互验收。
 
 ## 4. 目录结构
 
@@ -514,15 +516,14 @@ Ghost 使用 YAYA，从 `data/talks.json` 和番组库生成。双击 TIARA 打�
 ### 10.1 生成与安装
 
 ```bash
-node tools/build_today.mjs
-node tools/build_ghost.mjs
 node tools/pack_ssp.mjs
+node tools/pack_ssp.mjs --private-snapshot
 ```
 
-- 输出 `dist/TIARA-ssp.zip`。需要 `yaya.dll`（Tc608-3 或兼容版本）和 SHIORIES 的 `dic/system/yaya_base` 目录。
+- 默认输出 `dist/TIARA-ssp-<版本>.zip`，用空番库。需要 `yaya.dll`（Tc608-3 或兼容版本）和 SHIORIES 的 `dic/system/yaya_base` 目录。
 - 把 ZIP 拖入 SSP，或把包内的 `ghost/` 和 `shell/` 解到 `SSP/ghost/tiara-yaya/`。DLL 放在该人格的 `ghost/master/`，系统字典放在 `ghost/master/yaya_base/`。下载地址见包内 `readme.txt`。
 - 包沿用原 YAYA 版的人格名称和目录，可原位更新。若 SSP 中还装有旧里々人格，可从 SSP 卸载 `tiara-satori`。
-- 改库、称呼或时制后，重新生成并更新已安装的人格，在 SSP 中重载。包内会带当次生成的排片和称呼快照。
+- 自用才运行 `--private-snapshot`，从本机番库生成快照到 `private-snapshots/`。它带排片和称呼但不读 Bangumi 配置，不可输出到公开的 `dist/`。重新生成后可重载自己的 SSP 人格。
 
 ### 10.2 YAYA 开播提醒
 
@@ -539,7 +540,10 @@ SSP 的案件簿按快照展示。观看进度在桌宠或网页面板记录。
 | `node server.mjs` | 起面板服务（同一份数据只跑一个；已在跑就打印地址退出） | `--port 9000` 指定端口并允许多开、`--root D:\data` 换数据目录、`--no-portfile` 不改写端口指针文件 |
 | `node tools/build_today.mjs` | 重算 `today.txt` / `today.json` | `--date 2026-11-06`（模拟某天）`--root`（算别的目录） |
 | `node tools/build_ghost.mjs` | 重算 SSP 字典和提醒快照 | `--date …` `--check` |
-| `node tools/pack_ssp.mjs` | 打 SSP 包 | `--out` `--list` |
+| `node tools/pack_ssp.mjs` | 打 SSP 包 | `--out` `--list` `--private-snapshot` |
+| `node tools/validate_talks.mjs` | 定位台词变量、条件和图片缺件 | `--release` 检查发布模板与立绘，`--file` / `--shell` 检查指定文件 |
+| `node tools/inspect_ssp_shell.mjs` | 预览 SSP 静态图层和矩形碰撞区 | `<立绘目录>`、`--surface`、`--html` |
+| `node tools/persona_trial.mjs` | 预览、切换和回退人格素材 | `inspect`、`switch`、`restore`，见[素材格式试验](PERSONA-TRIAL.md) |
 | `node tools/build_pet.mjs` | 编译 `Pet.cs → Pet.exe` | – |
 | `node tools/sync_bangumi.mjs` | 从 Bangumi 拉放送表 + 收藏 | `--user`（中途也认库里的 user.bgm_user）`--proxy http://127.0.0.1:7890` `--take-progress` `--dry-run` `--fixture tools/fixtures` `--weekday-all` |
 | `node tools/season.mjs` | 命令行版本季表：列 / 勾 / 加入在追 | `--q 2026Q4` `--list` `--add 622288,665390` `--net` |

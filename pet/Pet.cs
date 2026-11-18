@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -150,12 +151,6 @@ namespace UkagakaBangumi
         string _lastBootDate = "";
         double _savedLeft = double.MinValue, _savedTop = double.MinValue;
         readonly HashSet<string> _reminded = new HashSet<string>();
-        public sealed class ReminderSnooze
-        {
-            public string Name { get; set; }
-            public long At { get; set; }
-        }
-        readonly Dictionary<string, ReminderSnooze> _snoozed = new Dictionary<string, ReminderSnooze>();
 
         // 透明像素穿透：WM_NCHITTEST 需要一张 alpha 蒙版
         byte[] _alpha;
@@ -402,12 +397,23 @@ namespace UkagakaBangumi
                 Top = _savedTop;
             }
 
+            SourceInitialized += delegate
+            {
+                var source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+                if (source != null)
+                {
+                    source.AddHook(ReminderPowerHook);
+                    source.AddHook(DesktopWindowHook);
+                    ApplyRecallHotkey(source.Handle);
+                }
+            };
             Loaded += delegate
             {
                 DpiScaleInfo();
-                SnapIntoWorkArea();
+                RestoreScreenPosition();
                 InstallHitTest();
                 ApplyLayer();
+                TickHolidayLetter(DateTime.Now);
                 Log("Loaded actual=" + _sprite.ActualWidth + "x" + _sprite.ActualHeight +
                     " win=" + ActualWidth + "x" + ActualHeight + " visible=" + IsVisible +
                     " at " + Left + "," + Top +
@@ -426,6 +432,9 @@ namespace UkagakaBangumi
                 _panelHost = new PanelHost(_root, Log);
                 WritePetPresence();
                 UsePanel(null, false);
+                var firstReminder = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                firstReminder.Tick += delegate { firstReminder.Stop(); CheckReminders(); };
+                firstReminder.Start();
             }
             TryAutoSync();
             var boot = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
@@ -683,6 +692,7 @@ namespace UkagakaBangumi
         {
             if (v != "top" && v != "normal" && v != "bottom") v = "top";
             _layer = v;
+            if (_recallLayerTimer != null) _recallLayerTimer.Stop();
             ApplyLayer();
             SaveState();
         }
@@ -1050,6 +1060,7 @@ namespace UkagakaBangumi
                     var row = entry as Dictionary<string, object>;
                     object id, name, seen, total, url;
                     if (row == null || !row.TryGetValue("id", out id) || string.IsNullOrEmpty(Str(id))) continue;
+                    if (!includeInactive && FinishedWatch(row)) continue;
                     if (!row.TryGetValue("name_cn", out name) || string.IsNullOrEmpty(Str(name))) row.TryGetValue("name", out name);
                     row.TryGetValue("ep_status", out seen);
                     row.TryGetValue("eps", out total);
@@ -1098,8 +1109,11 @@ namespace UkagakaBangumi
             menu.Items.Add(Head("TIARA  ·  今日提醒 " + todayCount + " 部",
                 SystemParameters.HighContrast ? SystemColors.MenuTextBrush : new SolidColorBrush(Color.FromRgb(0x16, 0x73, 0x9D)), 12, true));
             menu.Items.Add(new Separator());
-            menu.Items.Add(Item("查看我的排片", (s, e) => { if (!PanelOpen) TogglePanel(); }));
-            menu.Items.Add(Item("打开网页面板", (s, e) => OpenWebPanel()));
+            AddPetQuickItems(menu);
+            if (!_petPins.Contains("schedule")) menu.Items.Add(Item("查看我的排片", (s, e) => RunQuickAction("schedule")));
+            menu.Items.Add(Item("打开补番清单", (s, e) => OpenWebPanel("?tab=catchup")));
+            menu.Items.Add(Item("提醒记录", (s, e) => OpenWebPanel("?reminders=1")));
+            if (!_petPins.Contains("web")) menu.Items.Add(Item("打开网页面板", (s, e) => RunQuickAction("web")));
             var quick = new MenuItem { Header = "记一话" };
             var shows = ReadMenuShows();
             foreach (var show in QuickMenuShows(shows))
@@ -1118,11 +1132,14 @@ namespace UkagakaBangumi
             menu.Items.Add(Sub("和她聊聊",
                 Item("说句话", (s, e) => { Say(PickRandom(), true); ScheduleIdleTalk(); }),
                 Item("摸摸头", (s, e) => NadeSay()),
+                Item("喝杯茶", (s, e) => InviteToTea()),
+                Item("一起值日", (s, e) => OpenFocus(true)),
                 Item("陪伴手账", (s, e) => OpenCompanion(false)),
                 Item("最近台词", (s, e) => OpenCompanion(true)),
-                Item("猜拳", (s, e) => PlayRockPaperScissors())));
-            menu.Items.Add(Item("专注与安静", (s, e) => OpenFocus()));
-            menu.Items.Add(Item("桌面便条", (s, e) => OpenNotes()));
+                Item("猜拳", (s, e) => PlayRockPaperScissors()),
+                Item("猜数字", (s, e) => OpenGuessGame())));
+            if (!_petPins.Contains("focus")) menu.Items.Add(Item("专注与安静", (s, e) => RunQuickAction("focus")));
+            if (!_petPins.Contains("notes")) menu.Items.Add(Item("桌面便条", (s, e) => RunQuickAction("notes")));
             var layer = new MenuItem { Header = "窗口层级" };
             AddLayerItem(layer, "置顶显示", "top");
             AddLayerItem(layer, "普通（会被其他窗口盖住）", "normal");
@@ -1144,14 +1161,10 @@ namespace UkagakaBangumi
                 SavePowerToSettings(_powerSave);
                 Say(new Line(_powerSave ? "……電力、節約します。" : "……呼吸、再開します。", 0), true);
             };
-            var auto = new MenuItem { Header = "开机自启", IsCheckable = true, IsChecked = IsAutostartEnabled() };
-            auto.Click += delegate
-            {
-                SetAutostart(auto.IsChecked);
-                Log("autostart=" + auto.IsChecked);
-                Say(new Line(auto.IsChecked ? "……毎朝、出席します。" : "……朝は、不在にします。", 0), true);
-            };
-            menu.Items.Add(Sub("桌宠设置", layer, size, Item("换装与气泡", (s, e) => OpenAppearance()), new Separator(), power, auto));
+            var auto = Item("开机自启路径", (s, e) => OpenAutostartSettings());
+            menu.Items.Add(Sub("桌宠设置", layer, size, Item("换装与气泡", (s, e) => OpenAppearance()),
+                Item("显示与召回", (s, e) => OpenDesktopWindowSettings()), Item("常用菜单", (s, e) => OpenQuickMenuSettings()),
+                new Separator(), power, auto));
             menu.Items.Add(Item("同步 Bangumi", (s, e) => SyncBangumi()));
             menu.Items.Add(Sub("帮助与排错",
                 Item("重算今日数据", (s, e) => RefreshData(true)),
@@ -1181,7 +1194,7 @@ namespace UkagakaBangumi
 
         /// <summary>尺寸单选项：选中的打勾，改完立刻重排窗口并记住</summary>
         /// <summary>改尺寸：以窗口底部中点为中心缩放，别让立绘跑出屏幕。persist=true 时同时写回 settings.json。</summary>
-        void ApplyScale(double scale, bool persist = true)
+        void ApplyScale(double scale, bool persist = true, bool saveState = true)
         {
             scale = ClampScale(scale);
             double cx = Left + Width / 2;
@@ -1207,7 +1220,7 @@ namespace UkagakaBangumi
             Log("geom top=" + Math.Round(Top) + " h=" + Math.Round(Height) + " artTop=" + Math.Round(Top + Height - ScaledH));
             if (_bubbleHost != null && _bubbleHost.Visibility == Visibility.Visible) ApplyHeight(true);
             SnapIntoWorkArea();
-            SaveState();
+            if (saveState) SaveState();
             // settings.json 是尺寸的唯一真源（面板改的也是它）；只写 state.json 会被 60 s 后的检查掰回去
             if (persist) SaveScaleToSettings(_scale);
             Log("scale=" + _scale.ToString("0.##", CultureInfo.InvariantCulture) + " win=" + Width.ToString("0") + "x" + Height.ToString("0") + " bubbleMax=" + BubbleTextMax.ToString("0") + " max=" + MaxScale().ToString("0.##", CultureInfo.InvariantCulture));
@@ -1801,11 +1814,18 @@ namespace UkagakaBangumi
             Line[] pool = Pool(key);
             if (pool != null && pool.Length > 0)
             {
-                Line l = pool[_rnd.Next(pool.Length)];
+                string last;
+                _lastPoolLine.TryGetValue(key, out last);
+                var alternatives = Array.FindAll(pool, item => item.Text != last);
+                var candidates = alternatives.Length > 0 ? alternatives : pool;
+                Line l = candidates[_rnd.Next(candidates.Length)];
+                _lastPoolLine[key] = l.Text;
                 return new Line(FillCtx(l.Text, ctx), l.Face);
             }
             return new Line(FillCtx(fallback, ctx), face);
         }
+
+        readonly Dictionary<string, string> _lastPoolLine = new Dictionary<string, string>();
 
         /// <summary>同一条台词别连着说两遍（深夜池只有两条，闲话 45-90s 一句时会非常明显）</summary>
         Line? PickNoRepeat(Line[] pool)
@@ -1872,9 +1892,9 @@ namespace UkagakaBangumi
             int today = UI("nade_today") + 1;
             SetU("nade_today", today.ToString());
             SetU("nade_total", (UI("nade_total") + 1).ToString());
-            int aff = Math.Min(100, UI("affinity") + 1);
-            SetU("affinity", aff.ToString());
+            AwardTouchAffinity(1);
             SaveState();
+            RefreshCompanion();
 
             Line[] pool = Pool("nade");
             bool has = false;
@@ -1887,11 +1907,16 @@ namespace UkagakaBangumi
                 if (idx >= pool.Length) Log("摸头第 " + today + " 次，进入随机");
             }
             if (!has && _headpat != null && _headpat.Length > 0) { pick = _headpat[_rnd.Next(_headpat.Length)]; has = true; }
+            if (today == 1 && RelationshipStage > 0)
+            {
+                string[] reactions = { "", "轻一点。……嗯，这样就好。", "会长今天也来了。再待一会儿吧。", "嗯。我知道是你。" };
+                pick = new Line(reactions[RelationshipStage], 1);
+            }
             Tickle("nade");
             if (CheckNosebleed()) { Hop(); Log("nade today=" + today + " → 鼻血"); return; }
             Say(pick, true);
             Hop();
-            Log("nade today=" + today + " total=" + UI("nade_total") + " affinity=" + aff);
+            Log("nade today=" + today + " total=" + UI("nade_total") + " affinity=" + UI("affinity"));
         }
 
         /// <summary>双击＝抱一下。亲密度涨得比摸头快，偶尔会早とちり（先想歪再自己纠正）。</summary>
@@ -1899,9 +1924,10 @@ namespace UkagakaBangumi
         {
             Touch();
             Tickle("hug");
-            SetU("affinity", Math.Min(100, UI("affinity") + 3).ToString());
+            AwardTouchAffinity(3);
             SetU("hug_total", (UI("hug_total") + 1).ToString());
             SaveState();
+            RefreshCompanion();
             if (CheckNosebleed()) { Hop(); return; }
 
             Line[] hug = Pool("hug");
@@ -2113,15 +2139,17 @@ namespace UkagakaBangumi
         /// <summary>静置太久：她自己找话说一句（20 分钟一次）</summary>
         void MaybeIdleSay()
         {
-            if (AmbientQuiet) return;
+            if (!_idleChatter || AmbientQuiet) return;
             // 5 分钟没被碰过就说一句 idleLong；同一句话至少要隔 15 分钟
             // （原来是 20/20，配上「说话也算活动」的老逻辑等于永远不会触发）
             if ((DateTime.Now - _lastTouch).TotalMinutes < 5) return;
             if ((DateTime.Now - _lastIdleSay).TotalMinutes < 15) return;
             _lastIdleSay = DateTime.Now;
-            if (TryGoodnight()) return;       // 23 点后的那句闲话让给「晚安」（一天只一次）
-            if (CheckNosebleed()) return;
-            Say(PickFrom("idleLong", null, 0, "……还在吗。记录簿，我放着。"), true);
+            OfferChatter(delegate
+            {
+                if (TryGoodnight() || CheckNosebleed()) return;
+                Say(PickFrom("idleLong", null, 0, "……还在吗。记录簿，我放着。"));
+            });
         }
 
         // ================= 池子接线：冷却 / 一天一次 / 迟一拍补话 =================
@@ -2170,13 +2198,17 @@ namespace UkagakaBangumi
             {
                 t.Stop();
                 if (stillWanted != null && !stillWanted()) return;
-                if (!string.IsNullOrEmpty(cdKey))
+                OfferChatter(delegate
                 {
-                    if (!Cooled(cdKey, cdMinutes)) return;
-                    MarkCool(cdKey);
-                }
-                Say(PickPool(pool, null, face, fallback), true);
-                SaveState();
+                    if (stillWanted != null && !stillWanted()) return;
+                    if (!string.IsNullOrEmpty(cdKey))
+                    {
+                        if (!Cooled(cdKey, cdMinutes)) return;
+                        MarkCool(cdKey);
+                    }
+                    Say(PickPool(pool, null, face, fallback));
+                    SaveState();
+                });
             };
             t.Start();
         }
@@ -2227,7 +2259,12 @@ namespace UkagakaBangumi
         /// <summary>整点：凌晨 0–7 点不吵人（生日例外）。台词在 talks.hourly。</summary>
         void HourlySay()
         {
-            if (AmbientQuiet) return;
+            if (!_hourlyChatter || AmbientQuiet) return;
+            OfferChatter(SpeakHour, true);
+        }
+
+        void SpeakHour()
+        {
             int h = DateTime.Now.Hour;
             bool bday = IsBirthdayToday();
             if (h >= 1 && h <= 7 && !bday) { Log("整点 " + h + " 点：免打扰"); return; }
@@ -2252,8 +2289,7 @@ namespace UkagakaBangumi
                 {
                     var sc = new Dictionary<string, string>();
                     sc["hour"] = h.ToString();
-                    Line sl = sp[_rnd.Next(sp.Length)];
-                    Say(new Line(FillCtx(sl.Text, sc), sl.Face), true);
+                    Say(PickFrom(slot, sc, 0, "现在 " + h + " 点。"));
                     Log("整点问候 slot=" + slot + " hour=" + h);
                     return;
                 }
@@ -2263,8 +2299,7 @@ namespace UkagakaBangumi
             if (pool == null || pool.Length == 0) return;
             var ctx = new Dictionary<string, string>();
             ctx["hour"] = h.ToString();
-            Line l = pool[_rnd.Next(pool.Length)];
-            Say(new Line(FillCtx(l.Text, ctx), l.Face), true);
+            Say(PickFrom("hourly", ctx, 0, "现在 " + h + " 点。"));
         }
 
         bool _birthdaySaid;
@@ -2287,10 +2322,10 @@ namespace UkagakaBangumi
             result = new Line("", 0);
             object raw;
             if (!_talks.TryGetValue("rules", out raw)) return false;
-            var arr = raw as object[];
+            var arr = AsList(raw);
             if (arr == null) return false;
             DateTime now = DateTime.Now;
-            for (int i = 0; i < arr.Length; i++)
+            for (int i = 0; i < arr.Count; i++)
             {
                 var r = arr[i] as Dictionary<string, object>;
                 if (r == null) continue;
@@ -2299,7 +2334,7 @@ namespace UkagakaBangumi
                 object wh;
                 r.TryGetValue("when", out wh);
                 var when = wh as Dictionary<string, object>;
-                if (!WhenMatches(when)) continue;
+                if (!WhenMatches(when, now)) continue;
                 string key = i + "|" + Str(txt);
                 DateTime last;
                 if (_ruleAt.TryGetValue(key, out last) && (now - last).TotalMinutes < 15) continue;
@@ -2313,19 +2348,21 @@ namespace UkagakaBangumi
             return false;
         }
 
-        bool WhenMatches(Dictionary<string, object> w)
+        bool WhenMatches(Dictionary<string, object> w, DateTime now)
         {
             if (w == null) return true;
-            int h = DateTime.Now.Hour;
-            int dow = (int)DateTime.Now.DayOfWeek;          // 0=周日
+            int h = now.Hour;
+            int dow = (int)now.DayOfWeek;                  // 0=周日
             int wd = dow == 0 ? 7 : dow;                     // 1=周一 … 7=周日
             object v;
-            if (w.TryGetValue("hour_min", out v)) { int lo; if (int.TryParse(Str(v), out lo) && h < lo) return false; }
-            if (w.TryGetValue("hour_max", out v)) { int hi; if (int.TryParse(Str(v), out hi) && h > hi) return false; }
+            int lo = 0, hi = 23, value;
+            if (w.TryGetValue("hour_min", out v) && int.TryParse(Str(v), out value)) lo = value;
+            if (w.TryGetValue("hour_max", out v) && int.TryParse(Str(v), out value)) hi = value;
+            if (lo <= hi ? h < lo || h > hi : h < lo && h > hi) return false;
             if (w.TryGetValue("weekday", out v))
             {
-                var arr = v as object[];
-                if (arr != null && arr.Length > 0)
+                var arr = AsList(v);
+                if (arr != null && arr.Count > 0)
                 {
                     bool hit = false;
                     foreach (var o in arr) { int d; if (int.TryParse(Str(o), out d) && d == wd) hit = true; }
@@ -2376,7 +2413,7 @@ namespace UkagakaBangumi
 
         void SayBoot()
         {
-            if (AmbientQuiet) return;
+            if (AmbientQuiet || !_idleChatter) return;
             string nick = V("nickname", "会長");
             string wd = V("weekday_cn", "今天");
             int count = I("count");
@@ -2392,9 +2429,9 @@ namespace UkagakaBangumi
             ctx["weekday_cn"] = wd;
 
             var seq = new List<Line>();
-            bool everBefore = _lastBootDate.Length > 0;
-            seq.Add(PickFrom(everBefore ? "boot" : "firstBoot", ctx, 0,
-                everBefore ? "番组管家，TIARA。今天也把该看的番排好队了。" : "初次见面。我是TIARA，替你记住每一部番什么时候播。"));
+            bool everBefore = _lastBootDate.Length > 0 || UI("affinity") > 0;
+            seq.Add(everBefore ? RelationshipGreeting(ctx) :
+                PickFrom("firstBoot", ctx, 0, "初次见面。我是TIARA，替你记住每一部番什么时候播。"));
 
             // 第一次运行补一句自介（selfIntro 池）。用 _lastBootDate 判「从没启动过」，
             // 而不是 first_seen：后者是 CheckMilestone 在开机时才补写的，判首次会晚一步。
@@ -2476,17 +2513,13 @@ namespace UkagakaBangumi
                 _seqTimer.Stop();
                 _seqTimer.Start();
             }
+            else _seq = null;
         }
 
         void CancelSequence()
         {
             _seq = null;
             if (_seqTimer != null) _seqTimer.Stop();
-        }
-
-        void SayRandom()
-        {
-            Say(PickRandom(), true);
         }
 
         /// <summary>气泡里的一颗按钮（= 伪春菜的 OnChoiceSelect 选项）</summary>
@@ -2605,7 +2638,7 @@ namespace UkagakaBangumi
             }
             tt.BeginAnimation(TranslateTransform.YProperty, null);
             tt.Y = 0;
-            if (!SystemParameters.ClientAreaAnimation) return;
+            if (ReducePetMotion) return;
             var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
             _bubbleHost.BeginAnimation(OpacityProperty,
                 new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150)) { EasingFunction = ease, FillBehavior = FillBehavior.Stop });
@@ -2651,13 +2684,15 @@ namespace UkagakaBangumi
         {
             if (_hideTimer != null) _hideTimer.Stop();
             if (_bubbleHost.Visibility != Visibility.Visible || (_typer != null && _typer.IsEnabled)
-                || _bubble.IsMouseOver || _bubble.IsKeyboardFocusWithin) return;
+                || _bubble.IsMouseOver || _bubble.IsKeyboardFocusWithin
+                || _choices.Visibility == Visibility.Visible || _bubbleTimeIndex == 3) return;
             if (_hideTimer == null)
             {
                 _hideTimer = new DispatcherTimer();
                 _hideTimer.Tick += delegate { DismissBubble(); };
             }
-            double seconds = _choices.Visibility == Visibility.Visible ? 25 : Math.Max(6, Math.Min(20, 3 + _textElements.Length / 8.0));
+            double minimum = _bubbleTimeIndex == 0 ? 6 : _bubbleTimeIndex == 1 ? 15 : 30;
+            double seconds = Math.Max(minimum, Math.Min(20, 3 + _textElements.Length / 8.0));
             _hideTimer.Interval = TimeSpan.FromSeconds(seconds);
             _hideTimer.Start();
         }
@@ -2690,7 +2725,7 @@ namespace UkagakaBangumi
             _bubbleHost.Visibility = Visibility.Visible;
             ApplyHeight(true);
             ShowBubble();
-            if (!SystemParameters.ClientAreaAnimation) { CompleteBubbleText(); return; }
+            if (ReducePetMotion) { CompleteBubbleText(); return; }
             _typed = 1;
             _bubbleText.Text = _full.Substring(0, _textElements.Length > 1 ? _textElements[1] : _full.Length);
             if (_typer == null)
@@ -2830,8 +2865,8 @@ namespace UkagakaBangumi
                     _idleTalk.Stop();
                     // 只在「真的没人动」的时候自言自语：鼠标刚碰过、正在拖、窗口在托盘里都跳过，
                     // 免得一边打字一边弹气泡（那会让静置档永远进不去）。
-                    if (!AmbientQuiet && !_dragging && IsVisible && (DateTime.Now - _lastTouch).TotalSeconds >= 90)
-                        SayRandom();
+                    if (!_dragging && IsVisible && (DateTime.Now - _lastTouch).TotalSeconds >= 90)
+                        OfferChatter(() => Say(PickRandom()));
                     ScheduleIdleTalk();
                 };
             }
@@ -2844,6 +2879,7 @@ namespace UkagakaBangumi
         void TogglePanel()
         {
             if (_popup.IsOpen) { _popup.IsOpen = false; return; }
+            RecordQuickUse("schedule");
             _showReminderList = false;
             _scheduleDay = -1;
             _scheduleFeedback = "";
@@ -2984,7 +3020,7 @@ namespace UkagakaBangumi
         void BuildReminderList(Panel list)
         {
             int count = I("count");
-            list.Children.Add(ScheduleHeading("今日提醒 · " + count + " 部", true));
+            list.Children.Add(ScheduleHeading("今日开播 · " + count + " 部", true));
             if (count == 0) list.Children.Add(ScheduleNote("今天没有排定提醒。"));
             var shown = new HashSet<string>();
             var watches = ReadMenuShows();
@@ -2998,6 +3034,15 @@ namespace UkagakaBangumi
                 var watch = watches.Find(item => item.Id == id);
                 list.Children.Add(SnapshotScheduleRow(key, TimeCell(V(key + "_time_disp", V(key + "_time", ""))), "提醒", name, id, watch == null ? null : watch.WatchUrl));
             }
+
+            list.Children.Add(ScheduleHeading("补番提醒", false));
+            if (_desktopSchedule != null && _desktopSchedule.personal != null && _desktopSchedule.personal.Count > 0)
+                foreach (var slot in _desktopSchedule.personal)
+                    if (slot.day >= 1 && slot.day <= 7)
+                        list.Children.Add(ScheduleNote(ScheduleDays[slot.day] + " " + slot.time + " · " + slot.name +
+                            (slot.quiet ? " · 免打扰" : "")));
+            list.Children.Add(ScheduleButton("打开补番清单", "打开补番清单", "schedule-catchup", false, () => OpenWebPanel("?tab=catchup")));
+            list.Children.Add(ScheduleButton("稍后提醒", "查看、延后或取消稍后提醒", "schedule-snoozes", false, OpenReminderSnoozes));
 
             int pending = I("behind_count");
             if (pending > 0) list.Children.Add(ScheduleHeading("进度落后 · " + pending + " 部", false));
@@ -3027,7 +3072,8 @@ namespace UkagakaBangumi
                 string id = V(key + "_id", "");
                 // 未设置本地提醒的在播番仍有原播周档，不算待补完。
                 if (_desktopSchedule != null && _desktopSchedule.rows.Exists(row => row.id == id && row.source == "original")) continue;
-                catchup.Add(name + " · 剩 " + V(key + "_eps", "?") + " 话");
+                string remaining = V(key + "_eps", "");
+                catchup.Add(name + " · " + (remaining.Length == 0 ? "总集数未定" : "剩 " + remaining + " 话"));
             }
             if (catchup.Count > 0) list.Children.Add(ScheduleHeading("待补完 · " + catchup.Count + " 部", false));
             foreach (string entry in catchup) list.Children.Add(ScheduleNote(entry));
@@ -3371,11 +3417,12 @@ namespace UkagakaBangumi
                 if (hit == "none") { e.Handled = true; SaveState(); return; }
                 QueueClick(hit);     // 延后一点执行：双击的第一下也会到这里，等第二次 down 来取消
             }
+            else RecordScreenPosition(true);
             e.Handled = true;
             SaveState();
         }
 
-        void Hop() { _hopT = 0; }
+        void Hop() { if (!ReducePetMotion) _hopT = 0; }
 
         // ================= 定时器：呼吸 + 跳 =================
         // 省电档（settings.json 的 power_save，或托盘菜单切换）：
@@ -3418,8 +3465,14 @@ namespace UkagakaBangumi
                     CheckCompanionImport();
                     TickFocus();
                     CheckTestReminder();
+                    TickDesktopVisibility();
+                    TryChatter();
+                    TickNotes();
                     break;
                 case "OnMinuteChange":
+                    TickHolidayLetter(DateTime.Now);
+                    if (_companionContent != null && _companionTab == 0 && _openStory == null && _affinityDay.date != AffinityDate())
+                        RefreshCompanion();
                     WritePetPresence();
                     CheckSettingsFile();               // 面板改了尺寸/省电，1 分钟内跟上
                     if (PanelOpen) RefreshDesktopSchedule();
@@ -3446,7 +3499,7 @@ namespace UkagakaBangumi
                     BumpShow(e.Arg, null, 1);
                     break;
                 case "OnMenuOpen":
-                    if (!AmbientQuiet) SayMenuOpen();
+                    if (!AmbientQuiet && ChatterCanSpeak) SayMenuOpen();
                     break;
                 case "OnBumpRapid":
                     Tickle("bump");
@@ -3520,6 +3573,7 @@ namespace UkagakaBangumi
                 // 三档：刚交互过 20fps / 静了 1 分钟 2fps（保个呼吸感）/ 静了 5 分钟彻底不动
                 //      省电档直接 0。只有真人动作（摸头、拖动、点菜单、点脸）才 Touch()；
                 //      说话本身不算活动，否则 45-90s 一句的闲话会把这里永远钉在 20fps。
+                if (ReducePetMotion) { _hopT = -1; _offset.Y = 0; return; }
                 int want = _powerSave || quietFor > 300 ? 0 : (quietFor < 60 && !hidden ? 20 : 2);
                 if (want != _lastWant) { _lastWant = want; Log("fps tier=" + want + " quiet=" + Math.Round(quietFor)); }
 
@@ -3574,14 +3628,12 @@ namespace UkagakaBangumi
                 object rv;
                 if (d.TryGetValue("reminded", out rv))
                 {
-                    var arr = rv as object[];
-                    if (arr != null) { _reminded.Clear(); foreach (var o in arr) { string s1 = Str(o); if (!string.IsNullOrEmpty(s1)) _reminded.Add(s1); } }
+                    var entries = AsList(rv);
+                    if (entries != null)
+                        foreach (var entry in entries)
+                            if (entry is string && ((string)entry).Length > 0) _reminded.Add((string)entry);
                 }
-                if (d.TryGetValue("snoozed", out rv) && rv != null)
-                {
-                    var snoozes = ser.ConvertToType<Dictionary<string, ReminderSnooze>>(rv);
-                    foreach (var entry in snoozes) if (entry.Value != null) _snoozed[entry.Key] = entry.Value;
-                }
+                _reminderScannedAt = StateValue<long>(ser, d, "reminder_scanned_at");
                 if (d.TryGetValue("pet_scale", out v))
                 {
                     double sc;
@@ -3597,6 +3649,9 @@ namespace UkagakaBangumi
                 }
                 LoadCompanionState(ser, d);
                 LoadDesktopExtras(ser, d);
+                LoadDesktopWindow(ser, d);
+                LoadDesktopActivities(ser, d);
+                LoadCompanionPresentation(ser, d);
                 ResetDailyVars();
                 Log("state left=" + _savedLeft + " top=" + _savedTop + " lastBoot=" + _lastBootDate + " layer=" + _layer);
             }
@@ -3642,15 +3697,27 @@ namespace UkagakaBangumi
             {
                 // Top 要按「收起气泡时的窗口」记：气泡展开时窗口是向上长高的，Top 已经被减掉 band，
                 // 直接存会让宠物每启动/退出一次往上漂一个气泡的高度（100% ≈ 108~120 DIP）。
-                double restTop = Top + Height - (ScaledH + 12);
+                double restTop = RestingTop;
+                RecordScreenPosition();
                 var state = new Dictionary<string, object>
                 {
                     { "last_boot_date", _lastBootDate }, { "layer", _layer }, { "power_save", _powerSave },
-                    { "reminded", _reminded }, { "snoozed", _snoozed }, { "vars", _user },
+                    { "reminded", _reminded }, { "vars", _user },
+                    { "reminder_scanned_at", _reminderScannedAt },
                     { "companion_import", _companionImport }, { "stories", _storyProgress }, { "recent_lines", _recentLines },
+                    { "affinity_daily", _affinityDay }, { "focus_duty", _focusDuty },
+                    { "first_duty", _firstDuty }, { "favorite_lines", _favoriteLines },
+                    { "new_year_letter", _newYearLetter },
+                    { "speech_rate", _speechRate }, { "speech_muted", _speechMuted },
+                    { "idle_chatter", _idleChatter }, { "hourly_chatter", _hourlyChatter },
+                    { "bubble_time", _bubbleTimeIndex }, { "reduce_motion", _reduceMotion },
                     { "focus_until", _focusUntil }, { "focus_paused_seconds", _focusPausedSeconds }, { "quiet_until", _quietUntil },
                     { "reminder_tray_only", _reminderTrayOnly }, { "desktop_notes", _notes },
-                    { "desktop_shell", _shellName }, { "bubble_theme", _bubbleThemeIndex }, { "bubble_size", _bubbleSizeIndex }
+                    { "desktop_shell", _shellName }, { "bubble_theme", _bubbleThemeIndex }, { "bubble_size", _bubbleSizeIndex },
+                    { "last_screen", _lastScreen }, { "screen_positions", _screenPositions },
+                    { "notes_sort", _notesSort }, { "focus_minutes", _focusMinutes },
+                    { "hide_fullscreen", _hideFullscreen }, { "recall_hotkey", _recallKeyEnabled },
+                    { "tray_pins", _trayPins }, { "pet_pins", _petPins }, { "recent_quick", _recentQuick }
                 };
                 if (!double.IsNaN(Left)) state["left"] = Math.Round(Left, 2);
                 else if (_savedLeft != double.MinValue) state["left"] = _savedLeft;
@@ -3671,6 +3738,10 @@ namespace UkagakaBangumi
             if (!e.Cancel)
             {
                 _closing = true;
+                StopCompanionSpeech("已停止朗读。");
+                if (_localSpeech != null) _localSpeech.Dispose();
+                IntPtr handle = new WindowInteropHelper(this).Handle;
+                if (_recallKeyRegistered && handle != IntPtr.Zero) UnregisterHotKey(handle, RecallHotkey);
                 if (_panelHost != null) _panelHost.Dispose();
             }
         }
@@ -3785,10 +3856,12 @@ namespace UkagakaBangumi
                 DateTime st = File.GetLastWriteTimeUtc(tp);
                 if (st == _todayStamp) return;
                 bool first = _todayStamp == default(DateTime);
-                _todayStamp = st;
-                if (first) return;                 // 启动时的第一次读取由构造函数负责
-                if ((DateTime.Now - _born).TotalSeconds < 10) return;   // 启动静默期，别和构造时的 LoadData 撞车
+                if (first) { _todayStamp = st; return; }  // 构造时已经读取初始快照
+                // 启动静默期推迟刷新，下一次检查仍需看到这次变更。
+                if ((DateTime.Now - _born).TotalSeconds < 10) return;
                 LoadData();
+                if (_loadError != null) return;
+                _todayStamp = st;
                 Log("today.txt changed -> reloaded, count=" + I("count"));
                 if (I("count") > 0 && V("next_name", "").Length > 0)
                     Say(new Line { Text = "数据更新了。" + V("summary", ""), Face = FaceIndex("normal") });
@@ -3824,15 +3897,31 @@ namespace UkagakaBangumi
                     {
                         var row = item as Dictionary<string, object>;
                         object muted, ended;
-                        if (row != null && (!row.TryGetValue("reminder_muted", out muted) || !object.Equals(muted, true)) &&
-                            (!row.TryGetValue("schedule_ended", out ended) || !object.Equals(ended, true)) &&
-                            row.TryGetValue("id", out value)) ids.Add(Str(value));
+                        if (row == null || FinishedWatch(row) || !row.TryGetValue("id", out value) ||
+                            (row.TryGetValue("reminder_muted", out muted) && object.Equals(muted, true))) continue;
+                        object mode, slot;
+                        if (row.TryGetValue("watch_mode", out mode) && Str(mode) == "catchup")
+                        {
+                            if (row.TryGetValue("catchup_slot", out slot) && slot != null) ids.Add("catchup|" + Str(value));
+                        }
+                        else if (!row.TryGetValue("schedule_ended", out ended) || !object.Equals(ended, true)) ids.Add(Str(value));
                     }
                     return ids;
                     }
                 }
             }
             catch (Exception e) { Log("watching check failed: " + e.Message); return null; }
+        }
+
+        static bool FinishedWatch(Dictionary<string, object> row)
+        {
+            object value, episodes, progress;
+            if (row.TryGetValue("manual_finished", out value) && object.Equals(value, true)) return true;
+            double total, seen;
+            return row.TryGetValue("eps", out episodes) && row.TryGetValue("ep_status", out progress) &&
+                double.TryParse(Str(episodes), NumberStyles.Float, CultureInfo.InvariantCulture, out total) &&
+                double.TryParse(Str(progress), NumberStyles.Float, CultureInfo.InvariantCulture, out seen) &&
+                total > 0 && !double.IsInfinity(total) && !double.IsInfinity(seen) && seen >= total;
         }
 
         Dictionary<string, object> ReadReminderSettings()
@@ -3849,13 +3938,22 @@ namespace UkagakaBangumi
 
         static bool ReminderQuiet(Dictionary<string, object> settings, long at)
         {
-            object startText, endText;
-            TimeSpan start, end;
-            if (settings == null || !settings.TryGetValue("quiet_start", out startText) || !settings.TryGetValue("quiet_end", out endText) ||
-                !TimeSpan.TryParseExact(Str(startText), @"hh\:mm", CultureInfo.InvariantCulture, out start) ||
-                !TimeSpan.TryParseExact(Str(endText), @"hh\:mm", CultureInfo.InvariantCulture, out end) || start == end) return false;
-            TimeSpan time = new DateTime(1970, 1, 1).AddSeconds(at).AddHours(8).TimeOfDay;
-            return start < end ? time >= start && time < end : time >= start || time < end;
+            if (settings == null) return false;
+            var date = ReminderLocalTime(at);
+            TimeSpan start, end, time = date.TimeOfDay;
+            if (QuietInterval(settings, date.AddDays(-1).DayOfWeek, out start, out end) && start > end && time < end) return true;
+            return QuietInterval(settings, date.DayOfWeek, out start, out end) && time >= start && (start > end || time < end);
+        }
+
+        static bool QuietInterval(Dictionary<string, object> settings, DayOfWeek day, out TimeSpan start, out TimeSpan end)
+        {
+            string key = day == DayOfWeek.Saturday || day == DayOfWeek.Sunday ? "quiet_weekend" : "quiet_work";
+            object a, b;
+            if (!settings.TryGetValue(key + "_start", out a) || a == null) settings.TryGetValue("quiet_start", out a);
+            if (!settings.TryGetValue(key + "_end", out b) || b == null) settings.TryGetValue("quiet_end", out b);
+            start = end = TimeSpan.Zero;
+            return TimeSpan.TryParseExact(Str(a), @"hh\:mm", CultureInfo.InvariantCulture, out start) &&
+                TimeSpan.TryParseExact(Str(b), @"hh\:mm", CultureInfo.InvariantCulture, out end) && start != end;
         }
 
         DateTime _testReminderStamp;
@@ -3884,7 +3982,7 @@ namespace UkagakaBangumi
             try
             {
                 WritePetCache("pet-presence.json", new { pid = Process.GetCurrentProcess().Id, at = UnixNow(),
-                    version = typeof(PetWindow).Assembly.GetName().Version.ToString(3) });
+                    version = typeof(PetWindow).Assembly.GetName().Version.ToString(3), path = ExePath(), autostart = AutostartPath() });
             }
             catch (Exception ex) { Log("presence: " + ex.Message); }
         }
@@ -3913,7 +4011,9 @@ namespace UkagakaBangumi
                 }
                 const string message = "这是一条测试提醒。";
                 Say(new Line(message, 1), true);
-                Notify("TIARA · 测试提醒", message);
+                bool requested = Notify("TIARA · 测试提醒", message);
+                RecordReminders(new[] { new ReminderCandidate { Test = true, Key = "test|" + id, At = at - 12,
+                    Name = "测试提醒" } }, requested ? "requested" : "unavailable", true);
                 WritePetCache("reminder-test-result.json", new { id = Str(idValue) });
             }
             catch (Exception ex) { Log("test reminder: " + ex.Message); }
@@ -3921,91 +4021,170 @@ namespace UkagakaBangumi
 
         sealed class ReminderCandidate
         {
-            public string Id, Name, Key, Time, Eps;
-            public long At;
+            public string Id, Name, Key, Time, Eps, Stamp;
+            public long At, FireAt;
             public bool Snoozed;
+            public bool Personal;
+            public bool Test;
+            public bool Recovered;
+            public string WatchKey { get { return Personal ? "catchup|" + Id : Id; } }
         }
 
-        /// <summary>到点提醒：开播后 90 秒内说一次；刚启动的两分钟里放宽到 6 小时（关机期间错过的也能补上）</summary>
         void CheckReminders()
         {
-            string date = V("date", "");
-            int count = I("count");
+            if (_closing || _reminderRefreshPending || _snoozeClaimPending) return;
             long now = UnixNow();
-            long grace = (DateTime.Now - _born).TotalSeconds < 120 ? 6 * 3600 : 90;
-            var due = new List<ReminderCandidate>();
-            for (int i = 1; i <= count; i++)
+            if (_lastReminderTick > 0 && (now - _lastReminderTick > 90 || now < _lastReminderTick)) _recoverReminders = true;
+            _lastReminderTick = now;
+            string date = ReminderDate(now);
+            if (V("date", "") != date || (_recoverReminders && V("previous_date", "") != ReminderDate(now - 86400)))
             {
-                long at;
-                if (!long.TryParse(V("show" + i + "_unix", ""), out at) || at <= 0) continue;
-                if (now < at || now > at + grace) continue;
-                string sid = V("show" + i + "_id", "");
-                string key = date + "|" + sid + "|" + at;
-                if (_reminded.Contains(key) || _reminded.Contains(date + "|" + V("show" + i + "_name", ""))) continue;
-                if (string.IsNullOrEmpty(sid)) continue;
-                due.Add(new ReminderCandidate { Id = sid, Key = key, At = at, Name = V("show" + i + "_name", "这一部"),
-                    Time = V("show" + i + "_time_disp", V("show" + i + "_time", "--:--")), Eps = V("show" + i + "_eps", "") });
+                _recoverReminders = true;
+                RefreshReminderSnapshot();
+                return;
             }
-            var snoozes = new List<KeyValuePair<string, ReminderSnooze>>(_snoozed).FindAll(entry => entry.Value.At <= now);
-            if (due.Count == 0 && snoozes.Count == 0) return;
-            // The library write can precede snapshot regeneration. Confirm before notifying.
-            var active = ReadActiveWatchIds();
-            if (active == null) return;
+            bool recover = _recoverReminders;
+            long from = recover ? Math.Max(now - 6 * 3600, _reminderScannedAt > now ? now - 90 : _reminderScannedAt) : now - 90;
             var settings = ReadReminderSettings();
-            bool quietNow = ReminderQuiet(settings, now);
-            due.RemoveAll(item => quietNow || !active.Contains(item.Id) || ReminderQuiet(settings, item.At));
-            foreach (var entry in snoozes)
+            object leadValue;
+            int lead;
+            if (settings == null || !settings.TryGetValue("reminder_lead", out leadValue) ||
+                !int.TryParse(Str(leadValue), out lead) || Array.IndexOf(new[] { 0, 5, 10, 15, 30, 60 }, lead) < 0) lead = 0;
+            var due = new List<ReminderCandidate>();
+            ReadReminderSlots(due, "show", I("count"), from, now, lead);
+            ReadReminderSlots(due, "personal", I("personal_count"), from, now, lead);
+            ReadReminderSlots(due, "previous", I("previous_count"), from, now, lead);
+            if (lead > 0) ReadReminderSlots(due, "next", I("next_count"), from, now, lead);
+            if (!_selfTest && HasDueSnoozes(now))
             {
-                _snoozed.Remove(entry.Key);
-                if (!quietNow && active.Contains(entry.Key) && now - entry.Value.At <= 90 &&
-                    !ReminderQuiet(settings, entry.Value.At) && !due.Exists(item => item.Id == entry.Key))
-                    due.Add(new ReminderCandidate { Id = entry.Key, Name = entry.Value.Name, At = entry.Value.At, Snoozed = true });
+                _snoozeClaimPending = true;
+                CallSnoozes(new { action = "claim" }, result =>
+                {
+                    _snoozeClaimPending = false;
+                    if (!_closing) FinishReminderScan(due, result == null ? null : result.claimed, settings, recover, now);
+                });
+                return;
             }
-            foreach (var item in due) if (!item.Snoozed) _reminded.Add(item.Key);
-            if (due.Count > 0 || snoozes.Count > 0) SaveState();
+            FinishReminderScan(due, null, settings, recover, now);
+        }
+
+        void FinishReminderScan(List<ReminderCandidate> due, List<SnoozeItem> snoozes, Dictionary<string, object> settings, bool recover, long now)
+        {
+            if (!recover && due.Count == 0 && (snoozes == null || snoozes.Count == 0))
+            {
+                _reminderScannedAt = now;
+                if (!_selfTest) SaveState();
+                return;
+            }
+            var active = ReadActiveWatchIds();
+            if (active == null) { RefreshReminderSnapshot(); return; }
+            bool quietNow = ReminderQuiet(settings, now) || _quietUntil > UnixNow();
+            var inactive = due.FindAll(item => !active.Contains(item.WatchKey));
+            var quiet = due.FindAll(item => active.Contains(item.WatchKey) && (quietNow || ReminderQuiet(settings, item.FireAt)));
+            var scanned = new List<ReminderCandidate>(due);
+            due.RemoveAll(item => inactive.Contains(item) || quiet.Contains(item));
+            var snoozeResults = new List<KeyValuePair<ReminderCandidate, string>>();
+            foreach (var entry in snoozes ?? new List<SnoozeItem>())
+            {
+                var item = new ReminderCandidate { Id = entry.id, Name = entry.name, At = entry.due_at, FireAt = entry.due_at,
+                    Snoozed = true, Personal = entry.kind == "catchup", Key = "snooze|" + entry.key };
+                string status = !active.Contains(item.WatchKey) ? "inactive" :
+                    quietNow || ReminderQuiet(settings, item.FireAt) ? "quiet" : due.Exists(existing => existing.Id == item.Id) ? "merged" : null;
+                if (status != null) snoozeResults.Add(new KeyValuePair<ReminderCandidate, string>(item, status));
+                else due.Add(item);
+            }
+            foreach (var item in scanned) _reminded.Add(item.Key);
+            string oldest = ReminderDate(now - 7 * 86400);
+            _reminded.RemoveWhere(key => key.Length > 10 && key[10] == '|' &&
+                string.CompareOrdinal(key.Substring(0, 10), oldest) < 0);
+            long oldScan = _reminderScannedAt;
+            _reminderScannedAt = now;
+            if (!_selfTest && !SaveState())
+            {
+                _reminderScannedAt = oldScan;
+                foreach (var item in scanned) _reminded.Remove(item.Key);
+                _recoverReminders = true;
+                return;
+            }
+            _recoverReminders = false;
+            RecordReminders(inactive, "inactive");
+            RecordReminders(quiet, "quiet");
+            foreach (var result in snoozeResults) RecordReminders(new[] { result.Key }, result.Value);
             if (due.Count == 0) return;
-            ShowDueReminders(due, now);
+            if (recover) ShowMissedReminders(due);
+            else foreach (var batch in due.GroupBy(item => item.FireAt / 60).OrderBy(group => group.Key)) ShowDueReminders(batch.ToList(), now);
             Log("reminded batch=" + due.Count + " total=" + _reminded.Count);
         }
 
         void SnoozeReminders(List<ReminderCandidate> due)
         {
-            long at = UnixNow() + 15 * 60;
-            foreach (var item in due) _snoozed[item.Id] = new ReminderSnooze { Name = item.Name, At = at };
-            SaveState();
+            var options = due.FindAll(item => !item.Snoozed && !item.Test && !string.IsNullOrEmpty(item.Stamp));
+            if (options.Count == 0) { Say(new Line("没有可延后的提醒。", 1), true); return; }
+            CallSnoozes(new { action = "create", minutes = 15, items = options.ConvertAll(item => new
+            {
+                id = item.Id, kind = item.Personal ? "catchup" : "airing", slot_at = item.At, stamp = item.Stamp
+            }) }, result =>
+            {
+                if (result == null || !result.ok) { Say(new Line("没能设好稍后提醒，请核对最新排片。", 1), true); return; }
+                RecordReminders(options, null, action: "snoozed", snoozedUntil: UnixNow() + 15 * 60);
+                Say(new Line("已设置稍后提醒，可在「稍后提醒」里取消。", 1), true);
+            });
         }
 
         void ShowDueReminders(List<ReminderCandidate> due, long now)
         {
+            bool bubble = ReminderCanSpeak;
+            if (due.Exists(item => item.Personal))
+            {
+                var personal = due.FindAll(item => item.Personal);
+                var airing = due.FindAll(item => !item.Personal);
+                string message = "补番提醒\n" + string.Join("\n", personal.ConvertAll(item => "· " + item.Name));
+                if (airing.Count > 0)
+                    message += "\n开播提醒\n" + string.Join("\n", airing.ConvertAll(item => "· " + item.Name));
+                if (bubble)
+                {
+                    SayWithChoices(new Line(message, 1),
+                        new Choice("打开补番清单", () => { RecordReminders(due, null, action: "opened"); OpenWebPanel("?tab=catchup"); }),
+                        new Choice("15 分钟后提醒", () => SnoozeReminders(due)),
+                        new Choice("知道了", () => RecordReminders(due, null, action: "acknowledged")));
+                    Hop();
+                }
+                PublishReminders(due, airing.Count > 0 ? "TIARA · 观看提醒" : "TIARA · 补番提醒", message, bubble);
+                return;
+            }
             if (due.Count == 1)
             {
                 var item = due[0];
-                string message = item.Name + (item.Snoozed || now > item.At + 90 ? " 已经开播了。" : " 开播了。");
-                var mark = new Choice("记一话", () => BumpShow(item.Id, item.Name, 1));
-                if (!_reminderTrayOnly && item.Snoozed) SayWithChoices(new Line(message, 1), mark, new Choice("知道了", delegate { }));
-                else if (!_reminderTrayOnly)
+                string message = item.Snoozed ? "稍后提醒 · " + item.Name : item.Name +
+                    (item.At > now ? " 将于 " + ReminderLocalTime(item.At).ToString("HH:mm", CultureInfo.InvariantCulture) + " 开播。"
+                    : now > item.At + 90 ? " 已经开播了。" : " 开播了。");
+                var mark = new Choice("记一话", () => { RecordReminders(due, null, action: "mark_clicked"); BumpShow(item.Id, item.Name, 1); });
+                if (bubble && item.Snoozed) SayWithChoices(new Line(message, 1), mark,
+                    new Choice("知道了", () => RecordReminders(due, null, action: "acknowledged")));
+                else if (bubble)
                 {
                     var context = new Dictionary<string, string> { { "name_cn", item.Name }, { "time_cst", item.Time }, { "eps", item.Eps } };
-                    SayWithChoices(PickFrom("remind", context, 3, message), mark,
+                    SayWithChoices(item.At > now ? new Line(message, 1) : PickFrom("remind", context, 3, message), mark,
                         new Choice("15 分钟后提醒", () => SnoozeReminders(due)),
-                        new Choice("在看", () => Say(new Line("好，那我不催了。", 1), true)));
+                        new Choice("在看", () => { RecordReminders(due, null, action: "acknowledged"); Say(new Line("好，那我不催了。", 1), true); }));
                 }
-                Notify("TIARA · " + item.Name, message);
+                PublishReminders(due, "TIARA · " + item.Name, message, bubble);
             }
             else
             {
                 string message = due.Count + " 部番已到提醒时间：\n" + string.Join("\n", due.ConvertAll(item => "· " + item.Name));
-                if (!_reminderTrayOnly) SayWithChoices(new Line(message, 1),
+                if (bubble) SayWithChoices(new Line(message, 1),
                     new Choice("查看排片", delegate
                     {
                         if (!PanelOpen) TogglePanel();
                         SelectSchedule(true, -1);
+                        RecordReminders(due, null, action: "opened");
                     }),
                     new Choice("15 分钟后提醒", () => SnoozeReminders(due)),
-                    new Choice("知道了", delegate { }));
-                Notify("TIARA · 开播提醒", message);
+                    new Choice("知道了", () => RecordReminders(due, null, action: "acknowledged")));
+                PublishReminders(due, "TIARA · 开播提醒", message, bubble);
             }
-            if (!_reminderTrayOnly) Hop();
+            if (bubble) Hop();
         }
 
         void ScheduleMidnight()
@@ -4033,10 +4212,9 @@ namespace UkagakaBangumi
             {
                 if (!ok) { Log("new day rebuild failed, retry next minute"); return; }
                 _dayChecked = DateTime.Now.DayOfYear;
-                _reminded.Clear();
                 CheckMilestone();
-                if (!AmbientQuiet && (DateTime.Now - _born).TotalSeconds > 120)
-                    Say(PickFrom("midnight", null, 4, "跨日了。今天的番单我重新排了一遍。"));
+                if (!AmbientQuiet && !_recoverReminders && UnixNow() - _lastReminderSummary > 30 && (DateTime.Now - _born).TotalSeconds > 120)
+                    OfferChatter(() => Say(PickFrom("midnight", null, 4, "跨日了。今天的番单我重新排了一遍。")));
             });
         }
 
@@ -4073,22 +4251,23 @@ namespace UkagakaBangumi
             var ctx = new Dictionary<string, string>();
             ctx["days"] = days.ToString();
             ctx["mark"] = hit.ToString();
-            Say(PickFrom("anniversary", ctx, 1, "第 " + days + " 天了。……我记着呢。"), true);
+            OfferChatter(() => Say(PickFrom("anniversary", ctx, 1, "第 " + days + " 天了。……我记着呢。")));
             Log("milestone " + hit + " days=" + days);
         }
 
         /// <summary>手动拉一次 Bangumi（拿不到网就照旧用本地数据）</summary>
         /// <summary>撤销上一次写库（走 /api/undo，和面板同一个撤销栈）。</summary>
-        void UndoLast()
+        void UndoLast(string revision = null)
         {
             if (_selfTest) { Log("selftest: UndoLast dry-run（只读，不打 /api/undo）"); return; }
-            UsePanel(UndoOnPanel, true);
+            UsePanel(port => UndoOnPanel(port, revision), true);
         }
 
-        void UndoOnPanel(int port)
+        void UndoOnPanel(int port, string revision)
         {
             Say(PickFrom("undoWait", null, 1, "……刚才是记错了吗。我退回一步。"));
-            PostJsonAsync("http://127.0.0.1:" + port + "/api/undo", "{}", delegate (string resp)
+            string body = revision == null ? "{}" : "{\"expected_revision\":" + JsonEncode(revision) + "}";
+            PostJsonAsync("http://127.0.0.1:" + port + "/api/undo", body, delegate (string resp)
             {
                 string depth = JsonField(resp, "depth");
                 bool ok = resp != null && resp.IndexOf("\"error\"") < 0 && resp.IndexOf("\"ok\":true") >= 0;
@@ -4100,7 +4279,8 @@ namespace UkagakaBangumi
                 }
                 else
                 {
-                    Say(PickFrom("undoFail", null, 2, "没有可以退回的了。"), true);
+                    Say(revision == null ? PickFrom("undoFail", null, 2, "没有可以退回的了。") :
+                        new Line("未能撤销这次记录。番库可能已有新的改动，先确认一下进度吧。", 2), true);
                     Log("undo failed: " + (resp == null ? "(null)" : resp.Substring(0, Math.Min(120, resp.Length))));
                 }
             });
@@ -4394,6 +4574,15 @@ namespace UkagakaBangumi
             public string clock { get; set; }
             public string warning { get; set; }
             public List<DesktopScheduleRow> rows { get; set; }
+            public List<PersonalReminderRow> personal { get; set; }
+        }
+
+        public sealed class PersonalReminderRow
+        {
+            public string name { get; set; }
+            public int day { get; set; }
+            public string time { get; set; }
+            public bool quiet { get; set; }
         }
 
         public sealed class DesktopScheduleRow
@@ -4537,7 +4726,7 @@ namespace UkagakaBangumi
 
         void BumpOnPanel(int port, string id, string name, int delta)
         {
-            string body = "{\"id\":" + JsonEncode(id) + ",\"delta\":" + delta + "}";
+            string body = "{\"id\":" + JsonEncode(id) + ",\"delta\":" + delta + ",\"client\":\"desktop\"}";
             // 后台发请求：本地服务卡住时也不能把 UI 线程一起拖住（原来能冻 5 分钟）
             PostJsonAsync("http://127.0.0.1:" + port + "/api/progress", body, delegate (string resp)
             {
@@ -4552,9 +4741,23 @@ namespace UkagakaBangumi
                 _progressPending.Remove(id);
                 _scheduleRevision++;
                 var row = _desktopSchedule == null ? null : _desktopSchedule.rows.Find(item => item.id == id);
-                if (row != null) { row.seen = seen; row.total = total; }
+                bool finished = total > 0 && seen >= total;
+                if (row != null)
+                {
+                    if (finished) _desktopSchedule.rows.Remove(row);
+                    else { row.seen = seen; row.total = total; }
+                }
                 string who = string.IsNullOrEmpty(name) ? "这" : name;
-                if (delta > 0)
+                if (delta > 0 && finished && resp.Contains("\"became_finished\":true"))
+                {
+                    var serializer = new JavaScriptSerializer();
+                    var result = serializer.Deserialize<Dictionary<string, object>>(resp);
+                    string revision = StateValue<string>(serializer, result, "revision");
+                    SayWithChoices(new Line("《" + who + "》已看完，收进番剧库了。", 1),
+                        new Choice("归档", () => ArchiveCompleted(port, id, who)),
+                        new Choice("撤销", () => UndoLast(revision)));
+                }
+                else if (delta > 0)
                 {
                     // 说话交给 AfterBump：它要先判断「是不是连点」「是不是看完了」
                     AfterBump(who, seen, total > 0 ? total : 0);
@@ -4566,8 +4769,22 @@ namespace UkagakaBangumi
 
                 // 立刻重算 + 重画弹层（不然点完还是旧数字）；回调已经在 UI 线程上
                 LoadData();
-                ScheduleFeedback("已保存 · " + who + " 已看 " + seen + (total > 0 ? " / " + total : "") + " 话");
+                ScheduleFeedback(finished ? "已看完 · " + who : "已保存 · " + who + " 已看 " + seen + (total > 0 ? " / " + total : "") + " 话");
                 if (PanelOpen) RefreshDesktopSchedule();
+            });
+        }
+
+        void ArchiveCompleted(int port, string id, string name)
+        {
+            string body = "{\"action\":\"archive\",\"id\":" + JsonEncode(id) + "}";
+            PostJsonAsync("http://127.0.0.1:" + port + "/api/watch/lifecycle", body, delegate (string resp)
+            {
+                if (resp == null || !resp.Contains("\"state\":\"archived\""))
+                {
+                    Say(new Line("未能归档《" + name + "》，可以到番库确认它的状态。", 2), true);
+                    return;
+                }
+                Say(new Line("《" + name + "》已归档，可以在番库找到。", 1), true);
             });
         }
 
@@ -4659,13 +4876,36 @@ namespace UkagakaBangumi
             try
             {
                 var menu = new System.Windows.Forms.ContextMenuStrip();
-                menu.Items.Add("显示 / 隐藏", null, delegate { ToggleVisibleFromTray(); });
-                menu.Items.Add("查看我的排片", null, delegate { ShowFromTray(); if (!PanelOpen) TogglePanel(); });
+                var visibility = menu.Items.Add("隐藏桌宠", null, delegate { ToggleVisibleFromTray(); });
+                menu.Items.Add("找回桌宠", null, delegate { RecallFromTray(); });
+                menu.Items.Add("显示与召回设置", null, delegate { OpenDesktopWindowSettings(); });
+                menu.Items.Add("常用菜单设置", null, delegate { OpenQuickMenuSettings(); });
+                var layers = new Dictionary<string, System.Windows.Forms.ToolStripMenuItem>();
+                foreach (var layer in new[] { new[] { "top", "置顶" }, new[] { "normal", "普通" }, new[] { "bottom", "沉底" } })
+                {
+                    string key = layer[0];
+                    var item = new System.Windows.Forms.ToolStripMenuItem(layer[1]) { Name = "layer-" + key };
+                    item.Click += delegate { SetLayer(key); };
+                    menu.Items.Add(item);
+                    layers.Add(key, item);
+                }
+                menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+                var schedule = menu.Items.Add("查看我的排片", null, delegate { RunQuickAction("schedule"); });
+                menu.Items.Add("打开补番清单", null, delegate { OpenWebPanel("?tab=catchup"); });
+                menu.Items.Add("提醒记录", null, delegate { OpenWebPanel("?reminders=1"); });
+                var snoozes = menu.Items.Add("稍后提醒", null, delegate { RunQuickAction("snoozes"); });
 
                 var bumpMenu = new System.Windows.Forms.ToolStripMenuItem("记一话");
                 menu.Items.Add(bumpMenu);
+                var web = menu.Items.Add("打开网页面板", null, delegate { RunQuickAction("web"); });
                 menu.Opening += delegate
                 {
+                    visibility.Text = IsVisible ? "隐藏桌宠" : "显示桌宠";
+                    RefreshTrayQuickItems(menu);
+                    schedule.Available = !_trayPins.Contains("schedule");
+                    snoozes.Available = !_trayPins.Contains("snoozes");
+                    web.Available = !_trayPins.Contains("web");
+                    foreach (var layer in layers) layer.Value.Checked = _layer == layer.Key;
                     bumpMenu.DropDownItems.Clear();
                     var shows = ReadMenuShows();
                     foreach (var show in QuickMenuShows(shows))
@@ -4678,7 +4918,6 @@ namespace UkagakaBangumi
                     bumpMenu.Enabled = bumpMenu.DropDownItems.Count > 0;
                 };
 
-                menu.Items.Add("打开网页面板", null, delegate { OpenWebPanel(); });
                 menu.Items.Add("撤销上一次记账", null, delegate { UndoLast(); });
                 menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
                 menu.Items.Add("退出 TIARA", null, delegate { ShowFromTray(); BeginQuit(); });
@@ -4697,18 +4936,20 @@ namespace UkagakaBangumi
         }
 
         /// <summary>系统通知：后台时不至于错过，点一下就回到她旁边</summary>
-        void Notify(string title, string text)
+        bool Notify(string title, string text)
         {
             try
             {
-                if (_tray == null) return;
+                if (_tray == null) return false;
                 _tray.BalloonTipTitle = title;
                 _tray.BalloonTipText = text;
                 _tray.BalloonTipIcon = System.Windows.Forms.ToolTipIcon.Info;
                 _tray.ShowBalloonTip(8000);
                 Log("notify " + title + " / " + text);
+                return true;
             }
             catch (Exception ex) { Log("notify failed " + ex.Message); }
+            return false;
         }
 
         System.Drawing.Icon BuildTrayIcon()        {
@@ -4738,6 +4979,8 @@ namespace UkagakaBangumi
 
         void HideToTray()
         {
+            RecordScreenPosition();
+            ResetManualVisibility(false);
             if (_notesWindow != null) _notesWindow.Close();
             Hide();
             Log("hidden to tray");
@@ -4745,10 +4988,37 @@ namespace UkagakaBangumi
 
         void ShowFromTray()
         {
-            Show();
+            ResetManualVisibility(true);
             SnapIntoWorkArea();
             ApplyLayer();
             Log("shown from tray visible=" + IsVisible);
+        }
+
+        void RecallFromTray()
+        {
+            ResetManualVisibility(true);
+            MoveToScreen(System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position), true);
+            RecordScreenPosition(true);
+            SaveState();
+            if (_layer == "bottom")
+            {
+                // Raise it so it can be reached, while remembering the chosen layer.
+                if (_recallLayerTimer == null)
+                {
+                    _recallLayerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
+                    _recallLayerTimer.Tick += delegate { _recallLayerTimer.Stop(); if (!_closing) ApplyLayer(); };
+                }
+                _recallLayerTimer.Stop();
+                _recallLayerTimer.Start();
+            }
+            else ApplyLayer();
+            Activate();
+        }
+
+        internal static System.Drawing.Point RecallPosition(System.Drawing.Rectangle area, int width, int height)
+        {
+            return new System.Drawing.Point(area.Left + Math.Max(0, (area.Width - width) / 2),
+                area.Top + Math.Max(0, (area.Height - height) / 2));
         }
 
         // ---------- 开机自启（走 HKCU 的 Run 键，不需要管理员）----------
@@ -4761,39 +5031,70 @@ namespace UkagakaBangumi
             catch { return null; }
         }
 
-        static bool IsAutostartEnabled()
+        static string AutostartPath()
         {
             try
             {
                 using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey))
                 {
-                    if (k == null) return false;
+                    if (k == null) return null;
                     string v = k.GetValue(RunName) as string;
-                    return !string.IsNullOrEmpty(v);
+                    return string.IsNullOrWhiteSpace(v) ? null : v.Trim().Trim('"');
                 }
             }
-            catch { return false; }
+            catch { return null; }
         }
 
-        static void SetAutostart(bool on)
+        void OpenAutostartSettings()
+        {
+            StackPanel content;
+            var win = UtilityWindow("TIARA · 开机自启", out content);
+            var current = ExePath();
+            var registered = AutostartPath();
+            UtilityText(content, "自启指向：" + (registered ?? "未开启"), true);
+            UtilityText(content, "当前版本：" + current);
+            bool same = string.Equals(registered, current, StringComparison.OrdinalIgnoreCase);
+            if (registered != null && !same)
+                UtilityText(content, File.Exists(registered) ? "开机会打开另一份 TIARA。" : "旧路径已不存在，开机时找不到 TIARA。");
+            var actions = new WrapPanel();
+            content.Children.Add(actions);
+            var status = ScheduleText("", 13, ScheduleMuted);
+            content.Children.Add(status);
+            if (!same) UtilityButton(actions, registered == null ? "确认启用当前版本" : "确认切换到当前版本", "startup-switch", () =>
+            {
+                if (SetAutostart(true)) { WritePetPresence(); win.Close(); }
+                else status.Text = "未更改自启设置，请重试。";
+            });
+            if (registered != null) UtilityButton(actions, "关闭开机自启", "startup-disable", () =>
+            {
+                if (SetAutostart(false)) { WritePetPresence(); win.Close(); }
+                else status.Text = "未更改自启设置，请重试。";
+            });
+            UtilityButton(actions, "取消", "startup-cancel", () => win.Close());
+            win.Show();
+        }
+
+        static bool SetAutostart(bool on)
         {
             try
             {
                 using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey))
                 {
-                    if (k == null) return;
+                    if (k == null) return false;
                     if (on)
                     {
                         string exe = ExePath();
-                        if (!string.IsNullOrEmpty(exe)) k.SetValue(RunName, "\"" + exe + "\"");
+                        if (string.IsNullOrEmpty(exe)) return false;
+                        k.SetValue(RunName, "\"" + exe + "\"");
                     }
                     else
                     {
                         if (k.GetValue(RunName) != null) k.DeleteValue(RunName, false);
                     }
+                    return true;
                 }
             }
-            catch (Exception ex) { Log("autostart failed " + ex.Message); }
+            catch (Exception ex) { Log("autostart failed " + ex.Message); return false; }
         }
 
         /// <summary>说完再见再关：先念一句，3 秒后退出并记住位置</summary>

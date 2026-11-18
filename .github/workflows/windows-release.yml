@@ -1,0 +1,58 @@
+name: Windows release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_version:
+        description: Published portable version used for migration (without v)
+        required: true
+        default: '0.30.0'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Check clean sources
+        run: node tools/ci.mjs
+      - name: Build two public archives
+        run: |
+          node tools/fetch_runtime.mjs --from (Get-Command node.exe).Source
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node tools/pack_release.mjs
+      - name: Verify the previous published asset and exercise the portable upgrade
+        run: |
+          $version = $env:PREVIOUS_VERSION
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid previous version' }
+          $repo = 'https://api.github.com/repos/JerryVon39/TIARA/releases/tags/'
+          $name = "TIARA-portable-$version.zip"
+          $url = "https://github.com/JerryVon39/TIARA/releases/download/v$version/$name"
+          $release = Invoke-RestMethod ($repo + "v$version") -Headers @{ Accept = 'application/vnd.github+json' }
+          $asset = $release.assets | Where-Object { $_.name -eq $name -and $_.browser_download_url -eq $url }
+          if (!$asset -or $asset.digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'Verified migration archive not found' }
+          $zip = Join-Path $env:RUNNER_TEMP $name
+          Invoke-WebRequest $url -OutFile $zip
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ine $asset.digest.Substring(7)) {
+            throw 'Previous portable archive SHA-256 mismatch'
+          }
+          $current = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          & ./tools/verify_release_windows.ps1 -Manifest "dist/v$current/manifest.json" -PreviousZip $zip
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tiara-windows-release-candidate
+          path: |
+            dist/v*/TIARA-portable-*.zip
+            dist/v*/TIARA-ssp-*.zip
+            dist/v*/manifest.json
+          if-no-files-found: error
+          compression-level: 0

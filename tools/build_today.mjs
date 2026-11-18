@@ -21,6 +21,8 @@ import { createHash } from 'node:crypto';
 import { buildToday, timeline, summarize, cstParts, reminders, timeOfDay, actualSchedule, scheduledWeek } from '../lib/today.mjs';
 import { remainingEpisodes } from '../lib/watch-start.mjs';
 import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
+import { catchupReminders } from '../lib/watch-schedule.mjs';
+import { remindStamp } from '../lib/reminder-snooze.mjs';
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -56,7 +58,9 @@ async function readSettings() {
 
 async function main() {
   const raw = await fs.readFile(path.join(ROOT, 'data', 'library.json'));
-  const lib = actualSchedule(JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, '')));
+  const stored = JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, ''));
+  const lib = actualSchedule(stored);
+  const stamps = new Map((stored.watching || []).map(w => [String(w.id), remindStamp(stored, w)]));
   const settings = await readSettings();
 
   const now = dateArg ? dateFromArg(dateArg) : new Date();
@@ -66,13 +70,13 @@ async function main() {
   const { date: dateStr, hour, minute } = cstParts(now);
 
   /** "23:00"(+ "25:30") → 相对今日 00:00 CST 的 unix 秒；解析不了给空串 */
-  const tsOf = (hhmm) => {
+  const tsOf = (hhmm, date = t.date) => {
     const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ''));
     if (!m) return '';
     let h = Number(m[1]);
     let extraDays = 0;
     while (h >= 24) { h -= 24; extraDays += 1; }
-    const ms = Date.parse(`${t.date}T${pad(h)}:${m[2]}:00+08:00`);
+    const ms = Date.parse(`${date}T${pad(h)}:${m[2]}:00+08:00`);
     return Number.isFinite(ms) ? Math.floor(ms / 1000) + extraDays * 86400 : '';
   };
 
@@ -111,10 +115,73 @@ async function main() {
     put(`show${n}_time_disp`, s.time_disp ?? s.time_cst ?? '');
     put(`show${n}_wd_disp`, s.weekday_disp ?? t.weekday);
     put(`show${n}_unix`, tsOf(s.time_cst));
+    put(`show${n}_stamp`, stamps.get(String(s.id)) || '');
     put(`show${n}_aired`, s.aired ? 1 : 0);
     put(`show${n}_eps`, s.watched_eps != null ? `${s.watched_eps}/${s.total_eps}` : '');
     put(`show${n}_behind`, s.behind);
     put(`show${n}_priority`, s.priority);
+  });
+  const midnight = new Date(t.date + 'T00:00:00+08:00');
+  const personal = catchupReminders(lib, midnight).filter(s => Date.parse(s.at) < +midnight + 86400000);
+  put('personal_count', personal.length);
+  personal.forEach((slot, i) => {
+    const n = i + 1;
+    put(`personal${n}_id`, slot.id);
+    put(`personal${n}_name`, slot.name);
+    put(`personal${n}_unix`, Math.floor(Date.parse(slot.at) / 1000));
+    put(`personal${n}_stamp`, stamps.get(String(slot.id)) || '');
+    put(`personal${n}_time`, slot.time);
+  });
+  // The desktop recovery window can reach into yesterday after a Beijing midnight.
+  const previous = new Date(+midnight - 86400000);
+  const previousDay = scheduledWeek(lib, previous)[0];
+  const tracked = new Map(lib.watching.map(w => [String(w.id), w]));
+  function watchedOnPreviousDay(id) {
+    const w = tracked.get(String(id));
+    return w && (!w.track_from || w.track_from <= previousDay.date) ? w : null;
+  }
+  const previousSlots = [];
+  for (const show of previousDay.rows) {
+    const w = watchedOnPreviousDay(show.id);
+    const at = tsOf(show.time_cst, previousDay.date);
+    if (w && at !== '') previousSlots.push({ id: show.id, name: w.name_cn || w.name || show.name_cn, at, personal: false });
+  }
+  for (const slot of catchupReminders(lib, previous)) {
+    if (Date.parse(slot.at) < +midnight && watchedOnPreviousDay(slot.id))
+      previousSlots.push({ id: slot.id, name: slot.name, at: Math.floor(Date.parse(slot.at) / 1000), personal: true });
+  }
+  put('previous_date', previousDay.date);
+  put('previous_count', previousSlots.length);
+  previousSlots.forEach((slot, i) => {
+    const n = i + 1;
+    put(`previous${n}_id`, slot.id);
+    put(`previous${n}_name`, slot.name);
+    put(`previous${n}_unix`, slot.at);
+    put(`previous${n}_stamp`, stamps.get(String(slot.id)) || '');
+    put(`previous${n}_personal`, slot.personal ? 1 : 0);
+  });
+  // An early reminder for a just-after-midnight broadcast may fire tonight.
+  const nextDayStart = new Date(+midnight + 86400000);
+  const nextDay = scheduledWeek(lib, nextDayStart)[0];
+  const nextSlots = [];
+  for (const show of nextDay.rows) {
+    const w = tracked.get(String(show.id)), at = tsOf(show.time_cst, nextDay.date);
+    if (w && (!w.track_from || w.track_from <= nextDay.date) && at !== '')
+      nextSlots.push({ id: show.id, name: w.name_cn || w.name || show.name_cn, at, time: show.time_cst });
+  }
+  for (const slot of catchupReminders(lib, nextDayStart)) {
+    if (Date.parse(slot.at) < +nextDayStart + 86400000)
+      nextSlots.push({ id: slot.id, name: slot.name, at: Math.floor(Date.parse(slot.at) / 1000), time: slot.time, personal: true });
+  }
+  put('next_count', nextSlots.length);
+  nextSlots.forEach((slot, i) => {
+    const n = i + 1;
+    put(`next${n}_id`, slot.id);
+    put(`next${n}_name`, slot.name);
+    put(`next${n}_unix`, slot.at);
+    put(`next${n}_time`, slot.time);
+    put(`next${n}_stamp`, stamps.get(String(slot.id)) || '');
+    put(`next${n}_personal`, slot.personal ? 1 : 0);
   });
   // 给 Pet.exe 的「该提醒了」预计算结果（它自己也会按 30s 扫一遍兜底）
   const rem = reminders(t.today, now, 60);
@@ -136,7 +203,7 @@ async function main() {
   t.catchup.forEach((s, i) => {
     put(`catchup${i + 1}_id`, s.id);
     put(`catchup${i + 1}_name`, s.name_cn || s.name);
-    put(`catchup${i + 1}_eps`, remainingEpisodes(s, s.eps));
+    if (Number(s.eps) > 0) put(`catchup${i + 1}_eps`, remainingEpisodes(s, s.eps));
   });
 
   // 整周排片（今天的之外，桌宠「接下来」用；面板另有实时视图）
