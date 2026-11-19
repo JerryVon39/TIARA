@@ -22,7 +22,7 @@ test('工作日跨午夜到周末，反向亦按开始那天计算，兼容旧�
   assert.equal(quiet({ quiet_start: '23:00', quiet_end: '06:00' }, '2026-11-21T02:00'), true);
 });
 
-test('稍后提醒可延后、取消、重开后领取一次，暂停恢复和修改原档都会失效', async t => {
+test('稍后提醒可延后、取消、超时重领和确认，暂停恢复及改期使旧档失效', async t => {
   const tmp = await fs.realpath(os.tmpdir());
   const root = await fs.mkdtemp(path.join(tmp, 'tiara-snooze-test-'));
   t.after(async () => {
@@ -58,4 +58,12 @@ test('稍后提醒可延后、取消、重开后领取一次，暂停恢复和�
   const due = await reminderSnoozes(root, lib, { action: 'claim' }, saturday + 32 * 60);
   assert.deepEqual(due.claimed.map(row => row.id), ['second']);
   assert.equal((await reminderSnoozes(root, lib, { action: 'claim' }, saturday + 33 * 60)).claimed.length, 0);
+  const retried = await reminderSnoozes(root, lib, { action: 'claim' }, saturday + 34 * 60);
+  assert.deepEqual(retried.claimed.map(row => row.id), ['second']);
+  assert.notEqual(retried.claimed[0].claim_token, due.claimed[0].claim_token);
+  await reminderSnoozes(root, lib, { action: 'ack', items: due.claimed }, saturday + 34 * 60);
+  const current = await reminderSnoozes(root, lib, { action: 'claim' }, saturday + 36 * 60);
+  assert.equal(current.claimed.length, 1, '旧领取凭据不能确认新的领取');
+  await reminderSnoozes(root, lib, { action: 'ack', items: current.claimed }, saturday + 36 * 60);
+  assert.equal((await reminderSnoozes(root, lib, { action: 'claim' }, saturday + 38 * 60)).claimed.length, 0);
 });

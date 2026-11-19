@@ -28,7 +28,10 @@ const missing = [];
 const add = (name, data) => files.push({ name, data: Buffer.from(data, 'utf8') });
 function include(name, optional = false, source = root) {
   try {
-    files.push({ name, data: fs.readFileSync(path.join(source, name)) });
+    const data = fs.readFileSync(path.join(source, name));
+    if (name.endsWith('/descript.txt')) {
+      add(name, data.toString('utf8').replace(/\r\n|\r|\n/g, '\r\n'));
+    } else files.push({ name, data });
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     if (!optional) missing.push(name);

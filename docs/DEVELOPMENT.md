@@ -598,10 +598,10 @@ node tools/doctor.mjs    # 运行时体检：数据、立绘、端口、日志�
 面板的交互回归（换制式 / 切页签 / 改尺寸之后本季表会不会被打回骨架屏）用真浏览器跑：
 
 ```bash
-node tools/check_panel_ui.mjs   # 需要 Edge，会自己起一个无头实例点几下
+node tools/check_panel_ui.mjs   # Windows、Edge 与支持全局 WebSocket 的 Node.js
 ```
 
-输出 `PASS` 才算过，过程图留在 `cache/audit/cdp_*.png`。
+自检启动隔离的面板服务和 Edge 配置，番库、历史与设置来自临时样例。输出 `PASS` 才算通过，过程图在 `cache/audit/tiara-ui-*/`。Windows 发行候选工作流会运行这项检查。
 
 ### 12.2 常见问题
 

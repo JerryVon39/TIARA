@@ -70,7 +70,8 @@ async function makeFixture() {
 async function startServer(root, extraEnv = {}) {
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mjs'), '--port', '0', '--root', root], {
     cwd: ROOT,
-    env: { ...process.env, ...extraEnv },
+    env: { ...process.env, BGM_BASE: 'http://127.0.0.1:1', BGM_BROADCAST_URL: 'http://127.0.0.1:1',
+      BGM_PROXY: '', BGM_USER: '', BGM_TOKEN: '', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -1983,8 +1984,18 @@ test('第五轮：标量、设置保留、撤销版本和真实重建', async t 
   const post = (url, body) => req(srv.port, url, { method: 'POST', body });
   for (const body of ['null', 'false', '0', '""', '[]']) assert.equal((await post('/api/settings', body)).status, 400);
   await fs.writeFile(path.join(root, 'data/settings.json'), JSON.stringify({ clock: '30h', pet_scale: 1, birthday: '11-05' }));
-  await Promise.all([post('/api/settings', { clock: '24h' }), post('/api/settings', { pet_scale: 1.25 })]);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'data/settings.json'))), { clock: '24h', pet_scale: 1.25, birthday: '11-05' });
+  const settings = path.join(root, 'data/settings.json');
+  const patches = await Promise.all([post('/api/settings', { clock: '24h', catchup_goal: 4 }),
+    post('/api/settings', { pet_scale: 1.25 }), post('/api/settings', { power_save: true })]);
+  assert.ok(patches.every(result => result.status === 200));
+  const savedSettings = await fs.readFile(settings, 'utf8');
+  assert.deepEqual(JSON.parse(savedSettings), { clock: '24h', pet_scale: 1.25, birthday: '11-05',
+    catchup_goal: 4, power_save: true });
+  assert.equal((await post('/api/settings', { power_save: 'yes' })).status, 400);
+  await fs.writeFile(settings, '{"clock":');
+  assert.equal((await post('/api/settings', { pet_scale: 1.5 })).status, 500);
+  assert.equal(await fs.readFile(settings, 'utf8'), '{"clock":');
+  await fs.writeFile(settings, savedSettings);
   const a = await post('/api/progress', { id: 554779, delta: 1 });
   assert.equal(a.json.rebuilt, true);
   assert.match(await fs.readFile(path.join(root, 'ghost/master/today.txt'), 'utf8'), /date=\d{4}-\d{2}-\d{2}/);
@@ -1998,6 +2009,29 @@ test('第五轮：标量、设置保留、撤销版本和真实重建', async t 
   assert.equal((await post('/api/undo', { expected_revision: a.json.revision })).status, 409);
   assert.equal((await readLib(root)).watching[0].ep_status, 2);
   assert.ok((await fs.stat(path.join(root, `data/backups/${TODAY}/library.json`))).size > 0);
+});
+
+test('首页、周报、补番目标按同一周计算净观看集数，忽略手动更正', async t => {
+  const root = await makeFixture();
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const get = async url => (await req(srv.port, url)).json;
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const { detail } = (await post('/api/watch/detail', {
+    name: '手动补番统计', eps: 12, ep_status: 0, watch_mode: 'catchup',
+  })).json;
+  const id = detail.id;
+  const now = new Date();
+  const previousSunday = cstParts(new Date(+now - cstParts(now).weekday * 86400000)).date;
+  const progress = async fields => assert.equal((await post('/api/progress', { id, ...fields })).status, 200);
+  await progress({ delta: 1, watched_on: previousSunday });
+  await progress({ delta: 1 });
+  await progress({ delta: -1 });
+  await progress({ set: 4 });
+  const [stats, report, state] = await Promise.all([get('/api/stats'), get('/api/watch/report'), get('/api/state')]);
+  assert.equal(stats.total, 1);
+  assert.deepEqual([stats.week, report.count, report.mode.catchup, state.catchup_week.watched], [0, 0, 0, 0]);
+  assert.equal((await get('/api/watch/report?week=' + previousSunday)).count, 1);
 });
 
 test('同步网络等待期间的进度不会丢；同步使用备份、撤销和成功时间戳', async t => {

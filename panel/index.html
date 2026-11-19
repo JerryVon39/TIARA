@@ -18,21 +18,18 @@
   <header class="bar" id="panelHeader">
     <div class="brand"><img class="avatar" src="./icon-64.png" alt="" width="38" height="38" /><div><span class="mark">TIARA</span><h1>追番放送簿</h1></div></div>
     <nav class="tabs" aria-label="番组视图">
-      <button class="tab on" data-tab="week" aria-current="page">我的排片<span class="kbd" aria-hidden="true">1</span></button>
-      <button class="tab" data-tab="today">今天<span class="kbd" aria-hidden="true">2</span></button>
-      <button class="tab" data-tab="season">本季<span class="kbd" aria-hidden="true">3</span></button>
-      <button class="tab" data-tab="library">番库<span class="kbd" aria-hidden="true">4</span></button>
-      <button class="tab" data-tab="catchup">补番<span class="kbd" aria-hidden="true">5</span></button>
+      <button class="tab on" data-tab="today" aria-current="page">我的排片</button>
+      <button class="tab" data-tab="season">本季</button>
+      <button class="tab" data-tab="library">番库</button>
+      <button class="tab" data-tab="catchup">补番</button>
     </nav>
-    <span class="grow"></span>
+    <form class="panel-search" id="panelSearch" role="search" aria-label="全番库">
+      <input type="search" id="q" aria-label="搜索全番库" aria-controls="globalSearch" placeholder="搜索番名或别名" />
+      <button type="button" id="clearSearch" aria-label="清除搜索" hidden>×</button>
+    </form>
     <div class="tools">
-      <span class="date" id="dateLabel">—</span>
-      <button id="pendingBtn" class="ghost" title="落后至少一话的番，点开看是哪几部" hidden>待看 0</button>
-      <input type="search" id="q" aria-label="搜索全番库" placeholder="搜索番名或别名" />
-      <button id="clockBtn" title="切换排期和提醒的时制。30 小时制将凌晨 00:00–04:59 显示为前一天 24:00–28:59">30h</button>
-      <button id="addWatchBtn" data-new-watch class="primary" aria-label="手动添加番剧">新增</button>
-      <button id="animeSearchBtn" type="button">跨季度找番</button>
-      <button id="syncBtn">同步</button>
+      <button type="button" id="addWatchBtn" data-new-watch class="primary" aria-label="添加番剧">新增</button>
+      <button type="button" id="settingsNav">设置</button>
     </div>
   </header>
 
@@ -41,42 +38,7 @@
     <div class="wrap" id="view"><div class="panel empty" role="status">正在读取本地番组库…</div></div>
   </main>
 
-  <footer class="dock" id="panelFooter">
-    <div class="dock-group" aria-label="数据工具">
-    <button id="restoreBtn">备份与恢复</button>
-    <button id="migrationBtn">升级与换机</button>
-    <button id="icsBtn">导出日历</button>
-    <button id="mdBtn">导出周表</button>
-    <button id="tokenBtn">Bangumi 账号</button>
-    <button id="nickBtn">桌宠称呼</button>
-    <button id="reminderBtn">提醒设置</button>
-    <button id="reminderHistoryBtn">提醒记录</button>
-    <button id="watchHistoryBtn">观看历史</button>
-    <button id="watchReportBtn">本地周报</button>
-    <button id="diagBtn">诊断</button>
-    <button id="settingsNav">设置</button>
-    </div>
-    <div class="dock-group" aria-label="显示偏好">
-    <label for="scaleSel">桌宠尺寸</label>
-    <select id="scaleSel">
-      <option value="0.7">70%</option>
-      <option value="0.85">85%</option>
-      <option value="1" selected>100%</option>
-      <option value="1.25">125%</option>
-      <option value="1.5">150%</option>
-      <option value="2">200%</option>
-    </select>
-    <label for="coverSel">封面</label>
-    <select id="coverSel">
-      <option value="sm">小</option>
-      <option value="md" selected>中</option>
-      <option value="lg">大</option>
-      <option value="xl">特大</option>
-    </select>
-    <button id="themeBtn" class="ghost" title="在「暗 / 亮 / 跟随系统」之间切换">亮色</button>
-    </div>
-    <span class="hint" id="footHint">纯本地 · 数据不出门</span>
-  </footer>
+  <footer class="dock" id="panelFooter"><span id="footHint">TIARA · 本地番库</span></footer>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="mask" id="mask" aria-hidden="true" hidden><div class="dlg" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" tabindex="-1"></div></div>

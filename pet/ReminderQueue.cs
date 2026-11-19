@@ -21,6 +21,8 @@ namespace UkagakaBangumi
             public string name { get; set; }
             public string status { get; set; }
             public long due_at { get; set; }
+            public long lease_until { get; set; }
+            public string claim_token { get; set; }
         }
 
         public sealed class SnoozeResponse
@@ -42,10 +44,28 @@ namespace UkagakaBangumi
                 using (var reader = new StreamReader(stream, Encoding.UTF8))
                 {
                     var rows = new JavaScriptSerializer().Deserialize<List<SnoozeItem>>(reader.ReadToEnd());
-                    return rows != null && rows.Exists(row => row != null && row.status == "pending" && row.due_at <= now);
+                    return rows != null && rows.Exists(row => row != null && row.status == "pending" &&
+                        row.due_at <= now && row.lease_until <= now);
                 }
             }
             catch { return false; }
+        }
+
+        string SnoozeDeliveryKey(SnoozeItem item)
+        {
+            return ReminderDate(item.due_at) + "|snooze|" + item.key;
+        }
+
+        void ConfirmSnoozes(List<SnoozeItem> snoozes)
+        {
+            if (snoozes == null || snoozes.Count == 0) return;
+            foreach (var item in snoozes) _reminded.Add(SnoozeDeliveryKey(item));
+            SaveState();
+            var items = snoozes.ConvertAll(item => new { item.key, item.claim_token });
+            CallSnoozes(new { action = "ack", items }, result =>
+            {
+                if (result == null || !result.ok) Log("snooze ack failed; will confirm the next claim");
+            });
         }
 
         void CallSnoozes(object request, Action<SnoozeResponse> done)

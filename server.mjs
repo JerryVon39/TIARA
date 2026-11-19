@@ -32,7 +32,7 @@ import { historyIdValid, historyRetractions, retraceHistory } from './lib/histor
 import { episodeCoverage, episodeDiff, quickEpisodeDiff, storeEpisodeDiff, validEpisodeList } from './lib/watch-episodes.mjs';
 import { readEpisodeCatalog, refreshEpisodeCatalog } from './lib/episode-catalog.mjs';
 import { broadcastDate, broadcastStatus, readBroadcastMeta, saveBroadcastMeta } from './lib/broadcast-status.mjs';
-import { watchWeekReport } from './lib/watch-report.mjs';
+import { watchHistoryDelta, watchWeekStart, watchWeekReport } from './lib/watch-report.mjs';
 import { commitProgress, progressJournal } from './lib/progress-commit.mjs';
 import { readSeasonCache, writeSeasonCache, listCachedSeasons, hasSeasonCache } from './lib/season-cache.mjs';
 import { coverIdOf, coverCachePath, coverMediaType, downloadCover, pickCoverUrl, COVER_MAX_AGE, COVER_MAX_BYTES } from './lib/cover.mjs';
@@ -122,22 +122,25 @@ async function readJSON(rel) {
 // ---------------- 用户偏好（data/settings.json） ----------------
 const SETTINGS_REL = 'data/settings.json';
 
-async function readSettings() {
+async function readSettings({ strict = false } = {}) {
   try {
-    const s = JSON.parse(await fs.readFile(path.join(ROOT, SETTINGS_REL), 'utf8'));
+    const raw = await fs.readFile(path.join(ROOT, SETTINGS_REL), 'utf8');
+    const s = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error('invalid settings');
     const scale = Number(s.pet_scale);
     return {
       ...s,
       clock: s.clock === '24h' || s.clock === '30h' ? s.clock : DEFAULT_SETTINGS.clock,
       pet_scale: Number.isFinite(scale) && scale >= 0.5 && scale <= 2 ? scale : DEFAULT_SETTINGS.pet_scale,
     };
-  } catch {
+  } catch (error) {
+    if (strict && error.code !== 'ENOENT') throw new Error('无法读取现有设置，未保存变更。请检查 data/settings.json。');
     return { ...DEFAULT_SETTINGS };
   }
 }
 
 async function writeSettings(patch) {
-  const cur = await readSettings();
+  const cur = await readSettings({ strict: true });
   const scale = Number(patch.pet_scale);
   const next = {
     ...cur,
@@ -155,6 +158,7 @@ async function writeSettings(patch) {
   }
   if (patch.reminder_lead !== undefined) next.reminder_lead = patch.reminder_lead;
   if (patch.catchup_goal !== undefined) next.catchup_goal = patch.catchup_goal;
+  if (patch.power_save !== undefined) next.power_save = patch.power_save;
   await fs.mkdir(path.dirname(path.join(ROOT, SETTINGS_REL)), { recursive: true });
   await writeFileAtomic(path.join(ROOT, SETTINGS_REL), JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8' });
   return next;
@@ -1036,13 +1040,15 @@ async function apiWatchDetail(req, res) {
     const found = findWatchEntry(lib, id);
     if (!found) return json(res, { error: '找不到这部番' }, 404, req);
     const detail = watchDetail(lib, found.entry, found.state);
+    const original = relationId(detail.id) ? (await broadcastSuggestions(ROOT, [detail.id], { originalOnly: true })
+      .catch(() => ({})))[detail.id] || null : null;
     const active = found.state === 'watching' && !detail.finished && !isCatchup(detail);
     let airing = active ? watchAiring(detail, found.entry.start_date) : null;
     if (!airing && active && !detail.schedule_ended && !found.entry.schedule_manual && /^\d+$/.test(detail.id)) {
       airing = (await broadcastSuggestions(ROOT, [detail.id]).catch(() => ({})))[detail.id] || null;
     }
     const reminder = reminderStatus(detail, scheduleRow(lib, found.entry), await readSettings(), found.entry.start_date);
-    return json(res, { ok: true, detail, airing, reminder }, 200, req);
+    return json(res, { ok: true, detail, airing, original, reminder }, 200, req);
   }
   if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
   if (!guardWrite(req, res)) return;
@@ -1803,6 +1809,8 @@ async function apiSettings(req, res) {
     return json(res, { error: '请从可选的提前量中选择' }, 400, req);
   if (body.catchup_goal !== undefined && (!Number.isInteger(body.catchup_goal) || body.catchup_goal < 0 || body.catchup_goal > 999))
     return json(res, { error: '每周补番目标须为 0–999 集，0 表示关闭' }, 400, req);
+  if (body.power_save !== undefined && typeof body.power_save !== 'boolean')
+    return json(res, { error: '省电模式必须是布尔值' }, 400, req);
   const next = await withWriteLock(() => writeSettings(body));
   const rebuilt = await rebuildToday();
   json(res, { ok: true, settings: next, ...rebuildInfo(rebuilt) }, 200, req);
@@ -2581,16 +2589,15 @@ async function apiExport(req, res) {
 }
 
 function catchupWeekFromRows(rows, settings, now) {
-  const { date, weekday } = cstParts(now);
-  const monday = cstParts(new Date(+now - (weekday - 1) * 86400000)).date;
+  const { date } = cstParts(now);
+  const monday = cstParts(watchWeekStart(now)).date;
   const goal = Number.isInteger(settings.catchup_goal) ? settings.catchup_goal : 0;
-  const perTitle = new Map();
+  let watched = 0;
   for (const row of rows) {
     if (row.watch_mode !== 'catchup' || row.date < monday || row.date > date || !row.date) continue;
-    const delta = Number(row.delta);
-    if (Number.isFinite(delta)) perTitle.set(String(row.id), (perTitle.get(String(row.id)) || 0) + delta);
+    watched += watchHistoryDelta(row);
   }
-  return { goal, watched: [...perTitle.values()].reduce((sum, value) => sum + Math.max(0, value), 0), monday };
+  return { goal, watched, monday };
 }
 
 async function catchupWeek(library, settings, now) {
@@ -2608,26 +2615,24 @@ async function apiStats(req, res) {
   let rows = [];
   try { rows = await readHistoryRows(library); } catch { rows = []; }
 
-  const days = new Set();
   let weekCount = 0;
   let total = 0;
   const byDay = new Map();
-  const today = cstParts().date;
-  const weekAgo = cstParts(new Date(Date.now() - 6 * 86400e3)).date;
+  const now = new Date();
+  const today = cstParts(now).date;
+  const monday = cstParts(watchWeekStart(now)).date;
   for (const r of rows) {
-    if (r.event === 'season' || r.action === 'season') continue;
-    const delta = Number(r.delta || 0);
-    if (delta > 0 && r.date) {
-      days.add(r.date);
-      total += delta;
-      byDay.set(r.date, (byDay.get(r.date) || 0) + delta);
-      if (r.date >= weekAgo && r.date <= today) weekCount += delta;
-    }
+    const delta = watchHistoryDelta(r);
+    if (!delta || !validHistoryDate(r.date) || r.date > today) continue;
+    total += delta;
+    byDay.set(r.date, (byDay.get(r.date) || 0) + delta);
+    if (r.date >= monday) weekCount += delta;
   }
+  const days = new Set([...byDay].filter(([, count]) => count > 0).map(([date]) => date));
   // 最近 14 天，从 13 天前排到今天
   const spark = [];
   for (let i = 13; i >= 0; i--) {
-    const d = cstParts(new Date(Date.now() - i * 86400e3)).date;
+    const d = cstParts(new Date(+now - i * 86400e3)).date;
     spark.push({ date: d, n: byDay.get(d) || 0 });
   }
   let finished = 0;
@@ -2640,7 +2645,7 @@ async function apiStats(req, res) {
   let streak = 0;
   let off = days.has(today) ? 0 : 1; // 今天还没看就从昨天开始数
   for (; off < 400; off++) {
-    const d = cstParts(new Date(Date.now() - off * 86400e3)).date;
+    const d = cstParts(new Date(+now - off * 86400e3)).date;
     if (!days.has(d)) break;
     streak += 1;
   }
