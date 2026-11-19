@@ -57,7 +57,7 @@ const FILES = [
   'docs/images/panel.png', 'docs/images/pet-menu.png',
 ];
 /** 永不打包 */
-const SKIP_EXT = new Set(['.log', '.bak', '.tmp', '.zip']);
+const SKIP_EXT = new Set(['.log', '.bak', '.tmp', '.zip', '.exe']);
 const SKIP_NAME = new Set(['node_modules', '.git', '.vscode', 'dist', 'cache', 'obj', 'bin']);
 const GENERATED = new Set(['ghost/master/today.txt', 'ghost/master/today.json',
   'ghost/master/basis.dic', 'ghost/master/yaya.txt']);
@@ -126,7 +126,7 @@ const guide = `TIARA 便携版 v${pkg.version}
   data/library.json       你的番组库（初始为空，在网页「本季番剧」添加）
   data/backups/           每次写库前的自动备份
   data/history.jsonl      进度历史
-  cache/server.log        服务日志（出问题时先看这个，网页里「诊断」按钮也能看）
+  cache/server.log        服务日志（也可在网页「设置 → 启动诊断」查看）
 
 四、桌宠
   右键桌宠可查看排片、打开网页面板、记一话或撤销。尺寸、省电和开机自启都在「桌宠设置」。
@@ -134,7 +134,7 @@ const guide = `TIARA 便携版 v${pkg.version}
   详细上手步骤见 README.md；开发与构建说明见 docs/DEVELOPMENT.md。
 
 五、升级或换电脑
-  把新版解压到另一个目录，退出旧版。在新版网页底栏打开「升级与换机」。
+  把新版解压到另一个目录，退出旧版。在新版网页打开「设置 → 升级与换机」。
   选择旧版的 data 文件夹或已导出的迁移文件，检查预览后确认。导入前会自动备份新版的现有数据。
   迁移文件带有番库、观看历史、偏好和陪伴记忆，Bangumi 令牌请在新安装中重新填写。
 `;

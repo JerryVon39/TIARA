@@ -1158,7 +1158,7 @@ namespace UkagakaBangumi
                 _powerSave = power.IsChecked;
                 Log("power_save=" + _powerSave);
                 SaveState();
-                SavePowerToSettings(_powerSave);
+                QueueSettingsPatch("power_save", _powerSave);
                 Say(new Line(_powerSave ? "……電力、節約します。" : "……呼吸、再開します。", 0), true);
             };
             var auto = Item("开机自启路径", (s, e) => OpenAutostartSettings());
@@ -1221,8 +1221,7 @@ namespace UkagakaBangumi
             if (_bubbleHost != null && _bubbleHost.Visibility == Visibility.Visible) ApplyHeight(true);
             SnapIntoWorkArea();
             if (saveState) SaveState();
-            // settings.json 是尺寸的唯一真源（面板改的也是它）；只写 state.json 会被 60 s 后的检查掰回去
-            if (persist) SaveScaleToSettings(_scale);
+            if (persist) QueueSettingsPatch("pet_scale", Math.Round(_scale, 2));
             Log("scale=" + _scale.ToString("0.##", CultureInfo.InvariantCulture) + " win=" + Width.ToString("0") + "x" + Height.ToString("0") + " bubbleMax=" + BubbleTextMax.ToString("0") + " max=" + MaxScale().ToString("0.##", CultureInfo.InvariantCulture));
         }
 
@@ -3769,22 +3768,25 @@ namespace UkagakaBangumi
         }
 
         DateTime _settingsStamp;
+        bool _settingsWritePending;
+        readonly Dictionary<string, object> _settingsPatch = new Dictionary<string, object>();
 
         void CheckSettingsFile()
         {
             CheckTodayFile();
+            if (_settingsWritePending) return;
             try
             {
                 string sp = Path.Combine(_root, "data", "settings.json");
                 if (!File.Exists(sp)) return;
                 DateTime st = File.GetLastWriteTimeUtc(sp);
                 if (st == _settingsStamp) return;
-                _settingsStamp = st;
                 var ser = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
                 var d = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(sp, Encoding.UTF8));
                 object v;
                 double sc;
                 if (d == null) return;
+                _settingsStamp = st;
                 object ps;
                 if (d.TryGetValue("power_save", out ps))
                 {
@@ -3802,46 +3804,35 @@ namespace UkagakaBangumi
             catch (Exception ex) { Log("settings watch failed " + ex.Message); }
         }
 
-        /// <summary>尺寸写回 settings.json（和 SavePowerToSettings 是同一份文件、同一套读-改-写）。</summary>
-        void SaveScaleToSettings(double scale)
+        // 尺寸和省电档通过面板服务的同一把写锁保存。滚轮连续缩放只排队保存最新值。
+        void QueueSettingsPatch(string key, object value)
         {
-            if (_selfTest) return;      // 自检只读：连 settings.json 也不动
-            try
-            {
-                string sp = Path.Combine(_root, "data", "settings.json");
-                Dictionary<string, object> d = null;
-                if (File.Exists(sp))
-                {
-                    var ser = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
-                    d = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(sp, Encoding.UTF8));
-                }
-                if (d == null) d = new Dictionary<string, object>();
-                d["pet_scale"] = Math.Round(scale, 2);
-                File.WriteAllText(sp, new JavaScriptSerializer().Serialize(d), new UTF8Encoding(false));
-                // 自己写的时间戳记下来，否则下一次 CheckSettingsFile 会当成「面板改了」再 ApplyScale 一次
-                _settingsStamp = File.GetLastWriteTimeUtc(sp);
-                Log("settings pet_scale=" + scale.ToString("0.##", CultureInfo.InvariantCulture));
-            }
-            catch (Exception ex) { Log("settings save scale failed: " + ex.Message); }
+            if (_selfTest || _closing) return;
+            _settingsPatch[key] = value;
+            SendSettingsPatch();
         }
 
-        /// <summary>省电档写回 settings.json（面板与 doctor 都能看到），失败就算了。</summary>
-        void SavePowerToSettings(bool on)
+        void SendSettingsPatch()
         {
-            try
+            if (_settingsWritePending || _closing) return;
+            _settingsWritePending = true;
+            string body = new JavaScriptSerializer().Serialize(_settingsPatch);
+            _settingsPatch.Clear();
+            Action<string> completed = raw =>
             {
-                string sp = Path.Combine(_root, "data", "settings.json");
-                Dictionary<string, object> d = null;
-                if (File.Exists(sp))
+                if (_closing) return;
+                _settingsWritePending = false;
+                if (raw == null)
                 {
-                    var ser = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
-                    d = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(sp, Encoding.UTF8));
+                    Log("settings patch failed");
+                    _settingsStamp = DateTime.MinValue;
+                    Say(new Line("设置未能保存，请重试。", 2), true);
                 }
-                if (d == null) d = new Dictionary<string, object>();
-                d["power_save"] = on ? "1" : "0";
-                File.WriteAllText(sp, new JavaScriptSerializer().Serialize(d), new UTF8Encoding(false));
-            }
-            catch (Exception ex) { Log("settings save power failed " + ex.Message); }
+                if (_settingsPatch.Count > 0) SendSettingsPatch();
+                else CheckSettingsFile();
+            };
+            UsePanel(port => PostJsonAsync("http://127.0.0.1:" + port + "/api/settings", body, completed),
+                false, () => completed(null));
         }
 
         DateTime _todayStamp;
@@ -4086,6 +4077,7 @@ namespace UkagakaBangumi
             var snoozeResults = new List<KeyValuePair<ReminderCandidate, string>>();
             foreach (var entry in snoozes ?? new List<SnoozeItem>())
             {
+                if (_reminded.Contains(SnoozeDeliveryKey(entry))) continue;
                 var item = new ReminderCandidate { Id = entry.id, Name = entry.name, At = entry.due_at, FireAt = entry.due_at,
                     Snoozed = true, Personal = entry.kind == "catchup", Key = "snooze|" + entry.key };
                 string status = !active.Contains(item.WatchKey) ? "inactive" :
@@ -4110,10 +4102,13 @@ namespace UkagakaBangumi
             RecordReminders(inactive, "inactive");
             RecordReminders(quiet, "quiet");
             foreach (var result in snoozeResults) RecordReminders(new[] { result.Key }, result.Value);
-            if (due.Count == 0) return;
-            if (recover) ShowMissedReminders(due);
-            else foreach (var batch in due.GroupBy(item => item.FireAt / 60).OrderBy(group => group.Key)) ShowDueReminders(batch.ToList(), now);
-            Log("reminded batch=" + due.Count + " total=" + _reminded.Count);
+            if (due.Count > 0)
+            {
+                if (recover) ShowMissedReminders(due);
+                else foreach (var batch in due.GroupBy(item => item.FireAt / 60).OrderBy(group => group.Key)) ShowDueReminders(batch.ToList(), now);
+                Log("reminded batch=" + due.Count + " total=" + _reminded.Count);
+            }
+            ConfirmSnoozes(snoozes);
         }
 
         void SnoozeReminders(List<ReminderCandidate> due)

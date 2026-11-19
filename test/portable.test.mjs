@@ -18,7 +18,7 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   await fs.mkdir(path.join(root, 'runtime'));
   await fs.copyFile(process.execPath, path.join(root, 'runtime', 'node.exe'));
   const secret = 'PRIVATE_FIXTURE_92726';
-  for (const rel of ['data/library.json', 'data/bgm.json', 'data/history.jsonl', 'data/history-2025.jsonl', 'data/talks.json', 'data/state.json', 'data/backups/2026-11-09/bgm.json', 'data/undo/step-1.json', 'ghost/master/basis.dic', 'ghost/master/today.json', 'ghost/master/words.txt', 'ghost-yaya/master/basis.dic', 'shell/custom/surfaces.json']) {
+  for (const rel of ['data/library.json', 'data/bgm.json', 'data/history.jsonl', 'data/history-2025.jsonl', 'data/talks.json', 'data/state.json', 'data/backups/2026-11-09/bgm.json', 'data/undo/step-1.json', 'ghost/master/basis.dic', 'ghost/master/today.json', 'ghost/master/words.txt', 'ghost-yaya/master/basis.dic', 'shell/custom/surfaces.json', 'tools/ImageTool.exe']) {
     await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
     await fs.writeFile(path.join(root, rel), JSON.stringify({ secret }));
   }
@@ -32,6 +32,7 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   assert.deepEqual(JSON.parse(zip.find(x => x.name === 'data/library.json').data).watching, []);
   assert.deepEqual(zip.filter(x => x.name.startsWith('ghost')).map(x => x.name).sort(),
     ['basis.dic', 'descript.txt', 'today.json', 'today.txt', 'yaya.txt'].map(name => `ghost/master/${name}`));
+  assert.deepEqual(zip.filter(x => x.name.toLowerCase().endsWith('.exe')).map(x => x.name), ['runtime/node.exe']);
   assert.ok(zip.some(x => x.name === 'runtime/node.exe' && x.data.length > 0));
 });
 
@@ -40,6 +41,11 @@ test('SSP 公开包是空库，只有私人快照含本机排片，且不能写�
   const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   for (const rel of ['tools', 'lib', 'package.json', 'ghost/master/descript.txt', 'shell/master'])
     await fs.cp(path.join(source, rel), path.join(root, rel), { recursive: true });
+  const descriptors = ['ghost/master/descript.txt', 'shell/master/descript.txt'];
+  for (const name of descriptors) {
+    const file = path.join(root, name);
+    await fs.writeFile(file, (await fs.readFile(file, 'utf8')).replace(/\r\n/g, '\n'));
+  }
   const title = 'PRIVATE_SSP_SHOW_6038';
   const credentials = 'PRIVATE_BGM_TOKEN_6038';
   await fs.mkdir(path.join(root, 'data'));
@@ -58,6 +64,11 @@ test('SSP 公开包是空库，只有私人快照含本机排片，且不能写�
     const entries = readZip(await fs.readFile(path.join(root, file)));
     assert.ok(entries.some(x => x.name === 'install.txt'));
     assert.ok(entries.some(x => x.name === 'ghost/master/basis.dic'));
+    for (const name of descriptors) {
+      const text = entries.find(entry => entry.name === name).data.toString('utf8');
+      assert.match(text, /\r\n/);
+      assert.doesNotMatch(text, /(?<!\r)\n|\r(?!\n)/);
+    }
     assert.equal(entries.some(x => x.data.includes(Buffer.from(credentials))), false);
     assert.equal(entries.some(x => x.data.includes(Buffer.from(title))), isPrivate);
     assert.equal(entries.some(x => x.data.includes(Buffer.from('私人称呼'))), isPrivate);

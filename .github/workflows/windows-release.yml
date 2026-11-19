@@ -25,6 +25,8 @@ jobs:
           node-version: '24'
       - name: Check clean sources
         run: node tools/ci.mjs
+      - name: Check panel interactions in Edge
+        run: node tools/check_panel_ui.mjs
       - name: Build two public archives
         run: |
           node tools/fetch_runtime.mjs --from (Get-Command node.exe).Source

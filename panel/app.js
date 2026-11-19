@@ -11,6 +11,7 @@
   var WATCH_STATE_LABEL = { watching: '在追', paused: '已暂停', finished: '已看完', archived: '已归档', catchup: '补番中', planned: '待看', dropped: '已弃番', removed: '已移除' };
   var LIBRARY_STATES = { watching: '在追', catchup_list: '补番中', planned: '待看', paused: '已暂停', finished: '已看完', archived: '已归档', dropped: '已弃番', removed: '已移除' };
   var libraryFilter = '', searchFilter = '', searchLimit = 8;
+  var searchScroll = 0, searchViewDirty = false;
   var libraryBatch = false;
   var libraryView = { year: '', tag: '', link: '' }, savedLibraryViews = {};
   var compactWeek = false, homeView = '';
@@ -20,14 +21,14 @@
   var IMAGES = {};
   var missingCovers = new Map();
   var coverVersions = new Map();
-  var TAB = 'week';
+  var TAB = 'today';
   /** ?welcome=1 时强制给一遍新手引导（老用户想复习时用） */
   var WELCOME_FORCE = false;
   var QUERY = '';
   var CLOCK = '30h';
   var WEEK_ALL = false;
   var BUSY = false;
-  /** 键盘当前选中的番 id（.show.sel） */
+  /** 键盘当前选中的卡片。同一番剧可以出现在不同分组。 */
   var SEL = null;
   var SEASON = null;
   var SEASON_MARK = {};
@@ -42,6 +43,7 @@
   /** 本季筛选条件（放在这里，refresh 重绘后不会被 reset） */
   var SEASON_FILTER = { onlyTv: true, hideWatching: false, onlyTodo: false, sortBy: 'weekday' };
   var COVER = { sm: [28, 38], md: [36, 48], lg: [46, 62], xl: [58, 78] };
+  var coverSize = 'md';
 
   // ---------------- 工具 ----------------
   function esc(s) {
@@ -120,12 +122,11 @@
       });
     });
   }
-  function q() { return QUERY.trim().toLowerCase(); }
-  function match(x) {
-    var s = q();
-    if (!s) return true;
-    var hay = [x.name_cn, x.name, x.id, x.priority, x.alias, x.tags, x.user_details?.tags].flat().join(' ').normalize('NFKC').toLowerCase();
-    return s.normalize('NFKC').split(/\s+/).every(function (word) { return hay.includes(word); });
+  function q() { return QUERY.normalize('NFKC').trim().toLowerCase(); }
+  function matchLibrary(item, words) {
+    var hay = [item.name_cn, item.name, item.original_name, item.id, item.priority, item.alias, item.tags, item.user_details?.tags]
+      .flat().join(' ').normalize('NFKC').toLowerCase();
+    return words.every(function (word) { return hay.includes(word); });
   }
   /** 本季表「算 TV」的口径：写了平台看平台，没写就按话数猜。过滤与「全选」共用它，别各写一套。 */
   function tvLike(x) {
@@ -182,16 +183,13 @@
     var wd = weekday ? (weekday === 1 ? 7 : weekday - 1) : 0;
     return { time: String(h + 24) + ':' + m[2], wd: wd };
   }
-  function paintClock() { $('#clockBtn').textContent = CLOCK === '30h' ? '30h' : '24h'; }
-
   /** 封面尺寸：小 / 中 / 大 / 特大（记在 localStorage） */
   function setCover(key) {
-    var size = COVER[key] || COVER.md;
+    coverSize = Object.hasOwn(COVER, key) ? key : 'md';
+    var size = COVER[coverSize];
     document.documentElement.style.setProperty('--cv-w', size[0] + 'px');
     document.documentElement.style.setProperty('--cv-h', size[1] + 'px');
-    var sel = document.getElementById('coverSel');
-    if (sel) sel.value = COVER[key] ? key : 'md';
-    try { localStorage.setItem('kx.cover', key); } catch (e) {}
+    try { localStorage.setItem('kx.cover', coverSize); } catch (e) {}
   }
 
   /**
@@ -257,18 +255,9 @@
         STATE = arr[0];
         STATS = arr[1];
         IMAGES = (STATE && STATE.images) || {};
-        if (STATE && STATE.settings) {
-          CLOCK = STATE.settings.clock || '30h';
-          var sc = Number(STATE.settings.pet_scale);
-          if (sc) $('#scaleSel').value = String(sc);
-        }
+        CLOCK = STATE.settings?.clock || '30h';
         hideNetbar();
-        paintClock();
-        paintPending();
-        $('#dateLabel').textContent = (STATE.weekday_cn || '') + ' · ' + (STATE.date || '');
-        $('#footHint').textContent = '追番 ' + num(STATE.watching_count) + ' 部 · 更新 ' +
-          (STATE.generated ? new Date(STATE.generated).toLocaleTimeString('zh-CN', { hour12: false }) : '—') +
-          (STATE.server && STATE.server.pid ? ' · pid ' + STATE.server.pid : '');
+        $('#footHint').textContent = 'TIARA · 本地番库 · 在追 ' + num(STATE.watching_count) + ' 部';
         render();
         loadOriginal();
       })
@@ -312,17 +301,22 @@
       var warning = $('#weekScheduleStatus');
       if (warning) warning.textContent = originalWarning;
       var originalLabel = $('#watchOriginal');
-      if (originalLabel) originalLabel.textContent = watchOriginalText(originalLabel.dataset.id);
+      if (originalLabel) originalLabel.textContent = watchOriginalText(originalLabel.dataset.id, originalLabel.dataset.cachedOriginal);
     });
   }
 
   // ---------------- 渲染 ----------------
+  function activeNav(tab) {
+    return TAB === tab || tab === 'today' && (TAB === 'week' || TAB === 'continue');
+  }
+
   function switchTab(to) {
     if (VIEWS.indexOf(to) < 0) return;
+    if ($('#q').value || q()) setLibrarySearch('', false);
     TAB = to;
     try { localStorage.setItem('kx.tab', TAB); } catch (e) {}
     document.querySelectorAll('.tab').forEach(function (x) {
-      var active = x.getAttribute('data-tab') === to;
+      var active = activeNav(x.dataset.tab);
       x.classList.toggle('on', active);
       if (active) x.setAttribute('aria-current', 'page'); else x.removeAttribute('aria-current');
     });
@@ -333,18 +327,23 @@
 
   function render() {
     if (!STATE) return;
+    if (q()) {
+      searchViewDirty = true;
+      renderLibrarySearch();
+      return;
+    }
+    searchViewDirty = false;
     var v = $('#view');
     // 整体重绘会把焦点丢到 body：记住当前焦点控件的 id，画完还回去
     var focusId = document.activeElement && document.activeElement.id;
-    renderLibrarySearch();
-    if (TAB === 'week') v.innerHTML = viewWeek();
-    else if (TAB === 'today') v.innerHTML = viewToday();
+    if (TAB === 'week' || TAB === 'today') v.innerHTML = viewSchedule(TAB === 'week');
     else if (TAB === 'library') v.innerHTML = viewLibrary();
     else if (TAB === 'catchup') v.innerHTML = viewCatchup();
-    else if (TAB === 'continue') v.innerHTML = '<section class="sec">' + (viewContinueWatching() ||
-      '<div class="panel empty">这里会显示最近观看或置顶的番剧。</div>') + '<button data-goto="week">查看我的排片</button></section>';
+    else if (TAB === 'continue') v.innerHTML = '<div class="schedule-view">' + viewContinueWatching() +
+      '<button data-goto="today">查看我的排片</button></div>';
     else v.innerHTML = viewSeason();
     bind();
+    paintPending();
     if (focusId) {
       var again = document.getElementById(focusId);
       if (again && again.focus && again !== document.activeElement) {
@@ -353,50 +352,57 @@
     }
   }
 
-  function showCard(x, opts) {
-    opts = opts || {};
-    var meta = [];
-    var entry = x.mine && findWatch(x.id);
-    if (x.mine && x.total) {
-      // 「剩 N 话」= 总话数还没看到；「落后 N 话」= 比本周进度少看了。两者别混成一个「差」
-      var tail = x.left > 0 ? '剩 ' + x.left + ' 话' : '已看完';
-      if (x.behind > 0) tail += ' · 落后 ' + x.behind;
-      else if (x.left > 0 && entry && entry.expected_eps > 0 && watchGap(entry, entry.expected_eps) === 0) tail += ' · 已追平';
-      meta.push(x.watched + '/' + x.total + ' · ' + tail);
-    } else if (x.mine) meta.push('已看 ' + x.watched + ' 话 · 总数未定');
-    else meta.push('本季');
-    if (x.priority) meta.push(x.priority);
-    var pct = x.mine && x.total > 0 ? Math.max(0, Math.min(100, Math.round((x.watched / x.total) * 100))) : 0;
-    var ops = '';
-    if (x.mine) {
-      ops = '<span class="ops">' +
-        '<button data-op="-1" data-id="' + esc(x.id) + '" title="回退一话">−</button>' +
-        '<button data-op="1" data-id="' + esc(x.id) + '" title="记一话（空格）">+</button>' +
-        '<button class="x" data-op="remove" data-id="' + esc(x.id) + '" title="移出在追（x）">×</button></span>';
-    } else {
-      ops = '<span class="ops"><button data-add="' + esc(x.id) + '" data-name="' + esc(x.name) + '">加入在追</button></span>';
-    }
-    var timeHtml = opts.noTime ? '' : '<div class="show-time"><span class="t' + (x.time ? '' : ' unknown') + '">' +
-      esc(x.time || '时刻未定') + '</span>' +
-      (x.timeLabel ? '<span class="time-label">' + esc(x.timeLabel) + '</span>' : '') +
-      (opts.wdLabel ? '<span class="wk">' + esc(opts.wdLabel) + '</span>' : '') + '</div>';
-    return '<div class="show' + (opts.ticket ? ' show-ticket' : '') + (x.mine ? '' : ' dim') + (x.sel ? ' sel' : '') + '"' +
-      (x.mine ? ' data-card="' + esc(x.id) + '"' : '') + '>' +
-      (opts.ticket ? timeHtml : '') +
-      cover(x.id, x.name) +
-      '<div class="body">' + (opts.ticket ? '' : timeHtml) +
-      '<div class="nm" title="' + esc(x.name) + '">' + watchTitle(x.id, x.name, x.mine) +
-      (x.fresh ? ' <span class="chip fresh" title="总话数刚变多">新</span>' : '') + '</div>' +
-      (meta.length ? '<div class="meta">' + esc(meta.join(' · ')) + '</div>' : '') +
-      (x.mine && x.total ? '<div class="prog' + (pct >= 100 ? ' full' : '') + '"><i style="width:' + pct + '%"></i></div>' : '') +
-      (entry ? watchLink(entry.watch_url, x.name) : '') +
-      (opts.ticket ? '' : ops) +
-      '</div>' + (opts.ticket ? ops : '') + '</div>';
+  function scheduleProgress(w) {
+    var seen = num(w.ep_status), total = num(w.eps), start = Math.max(1, num(w.start_episode));
+    var extras = w.episode_extras || [];
+    var count = Math.max(0, seen - start + 1) + extras.length;
+    var complete = total > 0 && !watchGap(w, total);
+    var behind = w.watch_mode !== 'catchup' ? watchGap(w, w.expected_eps) : 0;
+    var progress = start > 1 || extras.length ? '已记 ' + count + ' 集' + (seen >= start ? ' · 连续至第 ' + seen + ' 集' : '') :
+      '已看 ' + seen + (total ? ' / ' + total : '') + ' 集';
+    if (behind && !complete) progress += ' · 落后 ' + behind + ' 集';
+    else if (!complete && w.watch_mode !== 'catchup' && num(w.expected_eps) > 0) progress += ' · 已追平';
+    return { seen: seen, next: complete ? '已看完' : '下一集 · 第 ' + Math.max(seen + 1, start) + ' 集',
+      text: progress, complete: complete, canRewind: count > 0 };
   }
 
-  function watchTitle(id, name, editable) {
+  function showCard(x, group) {
+    var id = String(x.id), entry = x.entry, progress = entry && scheduleProgress(entry);
+    var controlId = 'schedule-' + group + '-' + enc(id);
+    var bangumi = /^[1-9]\d{0,9}$/.test(id) ?
+      '<a href="https://bgm.tv/subject/' + id + '" target="_blank" rel="noopener noreferrer">Bangumi 条目 ↗</a>' : '';
+    var ops = entry ? watchLink(entry.watch_url, x.name) +
+      '<button type="button" class="schedule-mark" id="' + controlId + '-mark" data-op="1" data-id="' + esc(id) + '"' +
+      (progress.complete ? ' aria-disabled="true"' : '') + '>记一话</button>' +
+      '<details class="schedule-more"><summary id="' + controlId + '-more" aria-label="《' + esc(x.name) + '》的更多操作">···</summary>' +
+      '<div class="schedule-menu"><button type="button" data-schedule-episodes="' + esc(id) + '">每话清单</button>' +
+      '<button type="button" data-op="-1" data-id="' + esc(id) + '"' + (progress.canRewind ? '' : ' disabled') + '>退回一话</button>' +
+      bangumi + '<button type="button" class="schedule-remove" data-op="remove" data-id="' + esc(id) + '">移除条目</button></div></details>' :
+      '<button type="button" data-add="' + esc(id) + '" data-name="' + esc(x.name) + '">加入在追</button>';
+    var label = [x.label, entry?.priority].filter(function (text) { return text && text !== '—'; }).join(' · ');
+    return '<article id="' + controlId + '" class="show schedule-entry' + (entry && SEL === controlId ? ' sel' : '') + '"' +
+      (entry ? ' data-card="' + esc(id) + '"' : '') + '>' + cover(id, x.name) +
+      '<div class="schedule-info">' +
+      (x.time || label ? '<div class="schedule-slot">' + (x.time ? '<b>' + esc(x.time) + '</b>' : '') +
+        (label ? '<span>' + esc(label) + '</span>' : '') + '</div>' : '') +
+      '<h4 class="schedule-name" title="' + esc(x.name) + '">' + (entry ? watchTitle(id, x.name, true) : (bangumi ?
+        '<a href="https://bgm.tv/subject/' + id + '" target="_blank" rel="noopener noreferrer">' + esc(x.name) + ' ↗</a>' : esc(x.name))) +
+      '</h4>' + (progress ? '<div class="schedule-progress"><strong data-schedule-next>' + esc(progress.next) +
+        '</strong><span data-schedule-seen="' + progress.seen + '">' + esc(progress.text) + '</span>' +
+        (isFresh(entry) ? '<span class="schedule-fresh">总集数更新</span>' : '') + '</div>' : '') +
+      '</div><div class="ops schedule-actions">' + ops + '</div></article>';
+  }
+
+  function closeScheduleMenu(menu, restoreFocus) {
+    if (!menu?.open) return;
+    menu.open = false;
+    if (restoreFocus) $('summary', menu).focus({ preventScroll: true });
+  }
+
+  function watchTitle(id, name, editable, controlId) {
     if (!editable) return esc(name);
-    return '<button type="button" class="nm-link" data-detail="' + esc(id) + '" aria-label="打开《' + esc(name) + '》详情">' + esc(name) + '</button>';
+    return '<button type="button" class="nm-link" data-detail="' + esc(id) + '"' +
+      (controlId ? ' id="' + esc(controlId) + '"' : '') + ' aria-label="打开《' + esc(name) + '》详情">' + esc(name) + '</button>';
   }
 
   function watchLink(value, name, platform) {
@@ -421,7 +427,7 @@
     }
     function section(state, title, empty) {
       var entries = (STATE[state] || []).filter(function (w) {
-        return match(w) && (!libraryView.year || yearOf(w) === libraryView.year) &&
+        return (!libraryView.year || yearOf(w) === libraryView.year) &&
           (!libraryView.tag || (w.user_details?.tags || []).includes(libraryView.tag)) &&
           (!libraryView.link || Boolean(watchLink(w.watch_url, '')) === (libraryView.link === 'yes'));
       });
@@ -442,15 +448,17 @@
             (state === 'archived' ? '取消归档' : '继续观看') + '</button>' : '') + '</div>';
       }).join('');
       return '<section class="panel"><div class="ph">' + title + '<span class="count">' + entries.length + '</span></div>' +
-        '<div class="pb">' + (rows || '<div class="empty">' + (q() ? '没有匹配的番剧' : empty) + '</div>') + '</div></section>';
+        '<div class="pb">' + (rows || '<div class="empty">' + empty + '</div>') + '</div></section>';
     }
     var keys = libraryFilter ? [libraryFilter] : Object.keys(LIBRARY_STATES).filter(function (key) {
       return key !== 'removed' || (STATE.removed || []).length;
     });
-    return '<div class="sec"><div class="sec-head"><h2>番剧库</h2><div class="fbar">' +
+    return '<div class="sec"><div class="sec-head library-page-heading"><h2>番剧库</h2><div class="library-records" aria-label="观看记录">' +
+      '<button type="button" id="watchHistoryBtn">观看历史</button><button type="button" id="watchReportBtn">本地周报</button></div></div>' +
+      '<div class="fbar library-tools">' +
       '<button type="button" id="libraryCsv">导入 CSV</button><button type="button" id="catchupReviewOpen">查找已完播待补</button>' +
       '<button type="button" id="libraryBatchToggle" aria-pressed="' +
-      libraryBatch + '">' + (libraryBatch ? '退出批量整理' : '批量整理') + '</button></div></div>' +
+      libraryBatch + '">' + (libraryBatch ? '退出批量整理' : '批量整理') + '</button></div>' +
       (libraryBatch ? '<div class="fbar"><button type="button" id="libraryBatchSelect">全选当前列表</button>' +
         '<button type="button" id="libraryBatchClear">取消全选</button><button type="button" id="libraryBatchOpen" disabled>整理所选（0）</button></div>' : '') +
       '<div class="fbar library-filters">' +
@@ -478,7 +486,7 @@
     'kx.cover': Object.keys(COVER),
     'kx.tab': VIEWS,
     'kx.weekAll': ['0', '1'],
-    'tiara.home': ['', 'week', 'continue', 'catchup'],
+    'tiara.home': ['', 'today', 'week', 'continue', 'catchup'],
     'tiara.compactWeek': ['0', '1'],
     'tiara.libraryView': null
   };
@@ -792,21 +800,20 @@
     resetBatch();
   }
 
+
   function viewContinueWatching() {
-    if (q()) return '';
     var items = (STATE.watching || []).concat(STATE.catchup_list || []).filter(function (w) {
       return w.user_details?.pinned_at || w.last_watched;
     }).sort(function (a, b) {
       var pinned = String(b.user_details?.pinned_at || '').localeCompare(String(a.user_details?.pinned_at || ''));
       return pinned || recentWatchOrder(a, b);
     }).slice(0, 5);
-    if (!items.length) return '';
-    return '<section class="panel continue-panel"><h2>接着看</h2><ul>' + items.map(function (w) {
-      var name = w.name_cn || w.name || String(w.id);
-      return '<li>' + watchTitle(w.id, name, true) + '<small data-continue-id="' + esc(w.id) + '">第 ' +
-        Math.max(num(w.ep_status) + 1, num(w.start_episode)) + ' 集</small>' + watchLink(w.watch_url, name) +
-        '<button type="button" data-op="1" data-id="' + esc(w.id) + '">记一话</button></li>';
-    }).join('') + '</ul></section>';
+    return '<section class="schedule-section" aria-labelledby="scheduleContinue"><div class="schedule-section-head">' +
+      '<h3 id="scheduleContinue">接着看</h3><button type="button" data-goto="library" class="schedule-link">查看番库 ↗</button></div>' +
+      (items.length ? '<div class="schedule-list">' + items.map(function (w) {
+        var label = [w.watch_mode === 'catchup' ? '补番' : '连载', w.user_details?.pinned_at ? '已置顶' : ''].filter(Boolean).join(' · ');
+        return showCard({ id: w.id, name: w.name_cn || w.name || String(w.id), entry: w, label: label }, 'continue');
+      }).join('') + '</div>' : '<p class="schedule-empty">记过一话或置顶的番剧会出现在这里。</p>') + '</section>';
   }
 
   function recentWatchOrder(a, b) {
@@ -821,33 +828,67 @@
       }).join('') + '</select></label>';
   }
 
+  function setLibrarySearch(value, restore = true) {
+    var previous = q();
+    QUERY = value;
+    var terms = q();
+    if ($('#q').value !== value) $('#q').value = value;
+    $('#clearSearch').hidden = !value;
+    if (terms === previous) return;
+    searchLimit = 8;
+    if (!previous) searchScroll = window.scrollY;
+    if (!terms) searchFilter = '';
+    renderLibrarySearch();
+    if (!terms && restore) {
+      if (searchViewDirty) render();
+      window.scrollTo(0, searchScroll);
+    } else if (terms && !previous) window.scrollTo(0, 0);
+  }
+
   function renderLibrarySearch() {
     var region = $('#globalSearch');
-    if (!region || !STATE) return;
-    region.hidden = !q();
+    var terms = q();
+    region.hidden = !terms || !STATE;
+    $('#view').hidden = !region.hidden;
     if (region.hidden) { region.replaceChildren(); return; }
+    var focusId = region.contains(document.activeElement) ? document.activeElement.id : '';
+    var returnId = region.contains(dlgReturnFocus) ? dlgReturnFocus.id : '';
     var keys = searchFilter ? [searchFilter] : Object.keys(LIBRARY_STATES);
+    var words = terms.split(/\s+/);
+    var seen = new Set();
     var matches = keys.flatMap(function (state) {
-      return (STATE[state] || []).filter(match).map(function (item) { return { item: item, state: state }; });
+      return (STATE[state] || []).flatMap(function (item) {
+        var id = String(item.id);
+        if (seen.has(id) || !matchLibrary(item, words)) return [];
+        seen.add(id);
+        return [{ item: item, state: state }];
+      });
     });
     var rows = matches.slice(0, searchLimit).map(function (row) {
-      var item = row.item;
-      return '<li>' + watchTitle(item.id, item.name_cn || item.name || String(item.id), true) +
+      var item = row.item, name = item.name_cn || item.name || String(item.id);
+      var original = item.name && item.name !== name ? item.name : '';
+      return '<li>' + cover(item.id, name) + '<div class="library-search-name">' +
+        watchTitle(item.id, name, true, 'search-show-' + enc(item.id)) +
+        (original ? '<small>' + esc(original) + '</small>' : '') + '</div>' +
         '<span class="tag mut">' + LIBRARY_STATES[row.state] + '</span></li>';
     }).join('');
-    region.innerHTML = '<div class="panel library-search"><div class="sec-head"><h2>全番库搜索</h2>' +
-      libraryFilterHtml('globalLibraryFilter', searchFilter) + '</div><p role="status">找到 ' + matches.length + ' 部</p>' +
-      (rows ? '<ul>' + rows + '</ul>' : '<p>番库中没有匹配的条目。</p>') +
-      (matches.length > searchLimit ? '<button type="button" id="globalSearchMore">显示更多</button>' : '') + '</div>';
+    region.innerHTML = '<div class="library-search-head"><div><h2>全番库搜索</h2>' +
+      '<p role="status">找到 ' + matches.length + ' 部</p></div><div class="library-search-tools">' +
+      libraryFilterHtml('globalLibraryFilter', searchFilter) + '<button type="button" data-anime-search>跨季度找番</button></div></div>' +
+      '<div class="panel library-search">' +
+      (rows ? '<ul>' + rows + '</ul>' : '<p class="library-search-empty">番库中没有匹配的条目。可以换个番名或到 Bangumi 查找。</p>') +
+      (matches.length > searchLimit ? '<div class="library-search-more"><button type="button" id="globalSearchMore">显示更多</button></div>' : '') + '</div>';
+    if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
+    if (returnId) dlgReturnFocus = document.getElementById(returnId) || $('#q');
     $('#globalLibraryFilter').addEventListener('change', function () {
-      searchFilter = this.value; searchLimit = 8; renderLibrarySearch(); $('#globalLibraryFilter').focus();
+      searchFilter = this.value; searchLimit = 8; renderLibrarySearch();
     });
     var more = $('#globalSearchMore');
     if (more) more.addEventListener('click', function () {
       var previous = searchLimit;
       searchLimit += 8;
       renderLibrarySearch();
-      var next = region.querySelectorAll('li button')[previous];
+      var next = region.querySelectorAll('[data-detail]')[previous];
       if (next) next.focus();
     });
   }
@@ -855,7 +896,7 @@
   function viewCatchup() {
     var week = STATE.catchup_week || { goal: 0, watched: 0 };
     var slots = new Map((STATE.catchup_reminders || []).map(function (slot) { return [String(slot.id), slot]; }));
-    var entries = (STATE.catchup_list || []).filter(match).sort(recentWatchOrder);
+    var entries = (STATE.catchup_list || []).slice().sort(recentWatchOrder);
     var list = entries.map(function (w) {
       var seen = num(w.ep_status), total = num(w.eps), name = w.name_cn || w.name || String(w.id), id = esc(w.id);
       var next = Math.max(seen + 1, num(w.start_episode) || 1);
@@ -873,10 +914,10 @@
     }).join('');
     return '<section class="sec"><div class="sec-head"><h2>补番清单</h2><button type="button" data-new-watch>新增补番</button></div>' +
       '<div class="panel catchup-goal"><div><b>' + (week.watched == null ? '暂时读不到本周观看记录' : '本周已补 ' + week.watched + ' 集') + '</b>' +
-      (week.goal && week.watched != null ? '<progress aria-label="每周补番目标" value="' + Math.min(week.watched, week.goal) + '" max="' +
+      (week.goal && week.watched != null ? '<progress aria-label="每周补番目标" value="' + Math.max(0, Math.min(week.watched, week.goal)) + '" max="' +
         week.goal + '"></progress>' : '') + (week.goal ? '<small>目标 ' + week.goal + ' 集</small>' : '') +
       '</div><button type="button" id="catchupGoal">每周目标</button></div>' +
-      '<div class="catchup-list">' + (list || '<div class="panel empty">' + (q() ? '没有匹配的补番' : '还没有补番。可以手动添加旧番，或在番剧详情切换为补番。') + '</div>') + '</div></section>';
+      '<div class="catchup-list">' + (list || '<div class="panel empty">还没有补番。可以手动添加旧番，或在番剧详情切换为补番。</div>') + '</div></section>';
   }
 
   function weekBuckets(all) {
@@ -885,9 +926,10 @@
     (t.watching || []).forEach(function (w) { watch[String(w.id)] = w; });
     var buckets = { 0: [] };
     var listed = new Set();
+    var catchup = STATE.catchup_list || [];
+    var personalIds = new Set(catchup.map(function (w) { return String(w.id); }));
     WEEK_ORDER.forEach(function (d) { buckets[d] = []; });
     function add(x, w, day, time) {
-      if (!match(x) && !(w && match(w))) return;
       var id = String(x.id);
       var origin = ORIGINAL[id];
       var fromPlatform = w && /^bangumi-data ·/.test(w.schedule_source || '');
@@ -899,13 +941,9 @@
         time = '';
       }
       var slot = dispShow(time, day);
-      var total = w ? num(w.eps) : 0;
-      var watched = w ? num(w.ep_status) : 0;
       (buckets[slot.wd] || buckets[0]).push({
-        id: x.id, name: x.name_cn || x.name || String(x.id),
-        time: slot.time, timeLabel: origin ? '原播更新' : time ? '自订排片' : '', mine: !!w, watched: watched, total: total,
-        left: w ? watchGap(w, total) : 0, behind: w ? watchGap(w, w.expected_eps) : 0,
-        priority: w && w.priority, fresh: isFresh(w), sel: SEL === id
+        id: x.id, name: w?.name_cn || w?.name || x.name_cn || x.name || String(x.id), entry: w,
+        time: slot.time, label: origin ? '原播' : time ? (w ? '自订排片' : '放送') : '时刻待定',
       });
       listed.add(id);
     }
@@ -913,13 +951,19 @@
       ((t.weekly && t.weekly[d]) || []).forEach(function (x) {
         var id = String(x.id);
         var w = watch[id];
-        if ((!all && !w) || listed.has(id)) return;
+        if ((!all && !w) || listed.has(id) || personalIds.has(id)) return;
         add(x, w, d, x.time_cst);
       });
     });
     Object.values(watch).forEach(function (w) {
       if (listed.has(String(w.id)) || w.schedule_ended) return;
       add(w, w, num(w.air_weekday), w.air_time_cst);
+    });
+    catchup.forEach(function (w) {
+      var slot = w.catchup_slot;
+      if (!slot?.time || !WEEK_ORDER.includes(slot.day)) return;
+      buckets[slot.day].push({ id: w.id, name: w.name_cn || w.name || String(w.id), entry: w,
+        time: slot.time, label: '补番安排' });
     });
     Object.keys(buckets).forEach(function (d) {
       buckets[d].sort(function (a, b) {
@@ -932,173 +976,93 @@
     return buckets;
   }
 
-  function boardHtml(buckets) {
+
+  function scheduleWeekIndex(buckets) {
     var today = num(STATE.weekday);
-    var total = 0;
-    var cols = WEEK_ORDER.concat(buckets[0].length ? [0] : []).map(function (d) {
-      var list = buckets[d] || [];
-      total += list.length;
-      var isToday = today === d;
-      var head = '<div class="dhead"><b>' + (d ? '周' + CN[d] : '时段待定') + '</b>' +
-        (isToday ? '<span class="now">今天</span>' : '') +
-        '<span class="n">' + list.length + ' 部</span></div>';
-      var body = list.length
-        ? list.map(function (x) { return showCard(x, { ticket: true }); }).join('')
-        : '<div class="dempty">' + (q() ? '没有匹配' : '—') + '</div>';
-      return '<section id="weekDay' + d + '" class="dcol' + (isToday ? ' today' : '') + (list.length ? '' : ' day-empty') + '">' + head + '<div class="dbody">' + body + '</div></section>';
-    }).join('');
-    if (!total) {
-      if (q()) {
-        return '<div class="panel"><div class="empty">没有匹配「' + esc(QUERY.trim()) + '」的番。' +
-          '<br />换个关键词，或把搜索框清空。</div></div>';
-      }
-      return '<div class="panel"><div class="empty empty-start"><strong>本周还没有排片</strong>' +
-        '<div class="empty-actions"><button class="primary" data-goto="season">我在追本季</button>' +
-        '<button data-goto="catchup">我想补旧番</button><button data-new-watch>手动添加</button></div></div></div>';
-    }
-    return '<div class="board board-week' + (compactWeek ? ' week-compact' : '') + '">' + cols + '</div>';
+    return '<nav class="schedule-days" aria-label="按星期查看本周排片">' + WEEK_ORDER.map(function (day) {
+      var count = buckets[day].length;
+      return '<button type="button" id="schedule-day-' + day + '" data-week-day="' + day + '"' +
+        (day === today ? ' aria-current="date"' : '') + ' aria-label="星期' + CN[day] + '，' + count + ' 部"' +
+        (count ? '' : ' disabled') + '><span>周' + CN[day] + '</span><b>' + count + '</b></button>';
+    }).join('') + '</nav>';
   }
 
-  function viewWeek() {
-    var buckets = weekBuckets(WEEK_ALL);
-    var today = num(STATE.weekday);
-    var index = WEEK_ORDER.map(function (d) {
-      var count = buckets[d].length;
-      return '<button type="button" data-week-day="' + d + '"' + (d === today ? ' class="is-today"' : '') +
-        (count ? '' : ' disabled') + '><span>周' + CN[d] + '</span><b>' + count + '</b></button>';
-    }).join('');
-    var bar = '<div class="fbar week-controls">' +
-      '<label><input type="checkbox" id="weekAll"' + (WEEK_ALL ? ' checked' : '') + ' /> 同时显示未追番剧</label>' +
-      '<span>' + (WEEK_ALL ? '放送表与在追番剧' : '我的在追番剧') + '</span>' +
-      '<button type="button" id="catchupReviewOpen">查找已完播待补</button>' +
-      '</div>';
-    return '<section class="sec week-view">' + viewContinueWatching() + '<div class="week-hero">' +
-      '<div><span class="view-kicker">TIARA / 每周放送簿</span><h2>我的排片</h2>' +
-      '<p>原播周档 · 北京时间</p><p id="weekScheduleStatus" role="status">' + esc(originalWarning) + '</p></div>' +
-      '<div class="hero-stamp"><span>今日 · 周' + CN[today] + '</span><strong>' + (buckets[today] || []).length +
-      '</strong><span>部原播或自订排片</span></div></div>' +
-      '<nav class="week-index" aria-label="按星期跳转">' + index + '</nav>' + bar + boardHtml(buckets) + '</section>';
+  function scheduleEmpty(text, actions) {
+    return '<div class="schedule-empty">' + esc(text) + (actions ? '<div class="schedule-empty-actions">' + actions + '</div>' : '') + '</div>';
   }
 
-  function viewToday() {
-    var t = STATE;
-    var today = (t.today || []).filter(match);
-    var watch = (t.watching || []).filter(match);
-    var catchup = (t.catchup || []).filter(match);
+  function scheduleAddActions() {
+    return '<button type="button" data-goto="season">去本季选番</button><button type="button" data-new-watch>手动添加</button>';
+  }
 
-    var todayList = today.length
-      ? today.map(function (s) {
-        var origin = ORIGINAL[String(s.id)];
-        var slot = origin ? dispShow(origin.time_cst, origin.weekday) : dispShow(s.time_cst, t.weekday);
-        return showCard({
-          id: s.id, name: s.name_cn || s.name, time: slot.time,
-          timeLabel: origin ? '周' + CN[slot.wd] + '原播' : '提醒',
-          mine: true, watched: num(s.watched_eps), total: num(s.total_eps),
-          left: watchGap({ ep_status: s.watched_eps, start_episode: s.start_episode }, s.total_eps), behind: num(s.behind), priority: s.priority
-        });
-      }).join('')
-      : '<div class="empty" style="padding:14px 16px;text-align:left">今天没有排定提醒。去「我的排片」看整周放送。</div>';
+  function viewScheduleWeek(buckets) {
+    var days = WEEK_ORDER.concat(0).filter(function (day) { return buckets[day].length; });
+    var controls = '<div class="schedule-week-tools"><label><input type="checkbox" id="weekAll"' + (WEEK_ALL ? ' checked' : '') +
+      ' /> 同时显示未追番剧</label><button type="button" id="catchupReviewOpen" class="schedule-link">查找已完播待补</button></div>';
+    return controls + (days.length ? '<div class="schedule-week' + (compactWeek ? ' is-compact' : '') + '">' + days.map(function (day) {
+      var rows = buckets[day], isToday = day === num(STATE.weekday);
+      return '<section id="weekDay' + day + '" class="schedule-section schedule-day" aria-labelledby="weekLabel' + day + '">' +
+        '<div class="schedule-section-head"><h3 id="weekLabel' + day + '" tabindex="-1">' + (day ? '星期' + CN[day] : '时段待定') +
+        '</h3>' + (isToday ? '<span class="schedule-today-tag">今天</span>' : '') + '<small>' + rows.length + ' 部</small></div>' +
+        '<div class="schedule-list">' + rows.map(function (row) { return showCard(row, 'week'); }).join('') + '</div></section>';
+    }).join('') + '</div>' : scheduleEmpty('本周还没有排片。', scheduleAddActions()));
+  }
 
-    // 接下来：优先三天卡片；能播的日子太少就摊成本周剩下的列表
-    var b = weekBuckets(false);
-    var order = [1, 2, 3, 4, 5, 6, 7].map(function (k) { return ((num(t.weekday) - 1 + k) % 7) + 1; });
-    var upcoming = order.map(function (d) { return { d: d, list: b[d] || [] }; })
-      .filter(function (x) { return x.list.length; });
-    var strip = '';
-    if (upcoming.length >= 2) {
-      strip = '<div class="board" style="grid-template-columns: repeat(' + Math.min(3, upcoming.length) + ', minmax(0, 1fr))">' +
-        upcoming.slice(0, 3).map(function (x) {
-          var d = x.d;
-          var label = '周' + CN[d];
-          return '<div class="dcol">' +
-            '<div class="dhead"><b>' + label + '</b><span class="n">' + x.list.length + ' 部</span></div>' +
-            '<div class="dbody">' + x.list.map(function (s) { return showCard(s, {}); }).join('') + '</div></div>';
-        }).join('') + '</div>';
-    } else if (upcoming.length) {
-      strip = '<div class="panel"><div class="pb tight list">' + upcoming.map(function (x) {
-        var label = '周' + CN[x.d];
-        return '<div class="dayrow" style="padding:6px 12px">' + label +
-          '<span style="float:right;color:var(--mute)">' + x.list.length + ' 部</span></div>' +
-          x.list.map(function (s) { return showCard(s, {}); }).join('');
-      }).join('') + '</div></div>';
+  function viewScheduleToday() {
+    var today = num(STATE.weekday);
+    var rows = (STATE.today || []).map(function (s) {
+      return { id: s.id, name: s.name_cn || s.name || String(s.id), entry: findWatch(s.id), actualTime: s.time_cst,
+        time: s.time_disp || s.time_cst, label: s.disp_shifted ? '周' + CN[s.weekday_disp] + '深夜档' : '连载排片' };
+    });
+    (STATE.catchup_list || []).forEach(function (w) {
+      var slot = w.catchup_slot;
+      if (slot?.day !== today || !slot.time) return;
+      rows.push({ id: w.id, name: w.name_cn || w.name || String(w.id), entry: w,
+        actualTime: slot.time, time: slot.time, label: '补番安排' });
+    });
+    rows.sort(function (a, b) { return String(a.actualTime || '99:00').localeCompare(String(b.actualTime || '99:00')); });
+    var hasWatch = (STATE.watching || []).length || (STATE.catchup_list || []).length;
+    var entries = rows.length ? '<div class="schedule-list">' + rows.map(function (row) { return showCard(row, 'today'); }).join('') + '</div>' :
+      scheduleEmpty(hasWatch ? '今天没有安排，看看本周还有什么。' : '添加想看的番剧，开始安排追番。',
+        hasWatch ? '<button type="button" data-goto="week">查看本周</button>' : scheduleAddActions());
+    return viewContinueWatching() + '<section class="schedule-section" aria-labelledby="scheduleTodayList">' +
+      '<div class="schedule-section-head"><h3 id="scheduleTodayList">今日排片</h3><small>' + rows.length + ' 部</small></div>' + entries + '</section>' +
+      (WELCOME_FORCE ? '<section class="schedule-section"><div class="schedule-section-head"><h3>开始使用</h3></div>' +
+        scheduleEmpty('从本季选番，或手动添加并在详情里安排时间。',
+          scheduleAddActions() + '<button type="button" data-goto="sync">同步 Bangumi</button>') + '</section>' : '');
+  }
+
+  function scheduleSidebar(buckets) {
+    var totals = STATS ? '<dl class="schedule-stats"><div><dt>本周</dt><dd>' + num(STATS.week) + '</dd></div>' +
+      '<div><dt>累计</dt><dd>' + num(STATS.total) + '</dd></div><div><dt>连续天</dt><dd>' + num(STATS.streak) + '</dd></div></dl>' :
+      '<p class="schedule-side-note">暂时读不到观看统计。</p>';
+    if (STATS?.byDay?.length) {
+      totals += '<div class="spark schedule-trend" aria-label="最近 14 天观看记录">' + STATS.byDay.map(function (d) {
+        var count = num(d.n), height = Math.min(28, 3 + 5 * Math.max(0, count));
+        return '<i' + (count > 0 ? ' class="on"' : '') + ' style="height:' + height + 'px" title="' +
+          esc(d.date + ' · ' + count + ' 集') + '"></i>';
+      }).join('') + '</div>';
     }
+    return '<aside class="schedule-sidebar"><section class="schedule-section"><div class="schedule-section-head">' +
+      '<h3>放送日历</h3><small>北京时间</small></div>' + scheduleWeekIndex(buckets) +
+      '<p id="weekScheduleStatus" class="schedule-side-note" role="status">' + esc(originalWarning) + '</p></section>' +
+      '<section class="schedule-section"><div class="schedule-section-head"><h3>观看统计</h3></div>' + totals + '</section>' +
+      '<section class="schedule-section schedule-companion"><div class="schedule-section-head"><h3>TIARA 说</h3>' +
+      '<button type="button" id="sayBtn" class="schedule-link">再说一句</button></div>' +
+      '<p id="sayText">' + esc(STATE.summary || '') + '</p>' + (STATE.quote ? '<small>' + esc(STATE.quote) + '</small>' : '') + '</section></aside>';
+  }
 
-    var st = STATS || {};
-    var spark = (st.byDay || []).map(function (d) {
-      var h = Math.min(44, 4 + num(d.n) * 9);
-      return '<i class="' + (num(d.n) > 0 ? 'on' : '') + '" style="height:' + h + 'px" title="' + esc(d.date) + '：' + num(d.n) + ' 话"></i>';
-    }).join('');
-    // /api/stats 挂了的时候以前显示三个 0——看着像「这周一部没看」，其实是没读到
-    var statsBox = STATS
-      ? '<div class="stats">' +
-        '<div class="stat"><b>' + num(st.week) + '</b><span>本周</span></div>' +
-        '<div class="stat"><b>' + num(st.total) + '</b><span>累计</span></div>' +
-        '<div class="stat"><b>' + num(st.streak) + '</b><span>连续天</span></div>' +
-        '</div><div class="spark">' + (spark || '') + '</div>'
-      : '<div class="empty" style="padding:4px 0;text-align:left">统计读不到（历史日志可能不在了），不影响记一话。</div>';
-
-    var watching = watch.map(function (w) {
-      var origin = ORIGINAL[String(w.id)];
-      var slot = origin && dispShow(origin.time_cst, origin.weekday);
-      return showCard({
-        id: w.id, name: w.name_cn || w.name,
-        time: slot && slot.time,
-        mine: true, watched: num(w.ep_status), total: num(w.eps),
-        left: watchGap(w, w.eps),
-        behind: watchGap(w, w.expected_eps),
-        priority: w.priority,
-        fresh: isFresh(w),
-        sel: SEL === String(w.id)
-      }, { wdLabel: slot ? '周' + CN[slot.wd] + '原播' : '' });
-    }).join('');
-
-    var catchupHtml = catchup.map(function (w) {
-      return showCard({
-        id: w.id, name: w.name_cn || w.name, time: '', mine: true,
-        watched: num(w.ep_status), total: num(w.eps), left: watchGap(w, w.eps)
-      }, { noTime: true });
-    }).join('');
-
-    var aside =
-      '<aside class="cols" style="display:block">' +
-      '<div class="panel" style="margin-bottom:18px"><div class="ph">在追 <span class="count">' + watch.length + '</span></div>' +
-      '<div class="pb tight">' + (watching || '<div class="empty">还没有在追的番。</div>') + '</div></div>' +
-      (catchupHtml ? '<div class="panel" style="margin-bottom:18px"><div class="ph">待补完 <span class="count">' + catchup.length + '</span></div>' +
-        '<div class="pb tight">' + catchupHtml + '</div></div>' : '') +
-      '<div class="panel" style="margin-bottom:18px"><div class="ph">这周</div><div class="pb">' +
-      statsBox + '</div></div>' +
-      '<div class="panel" style="margin-bottom:18px"><div class="ph">TIARA说</div><div class="pb">' +
-      '<div class="say"><span id="sayText">' + esc(t.summary || '') + '</span>' +
-      '<div style="margin-top:10px"><button id="sayBtn" class="ghost">让她再说一句</button></div></div></div></div>' +
-      '<div class="panel"><div class="ph">今日一句</div><div class="pb"><div class="say">' + esc(t.quote || '—') + '</div></div></div>' +
-      '</aside>';
-
-    // 空库（或 ?welcome=1）时给一条三步引导：挑番 → 补时刻 → 同步
-    var welcome = '';
-    if (!watch.length || WELCOME_FORCE) {
-      welcome =
-        '<div class="sec"><div class="sec-head"><h2>第一次用？三步就够了</h2><span class="note">点下面任意一步就会带你过去</span></div>' +
-        '<div class="panel"><div class="pb tight">' +
-        '<div class="wstep"><b>1</b><div><strong>去「本季」挑几部</strong>' +
-        '<p>每部右边点「+ 追」，就进了你的在追列表。也可以先勾选几部，再点右上「加入在追」。</p>' +
-        '<button class="mini" data-goto="season">去挑番</button></div></div>' +
-        '<div class="wstep"><b>2</b><div><strong>补上开播时刻</strong>' +
-        '<p>Bangumi 只给星期几，不给几点。在「本季」每部的输入框里填 23:30 这类时刻，' +
-        '「本周」和桌宠就能按时间排。不填也能用，只是显示成「时刻未定」。</p></div></div>' +
-        '<div class="wstep"><b>3</b><div><strong>（可选）同步 Bangumi</strong>' +
-        '<p>在 Bangumi 个人设置里生成一个 Access Token 填进「账号」，之后点「同步」就能一次拉回' +
-        '在追进度与整季排片。不联网也完全能用。</p>' +
-        '<button class="mini" data-goto="sync">现在同步</button></div></div>' +
-        '</div></div></div>';
-    }
-
-    return '<div class="cols">' +
-      '<div>' + welcome +
-      '<div class="sec"><div class="sec-head"><h2>今日提醒清单</h2><span class="count">' + today.length + '</span></div>' +
-      '<div class="panel"><div class="pb tight list">' + todayList + '</div></div></div>' +
-      (strip ? '<div class="sec"><div class="sec-head"><h2>在追周档</h2><span class="note">北京时间</span></div>' +
-        strip + '</div>' : '') +
-      '</div>' + aside + '</div>';
+  function viewSchedule(weekly) {
+    var buckets = weekBuckets(weekly && WEEK_ALL);
+    return '<section class="schedule-view" aria-labelledby="scheduleHeading"><header class="schedule-head"><div>' +
+      '<h2 id="scheduleHeading">我的排片</h2><p><time datetime="' + esc(STATE.date) + '">' + esc(STATE.date) + '</time> · 星期' +
+      CN[num(STATE.weekday)] + '</p></div><div class="schedule-head-actions">' +
+      '<button type="button" id="pendingBtn" class="ghost" title="查看落后至少一话的番剧" hidden>待看</button>' +
+      '<nav class="schedule-views" aria-label="排片范围">' +
+      '<button type="button" id="schedule-view-today" data-goto="today" aria-pressed="' + !weekly + '">今天</button>' +
+      '<button type="button" id="schedule-view-week" data-goto="week" aria-pressed="' + weekly + '">本周</button></nav></div></header>' +
+      '<div class="schedule-layout"><div class="schedule-main">' + (weekly ? viewScheduleWeek(buckets) : viewScheduleToday()) +
+      '</div>' + scheduleSidebar(buckets) + '</div></section>';
   }
 
   // ---------------- 本季 ----------------
@@ -1152,8 +1116,8 @@
       '<button id="batchTime" title="给勾选的番批量设开播时刻">批量时刻</button>' +
       '<button class="primary" id="applyBtn">加入在追</button>' +
       '</div>';
-    return '<div class="sec"><div class="sec-head"><h2>本季番剧</h2>' +
-      '<span class="note">原播周档 · 北京时间</span></div>' +
+    return '<div class="sec"><div class="sec-head season-page-heading"><h2>本季番剧</h2>' +
+      '<span class="note">原播周档 · 北京时间</span><button type="button" data-anime-search>跨季度找番</button></div>' +
       '<div class="panel">' + bar + '<div id="seasonBody">' + seasonBodyHtml() + '</div></div></div>';
   }
 
@@ -1196,7 +1160,6 @@
         return !watching.some(function (w) { return String(w.id) === String(x.id); }) && (!onlyTodo || !inactiveById.has(String(x.id)));
       });
     }
-    if (QUERY) list = list.filter(match);
     var watchingById = {};
     watching.forEach(function (w) { watchingById[String(w.id)] = w; });
     function trackedEntry(item) { return watchingById[String(item.id)] || inactiveById.get(String(item.id))?.entry; }
@@ -1358,8 +1321,8 @@
     return !season.airings && season.items.length ? '正在读取原播周档…' : '';
   }
 
-  function watchOriginalText(id) {
-    return formatAiring(ORIGINAL[id]) || (/^\d+$/.test(String(id)) &&
+  function watchOriginalText(id, cached) {
+    return formatAiring(ORIGINAL[id]) || cached || (/^\d+$/.test(String(id)) &&
       (originalWarning || (originalRequest ? '正在读取原播周档…' : ''))) || '暂无原播周档';
   }
 
@@ -1369,29 +1332,58 @@
     var catchupGoal = $('#catchupGoal');
     if (catchupGoal) catchupGoal.addEventListener('click', openCatchupGoal);
     var v = $('#view');
+    var pendingButton = $('#pendingBtn', v);
+    if (pendingButton) pendingButton.onclick = showPending;
+    var historyButton = $('#watchHistoryBtn', v);
+    if (historyButton) historyButton.onclick = function () { openWatchHistory(); };
+    var reportButton = $('#watchReportBtn', v);
+    if (reportButton) reportButton.onclick = openWatchReport;
     v.querySelectorAll('[data-week-day]').forEach(function (button) {
       button.addEventListener('click', function () {
+        if (TAB !== 'week') switchTab('week');
         var section = $('#weekDay' + button.dataset.weekDay);
-        if (section) section.scrollIntoView({ block: 'start' });
+        if (section) {
+          $('h3', section).focus({ preventScroll: true });
+          section.scrollIntoView({ block: 'start' });
+        }
       });
     });
 
     v.querySelectorAll('[data-goto]').forEach(function (el) {
       el.addEventListener('click', function () {
         var to = el.getAttribute('data-goto');
-        if (to === 'sync') doSync(); else switchTab(to);
+        if (to === 'sync') return doSync();
+        switchTab(to);
+        if (el.id) document.getElementById(el.id)?.focus({ preventScroll: true });
       });
     });
 
     v.querySelectorAll('[data-op]').forEach(function (el) {
       el.addEventListener('click', function (e) {
         e.stopPropagation();
+        if (el.getAttribute('aria-disabled') === 'true') return;
+        closeScheduleMenu(el.closest('.schedule-more'), true);
         var id = el.getAttribute('data-id');
         if (el.getAttribute('data-op') === 'remove') return removeWatch(id);
         bump(id, Number(el.getAttribute('data-op')));
       });
     });
 
+    v.querySelectorAll('[data-schedule-episodes]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        closeScheduleMenu(button.closest('.schedule-more'), true);
+        openWatchDetail(button.dataset.scheduleEpisodes, true);
+      });
+    });
+    v.querySelectorAll('.schedule-more').forEach(function (menu) {
+      menu.addEventListener('toggle', function () {
+        if (menu.open) v.querySelectorAll('.schedule-more[open]').forEach(function (other) {
+          if (other !== menu) closeScheduleMenu(other);
+        });
+      });
+      var external = $('a', menu);
+      if (external) external.addEventListener('click', function () { closeScheduleMenu(menu, true); });
+    });
     v.querySelectorAll('[data-add]').forEach(function (el) {
       el.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -1412,7 +1404,8 @@
       // 台词由服务端挑并填好占位符（/api/say），前端不再持有整份 talks.json
       json('/api/say').then(function (j) {
         if (j.ok === false || j.error) return toast(j.error || '没读到台词');
-        $('#sayText').textContent = j.text;
+        var sayText = $('#sayText');
+        if (sayText) sayText.textContent = j.text;
       }).catch(function () { toast('没读到台词'); });
     });
 
@@ -1505,7 +1498,8 @@
       if (j.ok === false || j.error) { toast(j.error || '没记上'); return refresh(); }
       if (j.became_finished) return showCompletion(id, j.revision);
       var w = findWatch(id);
-      if (TAB === 'catchup' || (w && (w.watch_mode === 'catchup' || (TAB === 'week' && d > 0 && !w.last_watched)))) return refresh();
+      if (TAB === 'catchup' || (w && (w.watch_mode === 'catchup' ||
+          ((TAB === 'today' || TAB === 'continue') && d > 0 && !w.last_watched)))) return refresh();
       // 服务端可能把值夹到上限，以它为准；不重绘整页，只校正这一行
       if (w && typeof j.ep_status === 'number') {
         w.ep_status = Math.max(0, j.ep_status + (OUTSTANDING[id] || 0));
@@ -1531,28 +1525,17 @@
     if (!w) return;
     var seen = num(w.ep_status);
     var total = num(w.eps);
-    var next = $('[data-continue-id="' + CSS.escape(String(id)) + '"]');
-    if (next) next.textContent = total && seen >= total ? '已看完' : '第 ' + Math.max(seen + 1, num(w.start_episode)) + ' 集';
-    var pct = total > 0 ? Math.max(0, Math.min(100, Math.round((seen / total) * 100))) : 0;
+    var progress = scheduleProgress(w);
     var cards = document.querySelectorAll('[data-card="' + CSS.escape(String(id)) + '"]');
     for (var i = 0; i < cards.length; i++) {
       var c = cards[i];
-      var meta = c.querySelector('.meta');
-      if (meta) {
-        var left = Math.max(0, total - seen);
-        var tail = left > 0 ? '剩 ' + left + ' 话' : '已看完';
-        var behind = watchGap(w, w.expected_eps);
-        if (behind > 0) tail += ' · 落后 ' + behind;
-        else if (left > 0 && w.expected_eps > 0) tail += ' · 已追平';
-        var prio = w.priority ? ' · ' + w.priority : '';
-        meta.textContent = (total ? seen + '/' + total + ' · ' + tail : '已看 ' + seen + ' 话 · 总数未定') + prio;
-      }
-      var bar = c.querySelector('.prog');
-      if (bar) {
-        var fill = bar.querySelector('i');
-        if (fill) fill.style.width = pct + '%';
-        if (pct >= 100) bar.classList.add('full'); else bar.classList.remove('full');
-      }
+      var next = $('[data-schedule-next]', c), count = $('[data-schedule-seen]', c);
+      next.textContent = progress.next;
+      count.textContent = progress.text;
+      count.dataset.scheduleSeen = seen;
+      var mark = $('[data-op="1"]', c);
+      if (progress.complete) mark.setAttribute('aria-disabled', 'true'); else mark.removeAttribute('aria-disabled');
+      $('[data-op="-1"]', c).disabled = !progress.canRewind;
     }
     // 本季表的行没有 data-card（它不是周历卡片），但行内也有 ww/tt 和进度
     var epsCells = document.querySelectorAll('[data-season-id="' + CSS.escape(String(id)) + '"]');
@@ -1828,9 +1811,11 @@
 
   // ---------------- 弹层 ----------------
   var dlgReturnFocus = null;
-  function openDlg(title, bodyHtml, footHtml) {
+  function openDlg(title, bodyHtml, footHtml, options = {}) {
     if (!$('#mask').classList.contains('show')) dlgReturnFocus = document.activeElement;
-    $('#dlg').innerHTML = '<h3 id="dlgTitle">' + esc(title) + '</h3>' +
+    var dlg = $('#dlg');
+    dlg.classList.toggle('watch-detail-dialog', Boolean(options.watchDetail));
+    dlg.innerHTML = '<h3 id="dlgTitle"' + (options.watchDetail ? ' tabindex="-1"' : '') + '>' + esc(title) + '</h3>' +
       '<div class="body">' + bodyHtml + '</div>' +
       '<div class="foot">' + (footHtml || '<button data-close>关掉</button>') + '</div>';
     var mask = $('#mask');
@@ -1842,8 +1827,9 @@
       b.addEventListener('click', closeDlg);
     });
     // 焦点进弹窗（第一颗按钮或输入框），Esc 关掉后还回去
-    var first = $('#dlg').querySelector('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]');
-    (first || $('#dlg')).focus({ preventScroll: true });
+    dlg.scrollTop = 0;
+    var first = options.focus ? $(options.focus, dlg) : dlg.querySelector('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]');
+    (first || dlg).focus({ preventScroll: true });
   }
   function closeDlg() {
     var mask = $('#mask');
@@ -1859,13 +1845,15 @@
     }
   }
 
-  function openWatchDetail(id) {
+  function openWatchDetail(id, episodes) {
     if (!id) return showWatchForm({ ep_status: 0, watch_mode: TAB === 'catchup' ? 'catchup' : 'airing' });
     openDlg('番剧详情', '<p id="watchLoading" role="status">正在读取番剧资料…</p>');
     var marker = $('#watchLoading');
     flushAllBumps();
     POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
-      if (marker.isConnected) showWatchForm(j.detail, j.reminder);
+      if (!marker.isConnected) return;
+      if (episodes) openEpisodeList(j.detail);
+      else showWatchForm(j.detail, j.reminder, j.original);
     }).catch(function (e) {
       if (marker.isConnected) openDlg('读不到番剧详情', '<p role="alert">' + esc(e.message || '请刷新后再试') + '</p>');
     });
@@ -2300,20 +2288,77 @@
     }).finally(function () { button.disabled = false; });
   }
 
-  function reminderLabel(reminder) {
-    if (!reminder) return '暂无提醒状态';
-    if (reminder.status === 'unscheduled' && reminder.kind === 'catchup') return '尚未设置个人观看时段';
-    var messages = { paused: '已暂停追番', archived: '已归档', dropped: '已弃番，提醒已停止', removed: '已移除，提醒已停止', planned: '待看，开始观看后可设置提醒', finished: '已看完，停止开播提醒', ended: '已停止排片',
-      muted: '该番已静音', unscheduled: '请先保存本地排期，才能收到桌宠提醒' };
-    if (messages[reminder.status]) return messages[reminder.status];
-    var time = new Date(Date.parse(reminder.at) + 8 * 3600000);
-    if (!Number.isFinite(+time)) return '暂无提醒状态';
-    var label = time.toISOString().slice(0, 16).replace('T', ' ') + '（北京时间）';
-    return reminder.status === 'quiet' ? label + ' 落在免打扰时段' :
-      label + (reminder.moved ? ' · 本次已改期' : '');
+  function watchCstTime(at) {
+    var time = new Date(Date.parse(at) + 8 * 3600000);
+    return Number.isFinite(+time) ? time.toISOString().slice(0, 16).replace('T', ' ') : '';
   }
 
-  function showWatchForm(detail, reminder) {
+  function watchReminderFact(reminder) {
+    var messages = { paused: '追番已暂停', archived: '已归档', dropped: '已弃番', removed: '已移除',
+      planned: '开始观看后可设置', finished: '已看完', ended: '排片已停止', muted: '本番已静音',
+      unscheduled: reminder?.kind === 'catchup' ? '未设置个人补番时段' : '未设置本机排片' };
+    var value = watchCstTime(reminder?.at);
+    if (!value) return { value: messages[reminder?.status] || '暂无提醒状态' };
+    var lead = (Date.parse(reminder.planned_at) - Date.parse(reminder.at)) / 60000;
+    var notes = [];
+    if (reminder.status === 'quiet') notes.push('免打扰，本次不通知');
+    else if (Date.parse(reminder.at) < Date.now()) notes.push('本次提醒时间已过');
+    if (lead > 0) notes.push('提前 ' + lead + ' 分钟');
+    if (reminder.moved) notes.push('本次已改期');
+    return { value: value, at: reminder.at, note: notes.join(' · ') };
+  }
+
+  function watchReminderMarkup(fact) {
+    return (fact.at ? '<time datetime="' + esc(fact.at) + '">' + esc(fact.value) + '</time>' : esc(fact.value)) +
+      (fact.note ? '<small>' + esc(fact.note) + '</small>' : '');
+  }
+
+  function watchSummary(detail, reminder, readonly) {
+    var info = detail.user_details || {};
+    var state = detail.state === 'watching' ? (detail.finished ? 'finished' : detail.watch_mode === 'catchup' ? 'catchup' : 'watching') : detail.state;
+    var progress = scheduleProgress(detail);
+    var count = detail.watched_count ?? detail.ep_status;
+    var playback = watchLink(detail.watch_url, detail.name, info.primary_name || '去观看');
+    if (!playback) playback = (info.links || []).map(function (link) {
+      return watchLink(link.url, detail.name, link.name || '去观看');
+    }).find(Boolean);
+    var fact = watchReminderFact(reminder);
+    return '<div class="watch-identity"><span id="watchCover">' + cover(detail.id, detail.name) +
+      '</span><div><h4>' + esc(detail.name) + '</h4><span class="watch-subject-state">' + esc(WATCH_STATE_LABEL[state] || '番库条目') + '</span></div></div>' +
+      '<dl class="watch-summary-facts"><div><dt>观看进度</dt><dd>' +
+      (state === 'planned' ? '尚未开始' : '已看 <strong>' + esc(count) + (detail.eps ? ' / ' + esc(detail.eps) : '') + '</strong> 集') +
+      '</dd>' + (state === 'planned' ? '' : '<dd><small>' + esc(detail.finished ? '已看完' : progress.next) + '</small></dd>') + '</div>' +
+      '<div><dt>播放入口</dt><dd>' + (playback || (readonly ? '暂无已保存入口' :
+        '<button type="button" class="watch-summary-link" data-watch-section="watchAboutGroup" data-watch-focus="watchUrl">添加播放入口</button>')) + '</dd></div>' +
+      '<div><dt>下次提醒 <span>' + (fact.at ? '北京时间' : '') + '</span></dt><dd>' + watchReminderMarkup(fact) +
+      '</dd><dd><button type="button" class="watch-summary-link" data-watch-section="watchScheduleGroup">查看排期与提醒</button></dd></div></dl>';
+  }
+
+  function watchScheduleFacts(detail, reminder, original) {
+    var cached = formatAiring(original);
+    var catchup = detail.watch_mode === 'catchup';
+    var slot = catchup ? detail.catchup_slot : { day: detail.air_weekday, time: detail.air_time_cst };
+    var local = slot?.day ? '每周' + CN[slot.day] + (slot.time ? ' ' + slot.time : ' · 时刻待定') : '未设置';
+    var localNote = catchup ? '个人补番时段' : detail.schedule_source || (detail.schedule_manual ? '手动设置' : '本地周档');
+    if (!catchup) {
+      if (detail.schedule_manual && detail.schedule_source) localNote += ' · 同步时保护';
+      if (detail.schedule_ended) localNote = '排片已停止';
+    }
+    var plannedAt = reminder?.planned_at || reminder?.at;
+    if (reminder?.moved || (plannedAt && detail.schedule_adjustments?.some(function (change) { return change.at === plannedAt; })))
+      localNote = '本次改到 ' + watchCstTime(plannedAt);
+    return '<dl class="watch-schedule-facts"><div><dt>原播时间</dt><dd><span id="watchOriginal" data-id="' + esc(detail.id) +
+      '" data-cached-original="' + esc(cached) + '">' + esc(watchOriginalText(detail.id, cached)) + '</span></dd></div>' +
+      '<div><dt>本机排片</dt><dd>' + esc(local) + (slot?.day ? '<small>' + esc(localNote) + '</small>' : '') + '</dd></div>' +
+      '<div><dt>实际提醒时间</dt><dd id="watchReminderStatus">' + watchReminderMarkup(watchReminderFact(reminder)) + '</dd></div></dl>';
+  }
+
+  function watchGroup(id, title, hint, body, expanded) {
+    return '<details class="watch-detail-group" id="' + id + '"' + (expanded ? ' open' : '') +
+      '><summary><strong>' + title + '</strong><span>' + hint + '</span></summary><div class="watch-group-content">' + body + '</div></details>';
+  }
+
+  function showWatchForm(detail, reminder, original) {
     var archived = detail.state === 'archived';
     var planned = detail.state === 'planned';
     var dropped = detail.state === 'dropped';
@@ -2359,8 +2404,6 @@
         (!archived && (detail.manual_finished || !detail.eps) ?
           (detail.manual_finished ? '<button type="button" data-life="unfinish">取消已看完标记</button>' :
             '<button type="button" data-life="finish">标记已看完</button>') : '') +
-        (detail.state === 'watching' && !detail.finished && detail.watch_mode !== 'catchup' ? '<button type="button" id="watchSchedule">调档与提醒</button>' : '') +
-        (detail.state === 'watching' && !detail.finished ? '<button type="button" id="watchBackfill">补记观看</button>' : '') +
         (!archived && !detail.finished ? '<button type="button" id="watchDrop">标为弃番</button>' : '') +
         '</div>';
     }
@@ -2371,59 +2414,78 @@
     var personalDays = '<option value="">未安排</option>' + WEEK_ORDER.map(function (d) {
       return '<option value="' + d + '"' + (d === personal.day ? ' selected' : '') + '>周' + CN[d] + '</option>';
     }).join('');
-    openDlg(detail.id ? '番剧详情' : '手动添加番剧',
-      (/^[1-9]\d{0,9}$/.test(detail.id) ? '<div class="watch-cover-tools"><span id="watchCover">' + cover(detail.id, detail.name) +
-        '</span><button type="button" id="watchCoverRetry">联网重试封面</button><span id="watchCoverStatus" role="status"></span></div>' : '') +
-      '<form id="watchForm"><fieldset class="watch-fields" aria-label="番剧资料"' + (readonly ? ' disabled' : '') + '>' +
+
+    var existing = Boolean(detail.id);
+    var fields = '<fieldset class="watch-fields" data-watch-fields' + (readonly ? ' disabled' : '') + '>';
+    var progressGroup = watchGroup('watchProgressGroup', '进度', '观看方式、补记与每话清单', fields +
       '<label class="watch-field watch-wide"' + (planned ? ' hidden' : '') + '>观看方式<select id="watchMode"><option value="airing">追连载</option><option value="catchup"' +
-      (detail.watch_mode === 'catchup' ? ' selected' : '') + '>补番</option>' + (!detail.id ? '<option value="planned">加入待看</option>' : '') + '</select></label>' +
-      (!readonly ? '<div class="watch-wide watch-hint"><span id="watchBroadcastHint" role="status"></span>' +
-        (/^[1-9]\d*$/.test(detail.id || '') && !detail.finished ? ' <button type="button" id="watchBroadcastCheck">查播出状态</button><button type="button" id="watchBroadcastCatchup" hidden>转为补番</button>' : '') + '</div>' : '') +
-      (!detail.id ? '<div class="watch-wide"><label class="watch-field">Bangumi 条目链接（可选）' +
-        '<input id="catchupSubjectLink" type="text" maxlength="400" placeholder="https://bgm.tv/subject/…" /></label>' +
-        '<button type="button" id="catchupLookup">读取番名与集数</button><p id="catchupLookupStatus" role="status"></p></div>' : '') +
-      '<label class="watch-field watch-wide">番名<input id="watchName" type="text" maxlength="160" required value="' + esc(detail.name) + '" /></label>' +
-      (!detail.id ? '<label class="watch-field watch-wide" data-watch-mode="airing catchup">补番起点<select id="watchStart">' +
+      (detail.watch_mode === 'catchup' ? ' selected' : '') + '>补番</option>' + (!existing ? '<option value="planned">加入待看</option>' : '') + '</select></label>' +
+      (!existing ? '<label class="watch-field watch-wide" data-watch-mode="airing catchup">追番起点<select id="watchStart">' +
         startOptions().replace('value="seen"', 'value="seen" selected') + '</select></label>' +
         '<label class="watch-field watch-wide" id="watchLatestRow" hidden>最新一话是第几话<input id="watchLatest" type="number" min="1" /></label>' : '') +
       '<label class="watch-field" data-watch-mode="airing catchup">连续看到第几集<input id="watchSeen" type="number" min="0" step="1" required inputmode="numeric" value="' + esc(detail.ep_status) + '" /></label>' +
-      (detail.episode_extras?.length ? '<p class="watch-wide watch-hint">累计已看 ' + esc(detail.watched_count) + ' 集。' +
-        (readonly ? '' : '直接改连续进度会重设跳集记录；补哪一集请用每话清单。') + '</p>' : '') +
-      '<label class="watch-field">总集数<input id="watchTotal" type="number" min="1" step="1" inputmode="numeric" placeholder="未知可留空" value="' + esc(detail.eps) + '" /></label>' +
-      (detail.start_episode > 1 ? '<p class="watch-wide watch-hint">补番从第 ' + esc(detail.start_episode) + ' 话开始。</p>' : '') +
-      '<label class="watch-field" data-watch-mode="airing">开播星期<select id="watchDay">' + opts + '</select></label>' +
-      '<label class="watch-field" data-watch-mode="airing">开播时间（北京时间）<input id="watchTime" type="text" maxlength="12" placeholder="如 23:30" aria-describedby="watchTimeHint" value="' + esc(detail.air_time_cst) + '" /></label>' +
-      '<label class="watch-field" data-watch-mode="catchup">补番提醒星期<select id="catchupDay">' + personalDays + '</select></label>' +
-      '<label class="watch-field" data-watch-mode="catchup">观看时间（北京时间）<input id="catchupTime" type="time" value="' + esc(personal.time) + '" /></label>' +
-      '<div class="watch-wide"><label class="watch-field">观看链接<input id="watchUrl" type="url" maxlength="2048" placeholder="https://…" value="' +
-        esc(detail.watch_url) + '" /></label><div class="watch-link-list">' +
-        watchLink(detail.watch_url, detail.name, info.primary_name ? info.primary_name + '（首选）' : '') + entryLinks + '</div></div>' + note +
-      (detail.id ? '<p class="watch-wide original-note"><b>原播周档 · 北京时间</b><span id="watchOriginal" data-id="' +
-        esc(detail.id) + '">' + esc(watchOriginalText(detail.id)) + '</span></p>' : '') +
-      (detail.id && detail.air_weekday ? '<p class="watch-wide watch-hint">本机周档资料：' +
-        esc(detail.schedule_source || (detail.schedule_manual ? '手动设置' : '本地排片')) +
-        (detail.schedule_fetched_at ? ' · ' + esc(new Date(detail.schedule_fetched_at).toLocaleString('zh-CN')) : '') +
-        (detail.schedule_manual ? ' · 同步时保护' : '') + '</p>' : '') +
-      (detail.id ? '<p class="watch-wide original-note"><b>' +
-        (reminder && reminder.kind === 'catchup' ? '补番提醒' : reminder && reminder.status === 'scheduled' ? '下次提醒' : '提醒状态') +
-        '</b><span id="watchReminderStatus">' + esc(reminderLabel(reminder)) + '</span></p>' : '') +
-      '<p id="watchTimeHint" class="watch-wide watch-hint">时间可留空。周一 25:30 会排到周二 01:30。修改已看集数不会增加今日观看统计。</p>' +
-      (readonly ? '' : '<div class="watch-wide watch-lookup" data-watch-mode="airing"><button type="button" id="watchLookup">联网查时刻</button>' +
-      '<span class="watch-hint">来源 <a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">bangumi-data</a>（CC BY 4.0）</span></div>' +
-      '<div id="watchMatches" class="watch-wide" role="status" hidden></div>') +
-      '</fieldset>' + controls + rewatch + (detail.id ? '<div class="watch-link-list">' +
+      '<p class="watch-wide watch-hint" data-watch-mode="airing catchup">改连续进度用于更正记录。补记观看或补看跳过的集数时，可用下方的观看工具。</p>' +
+      (detail.episode_extras?.length ? '<p class="watch-wide watch-hint">累计已看 ' + esc(detail.watched_count) + ' 集。修改连续进度会重设跳集记录。</p>' : '') +
+      (detail.start_episode > 1 ? '<p class="watch-wide watch-hint">记录从第 ' + esc(detail.start_episode) + ' 集开始。</p>' : '') +
+      '</fieldset>' + (existing ? '<div class="watch-group-actions">' +
         (!planned ? '<button type="button" id="watchEpisodesOpen">首轮每话清单</button>' : '') +
-        (!removed ? '<button type="button" id="watchRemove">移除误加条目</button>' : '') +
+        (detail.state === 'watching' && !detail.finished ? '<button type="button" id="watchBackfill">补记观看</button>' : '') +
+        '<button type="button" id="watchEntryHistory">观看历史</button></div>' : '') + rewatch, !existing);
+    var scheduleGroup = watchGroup('watchScheduleGroup', '排期与提醒', '原播时间、本机排片、实际提醒时间',
+      (existing ? '<div id="watchScheduleFacts">' + watchScheduleFacts(detail, reminder, original) + '</div>' : '') + fields +
+      '<label class="watch-field" data-watch-mode="airing">本机排片星期<select id="watchDay">' + opts + '</select></label>' +
+      '<label class="watch-field" data-watch-mode="airing">本机排片时间<input id="watchTime" type="text" maxlength="12" placeholder="如 23:30" aria-describedby="watchTimeHint" value="' + esc(detail.air_time_cst) + '" /></label>' +
+      '<label class="watch-field" data-watch-mode="catchup">个人补番星期<select id="catchupDay">' + personalDays + '</select></label>' +
+      '<label class="watch-field" data-watch-mode="catchup">个人补番时间<input id="catchupTime" type="time" value="' + esc(personal.time) + '" /></label>' +
+      '<p id="watchTimeHint" class="watch-wide watch-hint" data-watch-mode="airing">北京时间。周一 25:30 等于周二 01:30；时间可留空。</p>' +
+      '<p class="watch-wide watch-hint" data-watch-mode="catchup">按北京时间填写你的观看时段。实际提醒还会应用提前量与免打扰设置。</p>' +
+      (planned ? '<p class="watch-wide watch-hint">开始观看后可设置本机排片和提醒。</p>' : '') +
+      (!readonly ? '<div class="watch-wide watch-lookup" data-watch-mode="airing"><button type="button" id="watchLookup">联网查原播时间</button>' +
+        '<a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">资料来源 ↗</a></div>' +
+        '<div id="watchMatches" class="watch-wide" role="status" hidden></div>' : '') +
+      '</fieldset>' + (existing ? '<div class="watch-group-actions">' +
+        (detail.state === 'watching' && !detail.finished && detail.watch_mode !== 'catchup' ? '<button type="button" id="watchSchedule">临时改期与静音</button>' : '') +
+        '<button type="button" id="watchReminderHistory">本番提醒记录</button></div>' : ''), false);
+    var aboutGroup = watchGroup('watchAboutGroup', '番剧资料', '番名、总集数、播放链接与条目管理', fields +
+      (!existing ? '<div class="watch-wide"><label class="watch-field">Bangumi 条目链接（可选）' +
+        '<input id="catchupSubjectLink" type="text" maxlength="400" placeholder="https://bgm.tv/subject/…" /></label>' +
+        '<button type="button" id="catchupLookup">读取番名与集数</button><p id="catchupLookupStatus" role="status"></p></div>' : '') +
+      '<label class="watch-field watch-wide">番名<input id="watchName" type="text" maxlength="160" required value="' + esc(detail.name) + '" /></label>' +
+      '<label class="watch-field">总集数<input id="watchTotal" type="number" min="1" step="1" inputmode="numeric" placeholder="未知可留空" value="' + esc(detail.eps) + '" /></label>' +
+      '<label class="watch-field watch-wide">首选播放链接<input id="watchUrl" type="url" maxlength="2048" placeholder="https://…" value="' + esc(detail.watch_url) + '" /></label>' +
+      (!readonly ? '<div class="watch-wide watch-lookup"><span id="watchBroadcastHint" role="status"></span>' +
+        (/^[1-9]\d*$/.test(detail.id || '') && !detail.finished ? '<button type="button" id="watchBroadcastCheck">查播出状态</button><button type="button" id="watchBroadcastCatchup" hidden>转为补番</button>' : '') + '</div>' : '') +
+      '</fieldset>' + (entryLinks ? '<div class="watch-group-actions" aria-label="备用播放入口">' + entryLinks + '</div>' : '') + note +
+      (existing ? '<div class="watch-group-actions">' +
+        (/^[1-9]\d{0,9}$/.test(detail.id) ? '<button type="button" id="watchCoverRetry">联网重试封面</button><span id="watchCoverStatus" role="status"></span>' : '') +
         '<button type="button" id="watchPreferences">整理标签、笔记与观看入口</button>' +
         (/^[1-9]\d{0,9}$/.test(detail.id) ? '<button type="button" id="watchOrder">续作与观看顺序</button>' +
           (!removed && detail.watched_count > 0 ? '<button type="button" id="watchBgmWriteback">回写一集到 Bangumi</button>' : '') : '') +
         (detail.id.startsWith('local-') ? '<button type="button" id="watchBinding">绑定 Bangumi</button>' : '') +
-        '<button type="button" id="watchEntryHistory">查看观看历史</button>' +
-        '<button type="button" id="watchReminderHistory">查看这部番的提醒记录</button></div>' : '') +
+        (!removed ? '<button type="button" id="watchRemove" class="watch-danger">移除误加条目</button>' : '') + '</div>' : '') +
+      (detail.state === 'watching' ? controls : ''), !existing);
+    openDlg(existing ? '番剧详情' : '手动添加番剧',
+      '<form id="watchForm">' + (existing ? '<section id="watchSummary" aria-label="番剧概要">' + watchSummary(detail, reminder, readonly) + '</section>' : '') +
+      (existing && detail.state !== 'watching' ? controls : '') +
+      (existing ? progressGroup + scheduleGroup + aboutGroup : aboutGroup + progressGroup + scheduleGroup) +
       '<p id="watchError" class="watch-error" role="alert" hidden></p><div id="duplicateReview"></div></form>',
       '<button type="button" data-close>' + (readonly ? '关闭' : '取消') + '</button>' +
-      (readonly ? '' : '<button type="submit" form="watchForm" id="watchSave" class="primary">' + (detail.id ? '保存修改' : '加入在追') + '</button>'));
+      (readonly ? '' : '<button type="submit" form="watchForm" id="watchSave" class="primary">' + (existing ? '保存修改' : '加入在追') + '</button>'),
+      { watchDetail: true, focus: existing ? '#dlgTitle' : '#watchName' });
     var form = $('#watchForm');
+    form.addEventListener('click', function (event) {
+      var shortcut = event.target.closest('[data-watch-section]');
+      if (!shortcut) return;
+      var group = document.getElementById(shortcut.dataset.watchSection);
+      group.open = true;
+      var target = shortcut.dataset.watchFocus ? document.getElementById(shortcut.dataset.watchFocus) : $('summary', group);
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: 'nearest' });
+    });
+    form.addEventListener('invalid', function (event) {
+      var group = event.target.closest('.watch-detail-group');
+      if (group) group.open = true;
+    }, true);
     var writeback = $('#watchBgmWriteback');
     if (writeback) writeback.onclick = function () { openBgmWriteback(detail); };
     var retryCover = $('#watchCoverRetry');
@@ -2571,6 +2633,10 @@
             else if (previous !== latest && row[0].value !== latest) collisions.push(row[1] + '（本机 ' + (latest || '空') + '）');
           });
           detail = current;
+          reminder = reply.reminder;
+          personal = detail.catchup_slot || {};
+          $('#watchSummary', form).innerHTML = watchSummary(detail, reminder, readonly);
+          $('#watchScheduleFacts', form).innerHTML = watchScheduleFacts(detail, reminder, reply.original);
           updateWatchMode();
           box.replaceChildren();
           showError(collisions.length ? '同一字段两边都修改了：' + collisions.join('、') + '。目前保留你的输入，核对后再点保存。'
@@ -2583,10 +2649,14 @@
     function setBusy(value) {
       saving = value;
       if (save) save.disabled = value;
-      form.querySelector('fieldset').disabled = value || readonly;
+      form.querySelectorAll('[data-watch-fields]').forEach(function (fieldset) { fieldset.disabled = value || readonly; });
       form.querySelectorAll('[data-life]').forEach(function (b) { b.disabled = value; });
     }
-    function showError(message) { error.textContent = message; error.hidden = false; }
+    function showError(message) {
+      error.textContent = message;
+      error.hidden = false;
+      if (error.isConnected) error.scrollIntoView({ block: 'nearest' });
+    }
     function edited() {
       return name.value.trim() !== detail.name || Number(seen.value) !== detail.ep_status ||
         (Number(total.value) || null) !== detail.eps || (Number(day.value) || null) !== detail.air_weekday ||
@@ -2800,7 +2870,7 @@
         }
         if (form.isConnected) closeDlg();
         if (j.changed && j.detail.finished && !detail.finished) {
-          if (j.added) { QUERY = ''; $('#q').value = ''; switchTab('library'); }
+          if (j.added) switchTab('library');
           return showCompletion(j.detail.id, j.revision);
         }
         if (j.changed) toast(j.rebuild_error ? '已保存，桌宠数据暂未刷新' :
@@ -2808,8 +2878,6 @@
             j.detail.watch_mode === 'catchup' ? '已加入补番' : '已加入在追') : '详情已保存'), { label: '撤销', fn: undo });
         return refresh().then(function () {
           if (j.added || (detail.watch_mode && detail.watch_mode !== j.detail.watch_mode && j.detail.state === 'watching' && !j.detail.finished)) {
-            QUERY = '';
-            $('#q').value = '';
             if (j.detail.state === 'planned') {
               libraryFilter = 'planned';
               libraryView = { year: '', tag: '', link: '' };
@@ -3199,14 +3267,8 @@
   function doSync() {
     if (BUSY) return toast('同步正在进行');
     var mode = 'collections', useCache = false, request = null;
-    var btn = $('#syncBtn');
     var fields = { '(新增)': '新增条目', collection_state: '收藏状态', name: '原名', name_cn: '番名',
       eps: '总集数', ep_status: '已看集数', air_weekday: '播出星期', start_date: '首播日', calendar_entry: '公开排期' };
-    function busy(value, label) {
-      BUSY = value;
-      btn.disabled = value;
-      btn.textContent = label;
-    }
     function options() {
       openDlg('同步 Bangumi',
         '<label class="row"><span>同步范围</span><select id="syncMode">' +
@@ -3247,7 +3309,7 @@
           if (marker.isConnected) { cancel.disabled = false; marker.textContent = '暂时无法取消，可稍后重试。'; }
         });
       };
-      busy(true, '正在预览…');
+      BUSY = true;
       flushAllBumps();
       POST_CHAIN.then(function () {
         if (request !== id) return null;
@@ -3270,7 +3332,7 @@
         }
       }).finally(function () {
         clearInterval(poll);
-        if (request === id || request === null) { request = null; busy(false, '同步'); }
+        if (request === id || request === null) { request = null; BUSY = false; }
       });
     }
     function review(result) {
@@ -3350,7 +3412,7 @@
       $('#syncRetry').onclick = options;
       go.onclick = function () {
         go.disabled = true;
-        busy(true, '正在写入…');
+        BUSY = true;
         post('/api/sync', { preview_id: result.preview_id, selected: Array.from(selected) }).then(function (applied) {
           if (!applied.ok) {
             openDlg('未写入同步结果', '<p>' + esc(applied.error || '请重新预览') + '</p>',
@@ -3363,7 +3425,7 @@
           return refresh().then(function () { if (TAB === 'season') return loadSeason(false); });
         }).catch(function () {
           if (view.isConnected) $('#syncSelection').textContent = '本机后台未响应。请刷新番库核对后重试。';
-        }).finally(function () { busy(false, '同步'); });
+        }).finally(function () { BUSY = false; });
       };
       draw();
     }
@@ -3430,8 +3492,8 @@
     try {
       homeView = localStorage.getItem('tiara.home') || '';
       compactWeek = localStorage.getItem('tiara.compactWeek') === '1';
-      TAB = VIEWS.includes(homeView) ? homeView : localStorage.getItem('kx.tab') || 'week';
-    } catch (e) { TAB = 'week'; }
+      TAB = VIEWS.includes(homeView) ? homeView : localStorage.getItem('kx.tab') || 'today';
+    } catch (e) { TAB = 'today'; }
     try { WEEK_ALL = localStorage.getItem('kx.weekAll') === '1'; } catch (e) {}
     try {
       var want = new URLSearchParams(location.search).get('tab');
@@ -3439,7 +3501,7 @@
       if (new URLSearchParams(location.search).get('all') === '1') WEEK_ALL = true;
       if (new URLSearchParams(location.search).get('welcome') === '1') WELCOME_FORCE = true;
     } catch (e) {}
-    if (VIEWS.indexOf(TAB) < 0) TAB = 'week';
+    if (VIEWS.indexOf(TAB) < 0) TAB = 'today';
     if (new URLSearchParams(location.search).get('sync') === '1') {
       var url = new URL(location.href);
       url.searchParams.delete('sync');
@@ -3448,46 +3510,22 @@
     }
 
     document.querySelectorAll('.tab').forEach(function (b) {
-      var active = b.getAttribute('data-tab') === TAB;
+      var active = activeNav(b.dataset.tab);
       b.classList.toggle('on', active);
       if (active) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
       b.addEventListener('click', function () { switchTab(b.getAttribute('data-tab')); });
     });
-    // 搜索防抖：每敲一个字就重建 167 行表格，输入法组合时尤其卡
-    var qTimer = null;
-    $('#q').addEventListener('input', function () {
-      clearTimeout(qTimer);
-      qTimer = setTimeout(function () {
-        QUERY = $('#q').value;
-        searchLimit = 8;
-        if (TAB === 'season') {
-          renderLibrarySearch();
-          var b = $('#seasonBody');
-          if (b) { b.innerHTML = seasonBodyHtml(); bindSeason(); }
-        } else {
-          render();
-        }
-      }, 120);
-    });
 
-    $('#clockBtn').addEventListener('click', function () {
-      var next = CLOCK === '30h' ? '24h' : '30h';
-      post('/api/settings', { clock: next }).then(function (j) {
-        if (j.ok === false || j.error) return toast(j.error || '时制没保存');
-        CLOCK = (j.settings && j.settings.clock) || next;
-        paintClock();
-        render();
-      }).catch(function () { toast('服务没响应'); });
+    var searchInput = $('#q');
+    $('#panelSearch').addEventListener('submit', function (event) {
+      event.preventDefault();
+      setLibrarySearch(searchInput.value);
     });
-
-    $('#syncBtn').addEventListener('click', doSync);
-
-    $('#scaleSel').addEventListener('change', function () {
-      post('/api/settings', { pet_scale: Number($('#scaleSel').value) }).then(function (j) {
-        if (j.ok === false || j.error) return toast(j.error || '没改成');
-        toast('桌宠尺寸已改，桌宠会自己跟上');
-      }).catch(function () { toast('服务没响应，尺寸没存'); });
+    searchInput.addEventListener('input', function (event) {
+      if (!event.isComposing) setLibrarySearch(searchInput.value);
     });
+    searchInput.addEventListener('compositionend', function () { setLibrarySearch(searchInput.value); });
+    $('#clearSearch').onclick = function () { setLibrarySearch(''); searchInput.focus({ preventScroll: true }); };
 
     var coverSaved = 'md';
     try { coverSaved = localStorage.getItem('kx.cover') || 'md'; } catch (e) {}
@@ -3496,11 +3534,7 @@
       if (cv && COVER[cv]) coverSaved = cv;
     } catch (e) {}
     setCover(coverSaved);
-    $('#coverSel').addEventListener('change', function () {
-      setCover($('#coverSel').value);
-    });
-
-    $('#migrationBtn').addEventListener('click', function () {
+    function openMigration() {
       openDlg('升级与换机',
         '<p>把番库、观看历史、偏好和陪伴记忆迁到另一份 TIARA。Bangumi 令牌和代理凭据需要在新安装里重新填写。</p>' +
         '<div id="startupPathNote" class="note" role="status">正在核对开机自启路径…</div>' +
@@ -3735,10 +3769,13 @@
             file.value = folder.value = ''; sourceData = null; restoreDesktop.hidden = true;
           });
       };
-    });
+    }
 
-    $('#restoreBtn').addEventListener('click', function () {
+    function openRestore() {
+      openDlg('备份与恢复', '<p id="restoreLoading" role="status">正在读取备份列表…</p>');
+      var loading = $('#restoreLoading');
       json('/api/backups').then(function (result) {
+        if (!loading.isConnected) return;
         var list = result.backups || [];
         var info = result.inventory;
         function size(bytes) {
@@ -3812,16 +3849,14 @@
           }).catch(function () { go.disabled = false; toast('没有收到恢复结果'); });
         });
         load();
-      }).catch(function () { toast('读不到备份列表'); });
-    });
+      }).catch(function () { if (loading.isConnected) loading.textContent = '读不到备份列表'; });
+    }
 
-    $('#icsBtn').addEventListener('click', openCalendarExport);
-    $('#mdBtn').addEventListener('click', function () { location.href = '/api/export?fmt=md'; });
-
-    $('#tokenBtn').addEventListener('click', openBgmAccount);
-    $('#nickBtn').addEventListener('click', openNickname);
-    $('#reminderBtn').addEventListener('click', function () {
+    function openReminderSettings() {
+      openDlg('提醒设置', '<p id="reminderSettingsLoading" role="status">正在读取提醒设置…</p>');
+      var loading = $('#reminderSettingsLoading');
       json('/api/settings').then(function (settings) {
+        if (!loading.isConnected) return;
         openDlg('提醒设置',
           '<form id="quietForm"><p>以北京时间（UTC+8）计算。跨午夜时沿用开始那一天的规则。每组同时留空时关闭。</p>' +
           '<fieldset><legend>周一至周五免打扰</legend>' +
@@ -3872,13 +3907,9 @@
             return refresh();
           }).catch(function () { status.textContent = '面板服务未响应'; });
         });
-      }).catch(function () { toast('读取提醒设置失败'); });
-    });
+      }).catch(function () { if (loading.isConnected) loading.textContent = '读取提醒设置失败'; });
+    }
 
-    $('#reminderHistoryBtn').addEventListener('click', function () { openReminderHistory(); });
-    $('#watchHistoryBtn').addEventListener('click', function () { openWatchHistory(); });
-    $('#watchReportBtn').addEventListener('click', openWatchReport);
-    $('#animeSearchBtn').addEventListener('click', openAnimeSearch);
     $('#settingsNav').onclick = openSettingsNav;
 
     function openReleaseInfo() {
@@ -3950,52 +3981,99 @@
       preview();
     }
 
+
     function openSettingsNav() {
-      var groups = {
-        '账号与同步': { tokenBtn: 'Bangumi 账号', syncBtn: '同步' },
-        '提醒': { reminderBtn: '提醒设置', reminderHistoryBtn: '提醒记录' },
-        '升级与数据': { releaseInfo: '检查更新', migrationBtn: '升级与换机', restoreBtn: '备份与恢复', privateSsp: '导出私人 SSP 排片',
-          watchHistoryBtn: '观看历史', watchReportBtn: '本地周报' },
-        '显示与排查': { scheduleBoard: '打开副屏看板', themeBtn: '切换网页主题', diagBtn: '启动诊断' }
-      };
-      openDlg('设置', Object.entries(groups).map(function (group) {
-        return '<fieldset><legend>' + group[0] + '</legend>' + Object.entries(group[1]).map(function (entry) {
-          return '<button type="button" data-settings-open="' + entry[0] + '">' + entry[1] + '</button>';
-        }).join(' ') + '</fieldset>';
-      }).join('') + '<fieldset><legend>排片与首页</legend><label>启动时打开 <select id="settingsHome">' +
-        '<option value="">上次浏览</option><option value="week">我的排片</option><option value="continue">接着看</option>' +
-        '<option value="catchup">补番</option></select></label> ' +
-        '<label><input type="checkbox" id="settingsCompact"' + (compactWeek ? ' checked' : '') + '> 排片使用紧凑列表</label></fieldset>',
-        '<button data-close>完成</button>');
+      var groups = [
+        ['Bangumi', [['account', 'Bangumi 账号', openBgmAccount], ['sync', '同步 Bangumi', doSync]]],
+        ['数据与导出', [['restore', '备份与恢复', openRestore], ['migration', '升级与换机', openMigration],
+          ['calendar', '导出日历', openCalendarExport], ['week', '导出周表', function () { location.href = '/api/export?fmt=md'; }],
+          ['ssp', '导出私人 SSP 排片', openPrivateSsp]]],
+        ['提醒与桌宠', [['reminders', '提醒设置', openReminderSettings],
+          ['reminderHistory', '提醒记录', function () { openReminderHistory(); }], ['nickname', '桌宠称呼', openNickname]]],
+        ['应用与排查', [['board', '打开副屏看板', function () {
+          var board = window.open('/board.html', 'tiara-board', 'popup,width=1100,height=760,resizable=yes');
+          if (board) board.focus(); else location.href = '/board.html';
+        }], ['update', '检查更新', openReleaseInfo], ['diagnose', '启动诊断', doDiagnose]]],
+      ];
+      var appearance = '<section class="settings-section settings-display" aria-labelledby="settingsDisplay">' +
+        '<h4 id="settingsDisplay">显示偏好</h4><div class="settings-fields">' +
+        '<label>主题<select id="themeSel"><option value="light">亮色</option><option value="dark">暗色</option><option value="auto">跟随系统</option></select></label>' +
+        '<label>封面尺寸<select id="coverSel"><option value="sm">小</option><option value="md">中</option><option value="lg">大</option><option value="xl">特大</option></select></label>' +
+        '<label>排片时制<select id="clockSel"><option value="30h">30 小时制</option><option value="24h">24 小时制</option></select></label>' +
+        '<label>启动时打开<select id="settingsHome"><option value="">上次浏览</option><option value="today">我的排片 · 今天</option>' +
+        '<option value="week">我的排片 · 本周</option><option value="continue">接着看</option><option value="catchup">补番</option></select></label>' +
+        '<label>桌宠尺寸<select id="scaleSel"></select></label>' +
+        '<label class="settings-checkbox"><input type="checkbox" id="settingsCompact"' +
+        (compactWeek ? ' checked' : '') + '> 本周排片使用紧凑列表</label></div><p id="settingsStatus" role="status" hidden></p></section>';
+      var actions = Object.fromEntries(groups.flatMap(function (group) {
+        return group[1].map(function (entry) { return [entry[0], entry[2]]; });
+      }));
+      var sections = groups.map(function (group) {
+        return '<section class="settings-section"><h4>' + group[0] + '</h4><div class="settings-actions">' +
+          group[1].map(function (entry) {
+            return '<button type="button" data-settings-open="' + entry[0] + '">' + entry[1] + '</button>';
+          }).join('') + '</div></section>';
+      }).join('');
+      openDlg('设置', '<div class="settings-layout">' + appearance + sections + '</div>', '<button data-close>完成</button>');
+      var clock = $('#clockSel'), scale = $('#scaleSel'), status = $('#settingsStatus');
+      var scaleOptions = [0.7, 0.85, 1, 1.25, 1.5, 2];
+      var currentScale = num(STATE?.settings?.pet_scale) || 1;
+      if (!scaleOptions.includes(currentScale)) scaleOptions.push(currentScale);
+      scale.innerHTML = scaleOptions.sort(function (a, b) { return a - b; }).map(function (value) {
+        return '<option value="' + value + '">' + Math.round(value * 100) + '%</option>';
+      }).join('');
+      clock.value = CLOCK;
+      scale.value = String(currentScale);
+      $('#themeSel').value = themeNow;
+      $('#coverSel').value = coverSize;
       $('#settingsHome').value = homeView;
+      function showSettingsStatus(message) {
+        if (!status.isConnected) return;
+        status.textContent = message;
+        status.hidden = !message;
+      }
+      function saveOption(control, key, value) {
+        control.disabled = true;
+        showSettingsStatus('');
+        post('/api/settings', { [key]: value }).then(function (reply) {
+          if (!reply.ok) throw new Error(reply.error || '显示设置未保存');
+          if (reply.settings && STATE) STATE.settings = reply.settings;
+          if (key === 'clock') CLOCK = reply.settings?.clock || value;
+          showSettingsStatus('显示设置已保存');
+          return refresh();
+        }).catch(function (error) {
+          control.value = String(key === 'clock' ? CLOCK : STATE?.settings?.pet_scale || currentScale);
+          showSettingsStatus(error.message || '显示设置未保存');
+        }).finally(function () { control.disabled = false; });
+      }
+      clock.onchange = function () { saveOption(this, 'clock', this.value); };
+      scale.onchange = function () { saveOption(this, 'pet_scale', Number(this.value)); };
+      $('#themeSel').onchange = function () {
+        themeNow = this.value;
+        applyTheme(themeNow);
+        try { localStorage.setItem('kx.theme', themeNow); } catch (e) { showSettingsStatus('浏览器无法保存主题'); }
+      };
+      $('#coverSel').onchange = function () { setCover(this.value); };
       $('#settingsHome').onchange = function () {
         homeView = this.value;
-        try { localStorage.setItem('tiara.home', homeView); } catch (e) { toast('浏览器无法保存首页设置'); }
+        try { localStorage.setItem('tiara.home', homeView); } catch (e) { showSettingsStatus('浏览器无法保存首页设置'); }
       };
       $('#settingsCompact').onchange = function () {
         compactWeek = this.checked;
-        try { localStorage.setItem('tiara.compactWeek', compactWeek ? '1' : '0'); } catch (e) { toast('浏览器无法保存显示设置'); }
+        try { localStorage.setItem('tiara.compactWeek', compactWeek ? '1' : '0'); } catch (e) { showSettingsStatus('浏览器无法保存显示设置'); }
         render();
       };
       $('#dlg').querySelectorAll('[data-settings-open]').forEach(function (button) {
-        button.onclick = function () {
-          closeDlg();
-          var action = button.dataset.settingsOpen;
-          if (action === 'releaseInfo') openReleaseInfo();
-          else if (action === 'privateSsp') openPrivateSsp();
-          else if (action === 'scheduleBoard') {
-            var board = window.open('/board.html', 'tiara-board', 'popup,width=1100,height=760,resizable=yes');
-            if (board) board.focus();
-            else location.href = '/board.html';
-          }
-          else $('#' + action).click();
-        };
+        button.onclick = actions[button.dataset.settingsOpen];
       });
     }
 
     // ---------------- 诊断：服务日志 ----------------
     function doDiagnose() {
+      openDlg('诊断 · 启动与版本', '<p id="diagnoseLoading" role="status">正在读取启动信息…</p>');
+      var loading = $('#diagnoseLoading');
       Promise.all([json('/api/logs?tail=160'), json('/api/version').catch(function () { return {}; })]).then(function (results) {
+        if (!loading.isConnected) return;
         var j = results[0], version = results[1];
         var text = (j.lines || []).join('\n');
         var errs = (j.lines || []).filter(function (l) { return l.indexOf('[error]') >= 0; }).length;
@@ -4031,10 +4109,8 @@
         var btn = $('#diagRefresh');
         if (btn) btn.addEventListener('click', function () { closeDlg(); doDiagnose(); });
         $('#diagShare').onclick = openDiagnosticsReport;
-      }).catch(function () { toast('读不到日志'); });
+      }).catch(function () { if (loading.isConnected) loading.textContent = '读不到日志'; });
     }
-
-    $('#diagBtn').addEventListener('click', doDiagnose);
 
     function openDiagnosticsReport() {
       openDlg('脱敏诊断报告', '<p id="diagnosticsLoading" role="status">正在生成…</p>', '<button data-close>关闭</button>');
@@ -4065,12 +4141,6 @@
       }).catch(function (e) { if (loading.isConnected) loading.textContent = e.message || '无法生成报告'; });
     }
 
-    // 顶栏「待看 N」
-    var pBtn = $('#pendingBtn');
-    if (pBtn) pBtn.addEventListener('click', showPending);
-
-    // 主题：暗 → 亮 → 跟随系统
-    // 主题：暗 → 亮 → 跟随系统
     var THEMES = ['dark', 'light', 'auto'];
     var mqDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
     function systemIsDark() { return !mqDark || mqDark.matches; }
@@ -4079,8 +4149,6 @@
       document.documentElement.dataset.theme = effective;
       var meta = $('#themeColor');
       if (meta) meta.content = effective === 'light' ? '#f7f8fa' : '#181d23';
-      var btn = $('#themeBtn');
-      if (btn) btn.textContent = t === 'light' ? '亮色' : t === 'auto' ? '自动' : '暗色';
     }
     var themeNow = 'light';
     try {
@@ -4088,12 +4156,6 @@
       if (THEMES.includes(savedTheme)) themeNow = savedTheme;
     } catch (e) {}
     applyTheme(themeNow);
-    $('#themeBtn').addEventListener('click', function () {
-      themeNow = THEMES[(THEMES.indexOf(themeNow) + 1) % THEMES.length];
-      try { localStorage.setItem('kx.theme', themeNow); } catch (e) {}
-      applyTheme(themeNow);
-      toast(themeNow === 'light' ? '亮色' : themeNow === 'auto' ? '跟随系统' : '暗色');
-    });
     if (mqDark) {
       var onSysTheme = function () { if (themeNow === 'auto') applyTheme('auto'); };
       if (mqDark.addEventListener) mqDark.addEventListener('change', onSysTheme);
@@ -4102,8 +4164,12 @@
 
     $('#mask').addEventListener('click', function (e) { if (e.target === $('#mask')) closeDlg(); });
     document.addEventListener('click', function (e) {
+      document.querySelectorAll('.schedule-more[open]').forEach(function (menu) {
+        if (!menu.contains(e.target)) closeScheduleMenu(menu);
+      });
       var target = e.target.closest('[data-new-watch], [data-detail]');
       if (target) openWatchDetail(target.getAttribute('data-detail'));
+      if (e.target.closest('[data-anime-search]')) openAnimeSearch();
       var libraryAction = e.target.closest('[data-resume], [data-archive]');
       if (!libraryAction || libraryAction.disabled) return;
       var archive = libraryAction.hasAttribute('data-archive');
@@ -4119,9 +4185,10 @@
     function rowsForKb() {
       return Array.prototype.slice.call(document.querySelectorAll('#view .show[data-card]'));
     }
-    function selRow(id) {
+    function selRow(key) {
+      SEL = key;
       var rows = rowsForKb();
-      for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('sel', rows[i].getAttribute('data-card') === String(id));
+      for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('sel', rows[i].id === key);
     }
     function moveSel(step) {
       var rows = rowsForKb();
@@ -4129,10 +4196,8 @@
       var idx = -1;
       for (var i = 0; i < rows.length; i++) if (rows[i].classList.contains('sel')) idx = i;
       idx = idx < 0 ? (step > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, idx + step));
-      rows.forEach(function (r) { r.classList.remove('sel'); });
-      rows[idx].classList.add('sel');
+      selRow(rows[idx].id);
       try { rows[idx].scrollIntoView({ block: 'nearest' }); } catch (e) {}
-      SEL = rows[idx].getAttribute('data-card');
     }
     function curSel() {
       var r = document.querySelector('#view .show.sel[data-card]');
@@ -4140,23 +4205,29 @@
     }
 
     document.addEventListener('keydown', function (e) {
+      if (e.isComposing) return;
       if ($('#mask').classList.contains('show')) {
         if (e.key === 'Escape') { e.preventDefault(); closeDlg(); }
         if (e.key === 'Tab') {
-          var targets = Array.from($('#dlg').querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]'))
+          var targets = Array.from($('#dlg').querySelectorAll('button, input, select, textarea, a[href], summary, [tabindex="0"]'))
             .filter(function (el) { return !el.matches(':disabled') && el.getClientRects().length; });
           var edge = e.shiftKey ? targets[0] : targets[targets.length - 1];
-          if (!targets.length || document.activeElement === edge || !$('#dlg').contains(document.activeElement)) {
+          if (!targets.length || document.activeElement === edge || !$('#dlg').contains(document.activeElement) ||
+              e.shiftKey && document.activeElement.id === 'dlgTitle') {
             e.preventDefault();
             (targets[e.shiftKey ? targets.length - 1 : 0] || $('#dlg')).focus();
           }
         }
         return;
       }
+      if (e.key === 'Escape') {
+        var menu = $('.schedule-more[open]');
+        if (menu) { e.preventDefault(); closeScheduleMenu(menu, menu.contains(document.activeElement)); return; }
+      }
       if (e.key === 'Escape' && $('#q').value) {
         e.preventDefault();
-        $('#q').value = '';
-        $('#q').dispatchEvent(new Event('input'));
+        setLibrarySearch('');
+        $('#q').focus({ preventScroll: true });
         return;
       }
       var t = e.target || {};
@@ -4170,11 +4241,12 @@
       if ($('#mask').classList.contains('show')) return;
 
       if (e.key === '/') { e.preventDefault(); $('#q').focus(); return; }
-      if (e.key === '1') return document.querySelector('.tab[data-tab=week]').click();
-      if (e.key === '2') return document.querySelector('.tab[data-tab=today]').click();
+      if (e.key === '1') return switchTab('week');
+      if (e.key === '2') return switchTab('today');
       if (e.key === '3') return document.querySelector('.tab[data-tab=season]').click();
       if (e.key === '4') return document.querySelector('.tab[data-tab=library]').click();
       if (e.key === '5') return document.querySelector('.tab[data-tab=catchup]').click();
+      if (q()) return;
       if (e.key === 'u' || e.key === 'U') { e.preventDefault(); return undo(); }
       if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); return moveSel(1); }
       if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); return moveSel(-1); }
