@@ -21,6 +21,7 @@
   var IMAGES = {};
   var missingCovers = new Map();
   var coverVersions = new Map();
+  var seasonCoverQueue = [], seasonCoversPending = new WeakSet(), seasonCoverRunning = 0;
   var TAB = 'today';
   /** ?welcome=1 时强制给一遍新手引导（老用户想复习时用） */
   var WELCOME_FORCE = false;
@@ -33,6 +34,8 @@
   var SEASON = null;
   var SEASON_MARK = {};
   var SEASON_Q = '';
+  var SEASON_FIRST = '2019Q1';
+  var SEASON_YEAR = '';
   var SEASON_ERR = '';
   var seasonRequest = 0;
   var ORIGINAL = {};
@@ -41,7 +44,7 @@
   var originalAt = 0;
   var originalWarning = '';
   /** 本季筛选条件（放在这里，refresh 重绘后不会被 reset） */
-  var SEASON_FILTER = { onlyTv: true, hideWatching: false, onlyTodo: false, sortBy: 'weekday' };
+  var SEASON_FILTER = { onlyTv: false, hideWatching: false, onlyTodo: false, sortBy: 'weekday' };
   var COVER = { sm: [28, 38], md: [36, 48], lg: [46, 62], xl: [58, 78] };
   var coverSize = 'md';
 
@@ -201,14 +204,54 @@
    *   3. 一屏 100+ 张、单域名 6 条连接，平均 1.3 秒/张，滚到哪儿哪儿是空白。
    * 现在统一由服务端取一次落盘（data/covers/），浏览器拿本机图；没有图的条目退化成首字方块。
    */
-  function cover(id, name) {
+  function cover(id, name, localOnly, season) {
     var ch = Array.from(String(name || '?').trim())[0] || '?';
     var sid = String(id == null ? '' : id);
-    if (!/^\d{1,10}$/.test(sid) || Date.now() - (missingCovers.get(sid) || 0) < 600000) return '<span class="cover">' + esc(ch) + '</span>';
+    if (!/^\d{1,10}$/.test(sid) || !localOnly && Date.now() - (missingCovers.get(sid) || 0) < 600000) return '<span class="cover">' + esc(ch) + '</span>';
     var version = coverVersions.get(sid);
     return '<span class="cover"><img loading="lazy" src="/cover/' + enc(sid) + '.jpg' +
-      (version ? '?v=' + version : '') + '" alt="" data-cover-id="' + sid + '" data-ch="' + esc(ch) + '" /></span>';
+      (localOnly ? '?local=1' + (version ? '&amp;v=' + version : '') : version ? '?v=' + version : '') +
+      (localOnly ? '" data-local-cover="1' : '') +
+      (season ? '" data-cover-season="' + esc(season) : '') +
+      '" alt="" data-cover-id="' + sid + '" data-ch="' + esc(ch) + '" /></span>';
   }
+
+  function queueSeasonCover(placeholder) {
+    if (!navigator.onLine || seasonCoversPending.has(placeholder)) return;
+    seasonCoversPending.add(placeholder);
+    seasonCoverQueue.push(placeholder);
+    loadSeasonCovers();
+  }
+
+  function loadSeasonCovers() {
+    while (navigator.onLine && seasonCoverRunning < 4 && seasonCoverQueue.length)
+      loadSeasonCover(seasonCoverQueue.shift());
+  }
+
+  function loadSeasonCover(placeholder) {
+    if (!placeholder.isConnected) return;
+    seasonCoverRunning++;
+    var id = placeholder.getAttribute('data-cover-id');
+    var quarter = placeholder.getAttribute('data-cover-season');
+    var image = new Image();
+    image.alt = '';
+    function done() {
+      seasonCoversPending.delete(placeholder);
+      seasonCoverRunning--;
+      loadSeasonCovers();
+    }
+    image.onload = function () {
+      if (placeholder.isConnected) {
+        placeholder.removeAttribute('data-cover-season');
+        placeholder.replaceChildren(image);
+        missingCovers.delete(id);
+      }
+      done();
+    };
+    image.onerror = done;
+    image.src = '/cover/' + enc(id) + '.jpg?q=' + enc(quarter);
+  }
+
   /**
    * 封面加载失败 → 换成首字方块。
    * 以前写成 onerror="…textContent='<首字>'"：名字以 ' 开头时会把内联 JS 的字符串截断（SyntaxError），
@@ -219,8 +262,15 @@
     if (!img || img.tagName !== 'IMG' || !img.parentNode) return;
     if (String(img.parentNode.className || '').indexOf('cover') < 0) return;
     var id = img.getAttribute('data-cover-id');
-    if (id) missingCovers.set(id, Date.now());
-    img.parentNode.textContent = img.getAttribute('data-ch') || '?';
+    if (id && !img.hasAttribute('data-local-cover')) missingCovers.set(id, Date.now());
+    var placeholder = img.parentNode;
+    placeholder.textContent = img.getAttribute('data-ch') || '?';
+    var quarter = img.getAttribute('data-cover-season');
+    if (quarter) {
+      placeholder.setAttribute('data-cover-id', id);
+      placeholder.setAttribute('data-cover-season', quarter);
+      queueSeasonCover(placeholder);
+    }
   }, true);
 
   // ---------------- 数据 ----------------
@@ -256,7 +306,8 @@
         STATS = arr[1];
         IMAGES = (STATE && STATE.images) || {};
         CLOCK = STATE.settings?.clock || '30h';
-        hideNetbar();
+        if (STATE.recovery?.read_only) showNetbar(STATE.recovery.message);
+        else hideNetbar();
         $('#footHint').textContent = 'TIARA · 本地番库 · 在追 ' + num(STATE.watching_count) + ' 部';
         render();
         loadOriginal();
@@ -264,6 +315,9 @@
       .catch(function (e) {
         if (STATE) return offlineNote(e);   // 已经有内容：只提示，不拆页面
         showNetbar('连不上本地服务：' + (e.message || '网络错误'));
+        json('/api/health').then(function (health) {
+          if (health.recovery?.read_only) showNetbar(health.recovery.message);
+        }).catch(function () {});
         $('#view').innerHTML = '<div class="panel"><div class="empty">读不到本地服务：' + esc(e.message) +
           '<br /><br />先跑 <b>node server.mjs --port 7788</b>，或用「打开番组表.bat」。<br />' +
           '起好服务后点上面的「重试」。</div></div>';
@@ -310,10 +364,19 @@
     return TAB === tab || tab === 'today' && (TAB === 'week' || TAB === 'continue');
   }
 
-  function switchTab(to) {
+  function switchTab(to, fromHistory) {
     if (VIEWS.indexOf(to) < 0) return;
     if ($('#q').value || q()) setLibrarySearch('', false);
+    var previous = TAB;
     TAB = to;
+    if (previous !== TAB && !fromHistory) {
+      if (TAB === 'season') {
+        writeSeasonAddress(previous, '', true);
+        writeSeasonAddress(TAB, SEASON_Q || curSeason(), false);
+      } else if (previous === 'season') {
+        writeSeasonAddress(TAB, '', false);
+      }
+    }
     try { localStorage.setItem('kx.tab', TAB); } catch (e) {}
     document.querySelectorAll('.tab').forEach(function (x) {
       var active = activeNav(x.dataset.tab);
@@ -336,6 +399,7 @@
     var v = $('#view');
     // 整体重绘会把焦点丢到 body：记住当前焦点控件的 id，画完还回去
     var focusId = document.activeElement && document.activeElement.id;
+    var control = viewDetailSelector(document.activeElement);
     if (TAB === 'week' || TAB === 'today') v.innerHTML = viewSchedule(TAB === 'week');
     else if (TAB === 'library') v.innerHTML = viewLibrary();
     else if (TAB === 'catchup') v.innerHTML = viewCatchup();
@@ -350,20 +414,35 @@
         try { again.focus({ preventScroll: true }); } catch (e) { again.focus(); }
       }
     }
+    if (!focusId && control) $(control)?.focus({ preventScroll: true });
+  }
+
+  function viewDetailSelector(element) {
+    var id = element?.dataset.detail;
+    return id && $('#view').contains(element) ? '#view [data-detail="' + CSS.escape(id) + '"]' : '';
+  }
+
+  function watchProgress(w) {
+    var seen = num(w.ep_status), start = Math.max(1, num(w.start_episode));
+    var extras = w.episode_extras || [];
+    var count = Math.max(0, seen - start + 1) + extras.length;
+    return { seen: seen, count: count, next: Math.max(seen + 1, start),
+      text: progressLine(count, seen, start) };
+  }
+
+  function progressLine(count, seen, start) {
+    return '已记 ' + count + ' 集' + (seen >= start ? ' · 连续至第 ' + seen + ' 集' : ' · 尚无连续进度');
   }
 
   function scheduleProgress(w) {
-    var seen = num(w.ep_status), total = num(w.eps), start = Math.max(1, num(w.start_episode));
-    var extras = w.episode_extras || [];
-    var count = Math.max(0, seen - start + 1) + extras.length;
-    var complete = total > 0 && !watchGap(w, total);
+    var progress = watchProgress(w), total = num(w.eps);
+    var complete = w.finished || (total > 0 && !watchGap(w, total));
     var behind = w.watch_mode !== 'catchup' ? watchGap(w, w.expected_eps) : 0;
-    var progress = start > 1 || extras.length ? '已记 ' + count + ' 集' + (seen >= start ? ' · 连续至第 ' + seen + ' 集' : '') :
-      '已看 ' + seen + (total ? ' / ' + total : '') + ' 集';
-    if (behind && !complete) progress += ' · 落后 ' + behind + ' 集';
-    else if (!complete && w.watch_mode !== 'catchup' && num(w.expected_eps) > 0) progress += ' · 已追平';
-    return { seen: seen, next: complete ? '已看完' : '下一集 · 第 ' + Math.max(seen + 1, start) + ' 集',
-      text: progress, complete: complete, canRewind: count > 0 };
+    var text = progress.text;
+    if (behind && !complete) text += ' · 落后 ' + behind + ' 集';
+    else if (!complete && w.watch_mode !== 'catchup' && num(w.expected_eps) > 0) text += ' · 已追平';
+    return { seen: progress.seen, next: complete ? '已看完' : '下一集 · 第 ' + progress.next + ' 集',
+      text: text, complete: complete, canRewind: progress.count > 0 };
   }
 
   function showCard(x, group) {
@@ -898,15 +977,12 @@
     var slots = new Map((STATE.catchup_reminders || []).map(function (slot) { return [String(slot.id), slot]; }));
     var entries = (STATE.catchup_list || []).slice().sort(recentWatchOrder);
     var list = entries.map(function (w) {
-      var seen = num(w.ep_status), total = num(w.eps), name = w.name_cn || w.name || String(w.id), id = esc(w.id);
-      var next = Math.max(seen + 1, num(w.start_episode) || 1);
+      var total = num(w.eps), name = w.name_cn || w.name || String(w.id), id = esc(w.id);
+      var current = scheduleProgress(w);
       var slot = slots.get(String(w.id));
-      var extra = (w.episode_extras || []).length;
-      var progress = extra ? '累计已看 ' + (Math.max(0, seen - Math.max(0, num(w.start_episode) - 1)) + extra) +
-        ' 集 · 连续至第 ' + seen + ' 集' + (total ? ' · 剩 ' + watchGap(w, total) + ' 集' : '') :
-        '已看 ' + seen + (total ? ' / ' + total + ' 集 · 剩 ' + watchGap(w, total) + ' 集' : ' 集 · 总数未定');
+      var progress = current.text + (total ? ' · 剩 ' + watchGap(w, total) + ' 集' : ' · 总数未定');
       return '<article class="panel catchup-card" data-catchup="' + id + '">' +
-        '<div>' + watchTitle(w.id, name, true) + '<p>下一集 · 第 ' + next + ' 集</p><small>' + esc(progress) + '</small>' +
+        '<div>' + watchTitle(w.id, name, true) + '<p>' + esc(current.next) + '</p><small>' + esc(progress) + '</small>' +
         (slot ? '<small class="catchup-slot">补番提醒 · 周' + CN[slot.day] + ' ' + esc(slot.time) +
           (slot.quiet ? ' · 免打扰' : '') + '</small>' : '') + '</div>' +
         '<div class="catchup-actions">' + watchLink(w.watch_url, name) +
@@ -1067,12 +1143,8 @@
 
   // ---------------- 本季 ----------------
   function curSeason(d) {
-    d = d || new Date();
-    var m = d.getMonth() + 1;
-    var y = d.getFullYear();
-    var yy = m >= 10 ? y : (m >= 7 ? y : (m >= 4 ? y : y - 1));
-    var qq = m >= 10 ? 4 : (m >= 7 ? 3 : (m >= 4 ? 2 : 1));
-    return yy + 'Q' + qq;
+    var cst = new Date((d || new Date()).getTime() + 8 * 3600000);
+    return cst.getUTCFullYear() + 'Q' + (Math.floor(cst.getUTCMonth() / 3) + 1);
   }
 
   /** "2026Q4" 前后挪 n 个季度 */
@@ -1085,22 +1157,75 @@
     return y + 'Q' + quarter;
   }
 
+  function supportedSeason(quarter) {
+    return /^\d{4}Q[1-4]$/.test(quarter || '') && quarter >= SEASON_FIRST && quarter <= shiftSeason(curSeason(), 2);
+  }
+
+  function writeSeasonAddress(tab, quarter, replace) {
+    var url = new URL(location.href);
+    url.searchParams.set('tab', tab);
+    if (quarter) url.searchParams.set('q', quarter);
+    else url.searchParams.delete('q');
+    if (url.href !== location.href) history[replace ? 'replaceState' : 'pushState'](history.state, '', url);
+  }
+
+  function syncSeasonPicker() {
+    var picker = $('#seasonYear');
+    if (!picker) return;
+    picker.value = SEASON_YEAR;
+    document.querySelectorAll('[data-season-part]').forEach(function (button) {
+      var q = SEASON_YEAR + 'Q' + button.dataset.seasonPart;
+      button.disabled = !supportedSeason(q);
+      button.setAttribute('aria-pressed', String(q === SEASON_Q));
+    });
+    $('[data-step="-1"]').disabled = SEASON_Q === SEASON_FIRST;
+    $('[data-step="1"]').disabled = SEASON_Q === shiftSeason(curSeason(), 2);
+    $('#seasonCurrent').disabled = SEASON_Q === curSeason() && SEASON_YEAR === SEASON_Q.slice(0, 4);
+  }
+
+  function chooseSeason(quarter, fromHistory) {
+    if (!supportedSeason(quarter)) return;
+    SEASON_YEAR = quarter.slice(0, 4);
+    if (quarter === SEASON_Q) {
+      syncSeasonPicker();
+      return;
+    }
+    SEASON_Q = quarter;
+    SEASON_MARK = {};
+    SEASON_ERR = '';
+    SEASON = null;
+    if (TAB !== 'season') return;
+    if (!fromHistory) writeSeasonAddress(TAB, quarter, false);
+    syncSeasonPicker();
+    var body = $('#seasonBody');
+    if (body) {
+      body.innerHTML = seasonBodyHtml();
+      bindSeason();
+    }
+    loadSeason(false);
+  }
+
   function viewSeason() {
     if (!SEASON_Q) SEASON_Q = curSeason();
-    var nowQ = curSeason();
-    var pills = '';
-    for (var k = -6; k <= 1; k++) {
-      var qq = shiftSeason(nowQ, k);
-      pills += '<button class="qpill' + (qq === SEASON_Q ? ' on' : '') + '" data-q="' + qq + '">' +
-        qq + (qq === nowQ ? '<span class="dot"></span>' : '') + '</button>';
+    if (!SEASON_YEAR) SEASON_YEAR = SEASON_Q.slice(0, 4);
+    var latest = shiftSeason(curSeason(), 2);
+    var yearOptions = '';
+    for (var year = Number(latest.slice(0, 4)); year >= Number(SEASON_FIRST.slice(0, 4)); year--) {
+      yearOptions += '<option value="' + year + '"' + (String(year) === SEASON_YEAR ? ' selected' : '') + '>' + year + ' 年</option>';
     }
+    var months = [1, 4, 7, 10].map(function (month, index) {
+      return '<button type="button" data-season-part="' + (index + 1) + '">' + month + ' 月</button>';
+    }).join('');
     // 工具条用 .fbar（普通流内布局）。以前借了顶栏的 .bar：sticky + 深色底，
     // 滚动后正好压在 header 上，亮色主题下还是深底深字。
     var bar = '<div class="fbar season-bar">' +
-      '<button class="icon qstep" data-step="-1" title="上一季">‹</button>' +
-      '<div class="qstrip">' + pills + '</div>' +
-      '<button class="icon qstep" data-step="1" title="下一季">›</button>' +
-      '<button id="seasonRefresh" class="ghost">刷新</button>' +
+      '<div class="season-picker">' +
+      '<button type="button" class="icon qstep" data-step="-1" aria-label="上一季">‹</button>' +
+      '<select id="seasonYear" aria-label="选择年份">' + yearOptions + '</select>' +
+      '<div class="season-months" role="group" aria-label="选择季度">' + months + '</div>' +
+      '<button type="button" class="icon qstep" data-step="1" aria-label="下一季">›</button>' +
+      '<button type="button" id="seasonCurrent" class="ghost">回到本季</button>' +
+      '<button type="button" id="seasonRefresh" class="ghost">刷新</button></div>' +
       '<span class="sep"></span>' +
       '<label><input type="checkbox" id="onlyTv"' + (SEASON_FILTER.onlyTv ? ' checked' : '') + ' /> 只看 TV</label>' +
       '<label><input type="checkbox" id="hideWatching"' + (SEASON_FILTER.hideWatching ? ' checked' : '') + ' /> 隐藏已在追</label>' +
@@ -1116,7 +1241,7 @@
       '<button id="batchTime" title="给勾选的番批量设开播时刻">批量时刻</button>' +
       '<button class="primary" id="applyBtn">加入在追</button>' +
       '</div>';
-    return '<div class="sec"><div class="sec-head season-page-heading"><h2>本季番剧</h2>' +
+    return '<div class="sec"><div class="sec-head season-page-heading"><h2>季度番剧</h2>' +
       '<span class="note">原播周档 · 北京时间</span><button type="button" data-anime-search>跨季度找番</button></div>' +
       '<div class="panel">' + bar + '<div id="seasonBody">' + seasonBodyHtml() + '</div></div></div>';
   }
@@ -1224,7 +1349,7 @@
       rows += '<tr>' +
         '<td class="ck"><input type="checkbox" aria-label="选中 ' + esc(x.name_cn || x.name) + '" data-mark="' + esc(id) + '"' +
         (tracked || mark ? ' checked' : '') + (tracked ? ' disabled' : '') + ' /></td>' +
-        '<td class="pc">' + cover(id, x.name_cn || x.name) + '</td>' +
+        '<td class="pc">' + cover(id, x.name_cn || x.name, true, x.image && j.q) + '</td>' +
         '<td class="nm-cell">' +
         '<div class="nm" title="' + esc(x.name_cn || x.name) + '">' + watchTitle(id, tracked ? tracked.name_cn || tracked.name : x.name_cn || x.name, !!tracked) + '</div>' +
         '<div class="meta">' + esc(meta) + '</div>' +
@@ -1236,72 +1361,81 @@
         '<td class="op">' + opCell + '</td></tr>';
     });
 
-    // 服务端会把拉取失败的原始错误塞进 warning（含 ECONNREFUSED 127.0.0.1:7890 这种），
-    // 对用户没意义：换成一句能照做的，细节留给「诊断」页。
-    var warn = j.warning ? String(j.warning) : SEASON_ERR;
-    var warnText = '';
-    if (warn) {
-      warnText = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|proxy|socket hang up/i.test(warn)
-        ? ' · 联网失败，正在显示缓存旧数据'
-        : ' · ' + warn;
-    }
+    var catalogLabels = { builtin: '内置目录', cache: '本地缓存', 'cache-stale': '本地目录', net: '已更新', empty: '尚无本地资料' };
     var info = '<div class="fbar" style="padding:10px 14px;border-bottom:1px solid var(--line)">' +
       esc(j.q || '') + ' 共 ' + (j.total || list.length) + ' 部 · 显示 ' + list.length + ' 部 · ' +
-      (j.source === 'net' ? '刚拉取' : '来自缓存') + esc(warnText) +
-      '<span id="seasonScheduleStatus" role="status">' + esc(seasonScheduleStatus(j)) + '</span></div>';
+      esc(catalogLabels[j.source] || '本地目录') +
+      '<span id="seasonScheduleStatus" role="status">' + esc(seasonCatalogStatus(j)) + '</span>' +
+      (j.article ? '<a id="seasonYuc" href="' + esc(j.article.url || j.article.index) +
+        '" target="_blank" rel="noopener noreferrer">' + (j.article.url ? '長門番堂季度原文 ↗' : '長門番堂季度索引 ↗') + '</a>' +
+        (!j.article.url ? '<button type="button" id="seasonYucFind">查找本季度原文</button>' : '') : '') + '</div>';
+    var empty = !j.items.length ? '这季尚无可浏览的条目。' : '这一季没有匹配的番。';
 
     return info + '<table class="grid">' +
       '<thead><tr><th class="ck"></th><th class="pc"></th><th>番名</th>' +
       '<th class="cn">话数</th><th class="rt">评分</th><th class="op">状态 / 时刻</th></tr></thead>' +
-      '<tbody>' + (rows || '<tr><td colspan="6"><div class="empty">这一季没有匹配的番。</div></td></tr>') + '</tbody></table>';
+      '<tbody>' + (rows || '<tr><td colspan="6"><div class="empty">' + empty + '</div></td></tr>') + '</tbody></table>';
   }
 
   function loadSeason(refreshNet) {
     if (!SEASON_Q) SEASON_Q = curSeason();
     SEASON_ERR = '';
     var request = ++seasonRequest;
-    var url = '/api/season?q=' + encodeURIComponent(SEASON_Q) + (refreshNet ? '&refresh=1' : '');
-    return json(url)
-      .then(function (j) {
-        if (request !== seasonRequest) return;
-        if (!j || !j.items) {
-          SEASON = null;
-          SEASON_ERR = (j && (j.error || j.message)) || '没有返回数据';
-        } else {
-          SEASON = j;
-        }
-        if (TAB === 'season') {
-          var body = $('#seasonBody');
-          if (body) body.innerHTML = seasonBodyHtml();
-          bindSeason();
-        }
-        if (!SEASON || !SEASON.items.length) return;
-        return json('/api/schedule/original?q=' + encodeURIComponent(SEASON_Q)).then(function (schedule) {
-          if (request !== seasonRequest || !SEASON) return;
-          SEASON.airings = schedule.airings || {};
-        }).catch(function (error) {
-          if (request === seasonRequest && SEASON) SEASON.airingWarning = scheduleErrorText(error);
-        }).then(function () {
-          if (request !== seasonRequest || TAB !== 'season' || !SEASON) return;
-          var current = $('#seasonBody');
-          if (current && !current.contains(document.activeElement)) {
-            current.innerHTML = seasonBodyHtml();
-            bindSeason();
-          } else {
-            var status = $('#seasonScheduleStatus');
-            if (status) status.textContent = seasonScheduleStatus(SEASON);
+    var url = '/api/season?q=' + encodeURIComponent(SEASON_Q);
+
+    function paint() {
+      if (TAB !== 'season') return;
+      var body = $('#seasonBody');
+      if (!body) return;
+      var y = window.scrollY;
+      body.innerHTML = seasonBodyHtml();
+      bindSeason();
+      if (window.scrollY !== y) window.scrollTo(0, y);
+    }
+
+    function status() {
+      var label = $('#seasonScheduleStatus');
+      if (label && SEASON) label.textContent = seasonCatalogStatus(SEASON);
+    }
+
+    function update(j) {
+      if (request !== seasonRequest || !j.items) return;
+      SEASON = j;
+      var body = $('#seasonBody');
+      if (TAB !== 'season' || !body) return;
+      if (!body.contains(document.activeElement)) {
+        paint();
+        return;
+      }
+      status();
+      body.addEventListener('focusout', function afterFocus() {
+        setTimeout(function () {
+          if (request === seasonRequest && !body.contains(document.activeElement)) {
+            body.removeEventListener('focusout', afterFocus);
+            paint();
           }
-        });
-      })
-      .catch(function (e) {
-        if (request !== seasonRequest) return;
-        SEASON_ERR = e.message || '网络错误';
-        if (TAB === 'season') {
-          var body = $('#seasonBody');
-          if (body) body.innerHTML = seasonBodyHtml();
-          bindSeason();
-        }
+        }, 0);
       });
+    }
+
+    return (refreshNet && SEASON ? Promise.resolve(SEASON) : json(url)).then(function (local) {
+      if (request !== seasonRequest) return;
+      update(local);
+      if (!refreshNet && !local.refresh_due) return;
+      SEASON.updating = true;
+      status();
+      return json(url + (refreshNet ? '&refresh=1' : '&refresh=auto')).then(update);
+    }).catch(function () {
+      if (request !== seasonRequest) return;
+      SEASON_ERR = '暂时无法读取季度目录';
+      if (SEASON) {
+        SEASON.updating = false;
+        SEASON.warning = SEASON_ERR;
+        status();
+      } else {
+        paint();
+      }
+    });
   }
 
   function formatAiring(airing) {
@@ -1316,9 +1450,22 @@
       : '原播周档暂时无法读取，请稍后重试。';
   }
 
-  function seasonScheduleStatus(season) {
-    if (season.airingWarning) return season.airingWarning;
-    return !season.airings && season.items.length ? '正在读取原播周档…' : '';
+  function seasonCatalogStatus(season) {
+    if (season.updating) return '正在检查更新…';
+    var parts = [];
+    if (season.catalog_status === 'verified') {
+      var verifiedDate = new Date(season.verified_at);
+      if (Number.isFinite(+verifiedDate)) {
+        var day = new Intl.DateTimeFormat('sv', { timeZone: 'Asia/Shanghai' }).format(verifiedDate);
+        parts.push('季末已核验 ' + day);
+      }
+    } else if (season.catalog_status === 'pending') {
+      parts.push('季末待核验');
+    } else if (season.catalog_status === 'preview') {
+      parts.push('预告可能变动');
+    }
+    if (season.warning) parts.push(season.items.length ? '更新失败，已保留上次目录' : '暂时无法联网更新');
+    return parts.join(' · ');
   }
 
   function watchOriginalText(id, cached) {
@@ -1459,8 +1606,8 @@
       post('/api/progress', { id: id, delta: delta }).then(function (result) {
         if (!result.ok) return toast(result.error || '进度保存失败');
         if (!result.changed) return toast('进度没有变化');
-        if (result.became_finished) return showCompletion(id, result.revision);
-        toast('进度已保存 · 连续至第 ' + result.ep_status + ' 集 · 累计 ' + result.watched_count + ' 集', { label: '撤销', fn: undo });
+        if (result.became_finished) return showCompletion(id, result.revision, result.history_id);
+        progressFeedback(result, progressLine(result.watched_count, result.ep_status, Math.max(1, num(w.start_episode))));
         return refresh();
       }).catch(function () { toast('面板服务未响应'); });
       return;
@@ -1496,7 +1643,8 @@
     post('/api/progress', { id: id, delta: d, client: 'panel' }).then(function (j) {
       OUTSTANDING[id] -= d;
       if (j.ok === false || j.error) { toast(j.error || '没记上'); return refresh(); }
-      if (j.became_finished) return showCompletion(id, j.revision);
+      if (j.became_finished) return showCompletion(id, j.revision, j.history_id);
+      if (j.changed && !OUTSTANDING[id]) progressFeedback(j, progressLine(j.watched_count, j.ep_status, 1));
       var w = findWatch(id);
       if (TAB === 'catchup' || (w && (w.watch_mode === 'catchup' ||
           ((TAB === 'today' || TAB === 'continue') && d > 0 && !w.last_watched)))) return refresh();
@@ -1509,14 +1657,21 @@
     }).catch(function () { OUTSTANDING[id] -= d; toast('服务没响应，请刷新确认进度'); refresh(); });
   }
 
-  function showCompletion(id, revision) {
-    toast('已看完，可在番剧库找到', [
+  function showCompletion(id, revision, historyId) {
+    progressFeedback({ revision: revision, history_id: historyId }, '已看完，可在番库找到',
       { label: '归档', fn: function () {
         changeWatchState(id, 'archive').catch(function (e) { toast(e.message); });
-      } },
-      { label: '撤销', fn: function () { undo(revision); } }
-    ]);
+      } });
     return refresh();
+  }
+
+  function progressFeedback(reply, message, extra) {
+    var actions = extra ? [extra] : [];
+    actions.push({ label: '撤销', fn: function () { undo(reply.revision); } });
+    if (reply.history_id) actions.push({ label: '查看记录', fn: function () {
+      openWatchHistory(new URLSearchParams({ record: reply.history_id }));
+    } });
+    toast(message, actions);
   }
 
   /** 只重绘某一条番的进度数字与进度条（不整页重绘、不打断滚动与焦点） */
@@ -1617,20 +1772,47 @@
     return '<option value="head">从头补</option><option value="seen">填写已看到第几话</option><option value="latest">从最新一话开始</option>';
   }
 
-  function openJoin(count, submit) {
+  function watchModeOptions(mode, allowPlanned) {
+    return [['airing', '追连载'], ['catchup', '补番'], ['planned', '待看']].filter(function (option) {
+      return allowPlanned || option[0] !== 'planned';
+    }).map(function (option) {
+      return '<option value="' + option[0] + '"' + (mode === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+    }).join('');
+  }
+
+  function seasonOfDate(date) {
+    var match = /^(\d{4})-(\d{2})-/.exec(date || '');
+    return match ? match[1] + 'Q' + Math.ceil(Number(match[2]) / 3) : '';
+  }
+
+  function openJoin(count, submit, selection) {
     if (BUSY) return;
-    openDlg('加入在追',
-      '<form id="joinForm"><p>为 ' + count + ' 部番剧选择起点。最新一话按已知排期估算。</p>' +
-      '<label class="row"><span>补番起点</span><select id="joinMode">' + startOptions() + '</select></label>' +
+    var review = selection ? '<p>' + esc(selection.q) + ' · ' + count + ' 部</p><ul class="duplicate-hits">' +
+      selection.items.map(function (item) { return '<li>' + esc(item.name_cn || item.name) + '</li>'; }).join('') + '</ul>' +
+      '<label class="row"><span>观看方式</span><select id="joinWatchMode">' +
+      watchModeOptions(selection.items.every(function (item) { return item.broadcast_end && item.broadcast_end < STATE.date; }) ? 'catchup' : 'airing', true) +
+      '</select></label>' : '';
+    openDlg('确认加入番库',
+      '<form id="joinForm">' + review + '<p>最新一集按已有原播资料估算。</p>' +
+      '<label class="row" id="joinStartRow"><span>观看起点</span><select id="joinMode">' + startOptions() + '</select></label>' +
       '<label class="row" id="joinSeenRow" hidden><span>已看到第几话</span><input type="number" id="joinSeen" min="0" value="0" /></label>' +
       '<p id="joinResult" role="status"></p></form>',
       '<button data-close>取消</button><button class="primary" type="submit" form="joinForm" id="joinGo">加入</button>');
     var form = $('#joinForm'), mode = $('#joinMode'), go = $('#joinGo'), result = $('#joinResult');
-    mode.addEventListener('change', function () { $('#joinSeenRow').hidden = mode.value !== 'seen'; });
+    var watchMode = $('#joinWatchMode');
+    function updateStart() {
+      var planned = watchMode?.value === 'planned';
+      $('#joinStartRow').hidden = planned;
+      $('#joinSeenRow').hidden = planned || mode.value !== 'seen';
+    }
+    mode.addEventListener('change', updateStart);
+    if (watchMode) watchMode.addEventListener('change', updateStart);
     form.addEventListener('submit', function (event) {
       event.preventDefault();
       go.disabled = true;
-      submit({ start_mode: mode.value, seen: Number($('#joinSeen').value) }).then(function (response) {
+      var payload = watchMode ? { mode: watchMode.value } : {};
+      if (payload.mode !== 'planned') Object.assign(payload, { start_mode: mode.value, seen: Number($('#joinSeen').value) });
+      submit(payload).then(function (response) {
         if (!response.ok) { result.textContent = response.error || '没有加入番库'; return; }
         var count = response.added == null ? Number(!!response.changed) : response.added;
         var skipped = (response.skipped || []).length;
@@ -1653,18 +1835,42 @@
   }
 
   function addSeasonSelection(ids) {
-    openJoin(ids.length, function (start) { return post('/api/season/apply', Object.assign({ q: SEASON_Q, add: ids }, start)); });
+    var q = SEASON_Q;
+    var items = (SEASON?.items || []).filter(function (item) { return ids.includes(String(item.id)); });
+    if (!items.length) return;
+    if (items.length === 1) {
+      var item = items[0];
+      return openAddWatch({ id: item.id, name: item.name_cn || item.name, original_name: item.name,
+        eps: item.eps, date: item.date, platform: item.platform, season: q,
+        weekday: item.weekday, broadcast_end: item.broadcast_end });
+    }
+    openJoin(items.length, function (start) {
+      return post('/api/season/apply', Object.assign({ q: q, add: ids }, start));
+    }, { q: q, items: items });
   }
 
   function bindSeason() {
     var body = $('#seasonBody');
     if (!body) return;
-    var strip = $('.qstrip');
-    var activeQuarter = strip && $('.qpill.on', strip);
-    if (activeQuarter && (activeQuarter.offsetLeft < strip.scrollLeft ||
-        activeQuarter.offsetLeft + activeQuarter.offsetWidth > strip.scrollLeft + strip.clientWidth)) {
-      strip.scrollLeft = activeQuarter.offsetLeft - (strip.clientWidth - activeQuarter.offsetWidth) / 2;
-    }
+    var findArticle = $('#seasonYucFind', body);
+    if (findArticle && !findArticle.onclick) findArticle.onclick = function () {
+      var yearQuarter = SEASON_Q;
+      findArticle.disabled = true;
+      json('/api/season/reference?q=' + enc(yearQuarter)).then(function (reply) {
+        if (yearQuarter !== SEASON_Q || !findArticle.isConnected) return;
+        var article = reply.reference;
+        if (!article.url) { findArticle.textContent = '暂时没有查到原文'; return; }
+        SEASON.article = article;
+        var link = $('#seasonYuc', body);
+        link.href = article.url;
+        link.textContent = '長門番堂季度原文 ↗';
+        link.focus();
+        findArticle.remove();
+      }).catch(function () {
+        if (findArticle.isConnected) findArticle.textContent = '暂时无法查询';
+      }).finally(function () { findArticle.disabled = false; });
+    };
+    syncSeasonPicker();
 
     // 行内操作（+ 追 / 记一话 / 移出）用事件委托，整表重画也不用重新绑
     if (!body._opsBound) {
@@ -1760,33 +1966,20 @@
         });
       });
 
-      var goSeason = function (q) {
-        if (!q || q === SEASON_Q) return;
-        SEASON_Q = q;
-        SEASON_MARK = {};
-        SEASON = null;
-        var strip = document.querySelector('.qstrip');
-        if (strip) {
-          strip.querySelectorAll('.qpill').forEach(function (p) {
-            p.classList.toggle('on', p.getAttribute('data-q') === SEASON_Q);
-          });
-        }
-        redraw();
-        loadSeason(false);
-      };
-      document.querySelectorAll('.qpill').forEach(function (p) {
-        p.addEventListener('click', function () { goSeason(p.getAttribute('data-q')); });
+      $('#seasonYear').addEventListener('change', function () {
+        SEASON_YEAR = this.value;
+        syncSeasonPicker();
       });
+      document.querySelectorAll('[data-season-part]').forEach(function (button) {
+        button.addEventListener('click', function () { chooseSeason(SEASON_YEAR + 'Q' + button.dataset.seasonPart); });
+      });
+      $('#seasonCurrent').addEventListener('click', function () { chooseSeason(curSeason()); });
       document.querySelectorAll('.qstep').forEach(function (b) {
         b.addEventListener('click', function () {
-          goSeason(shiftSeason(SEASON_Q, Number(b.getAttribute('data-step'))));
+          chooseSeason(shiftSeason(SEASON_Q, Number(b.getAttribute('data-step'))));
         });
       });
-      $('#seasonRefresh').addEventListener('click', function () {
-        SEASON = null;
-        redraw();
-        loadSeason(true);
-      });
+      $('#seasonRefresh').addEventListener('click', function () { loadSeason(true); });
       // 「全选」只勾当前看得见的行（尊重「只看 TV / 隐藏已追 / 搜索」），跟用户眼睛看到的一致
       $('#markAll').addEventListener('click', function () {
         var boxes = $('#seasonBody') ? $('#seasonBody').querySelectorAll('[data-mark]:not(:disabled)') : [];
@@ -1812,7 +2005,11 @@
   // ---------------- 弹层 ----------------
   var dlgReturnFocus = null;
   function openDlg(title, bodyHtml, footHtml, options = {}) {
-    if (!$('#mask').classList.contains('show')) dlgReturnFocus = document.activeElement;
+    if (!$('#mask').classList.contains('show')) {
+      var active = document.activeElement;
+      dlgReturnFocus = { element: active, id: active?.id, selector: viewDetailSelector(active),
+        scroll: TAB === 'library' ? window.scrollY : null, tab: TAB };
+    }
     var dlg = $('#dlg');
     dlg.classList.toggle('watch-detail-dialog', Boolean(options.watchDetail));
     dlg.innerHTML = '<h3 id="dlgTitle"' + (options.watchDetail ? ' tabindex="-1"' : '') + '>' + esc(title) + '</h3>' +
@@ -1840,13 +2037,27 @@
     ['panelHeader', 'panelMain', 'panelFooter', 'toast'].forEach(function (id) { document.getElementById(id).inert = false; });
     var back = dlgReturnFocus;
     dlgReturnFocus = null;
-    if (back && back.focus && document.contains(back)) {
-      try { back.focus({ preventScroll: true }); } catch (e) { back.focus(); }
+    if (back && back.tab === TAB) {
+      var control = back.element?.isConnected ? back.element :
+        (back.id && document.getElementById(back.id)) || (back.selector && $(back.selector)) ||
+        (TAB === 'library' && $('#libraryFilter'));
+      if (back.scroll != null && window.scrollY !== back.scroll) window.scrollTo(0, back.scroll);
+      control?.focus({ preventScroll: true });
     }
   }
 
+  function openAddWatch(subject) {
+    var tracked = subject && Object.keys(LIBRARY_STATES).some(function (state) {
+      return (STATE[state] || []).some(function (row) { return String(row.id) === String(subject.id); });
+    });
+    if (tracked) return openWatchDetail(subject.id);
+    var ended = subject?.broadcast_end && subject.broadcast_end < STATE.date;
+    showWatchForm({ ep_status: 0, watch_mode: TAB === 'catchup' || ended ? 'catchup' : 'airing',
+      air_weekday: ended ? null : subject?.weekday, name: subject?.name, eps: subject?.eps, subject: subject });
+  }
+
   function openWatchDetail(id, episodes) {
-    if (!id) return showWatchForm({ ep_status: 0, watch_mode: TAB === 'catchup' ? 'catchup' : 'airing' });
+    if (!id) return openAddWatch();
     openDlg('番剧详情', '<p id="watchLoading" role="status">正在读取番剧资料…</p>');
     var marker = $('#watchLoading');
     flushAllBumps();
@@ -1871,22 +2082,25 @@
   function openAnimeSearch() {
     openDlg('跨季度找番', '<form id="animeSearchForm"><label class="watch-field">中文名、原名或别名' +
       '<input type="search" id="animeSearchQuery" required maxlength="100" value="' + esc($('#q').value.trim().slice(0, 100)) + '"></label>' +
-      '<button type="submit">搜索 Bangumi</button></form><p id="animeSearchStatus" role="status"></p><div id="animeCandidates"></div>',
+      '<button type="submit">搜索</button> <button type="button" id="animeOnline">联网查 Bangumi</button></form>' +
+      '<p id="animeSearchStatus" role="status"></p><div id="animeCandidates"></div>',
       '<button data-close>关闭</button><button type="button" data-new-watch>离线手动添加</button>');
     var form = $('#animeSearchForm'), input = $('#animeSearchQuery'), status = $('#animeSearchStatus'), results = $('#animeCandidates'), request = 0;
-    function load(query, offset) {
+    function load(query, offset, online) {
       var ticket = ++request;
       status.textContent = '正在找番…';
       results.replaceChildren();
-      json('/api/anime/search?q=' + enc(query) + '&offset=' + offset).then(function (reply) {
+      json('/api/anime/search?q=' + enc(query) + '&offset=' + offset + (online ? '' : '&local=1')).then(function (reply) {
         if (!form.isConnected || request !== ticket) return;
-        status.textContent = reply.warning || (reply.candidates.length ? '请核对年份、类型和番库中的同名条目。' : '没有匹配的动画。');
+        if (!online && offset === 0 && !reply.candidates.length) return load(query, 0, true);
+        status.textContent = reply.warning || (reply.candidates.length ?
+          (online ? 'Bangumi 条目，选择后确认观看方式。' : '本地季度目录，选择后确认观看方式。') : '没有匹配的动画。');
         results.innerHTML = reply.candidates.map(function (item, index) {
           var same = item.duplicates.some(function (row) { return row.match === 'id'; });
           return '<article class="anime-candidate">' + (item.cover ? '<img src="' + esc(item.cover) + '" alt="" loading="lazy">' : '') +
             '<div><strong>' + esc(item.name) + '</strong><p>' + esc([
-              item.original_name !== item.name ? item.original_name : '', item.date.slice(0, 4) || '年份未定', item.platform || '动画',
-              item.eps ? item.eps + ' 集' : '集数未定', '#' + item.id].filter(Boolean).join(' · ')) + '</p>' +
+              item.original_name !== item.name ? item.original_name : '', item.season || seasonOfDate(item.date) || '季度未定', item.platform || '动画',
+              item.eps ? item.eps + ' 集' : '集数未定', /^\d+$/.test(String(item.id)) ? '#' + item.id : ''].filter(Boolean).join(' · ')) + '</p>' +
             (item.duplicates.length ? duplicateRows(item.duplicates) : '') +
             (same ? '' : '<button type="button" data-anime-pick="' + index + '">使用这部番的资料</button>') + '</div></article>';
         }).join('') + (reply.next != null ? '<button type="button" id="animeNext">下一页</button>' : '');
@@ -1894,13 +2108,14 @@
         results.querySelectorAll('[data-anime-pick]').forEach(function (button) {
           button.onclick = function () {
             var item = reply.candidates[Number(button.dataset.animePick)];
-            showWatchForm({ ep_status: 0, name: item.name, eps: item.eps, watch_mode: 'airing', subject: item });
+            openAddWatch(item);
           };
         });
-        if ($('#animeNext')) $('#animeNext').onclick = function () { load(query, reply.next); };
+        if ($('#animeNext')) $('#animeNext').onclick = function () { load(query, reply.next, online); };
       }).catch(function (error) { if (form.isConnected && request === ticket) status.textContent = error.message || '搜索失败，可手动添加。'; });
     }
     form.onsubmit = function (event) { event.preventDefault(); load(input.value.trim(), 0); };
+    $('#animeOnline').onclick = function () { if (input.reportValidity()) load(input.value.trim(), 0, true); };
   }
 
   function openReminderHistory(watch) {
@@ -2276,9 +2491,12 @@
     button.disabled = true;
     post('/api/watch/rewatch', { id: detail.id, action: action, round_id: round?.id, expected_revision: detail.revision }).then(function (reply) {
       if (!reply.ok) throw new Error(reply.error);
-      if (button.isConnected) openWatchDetail(detail.id);
-      toast(action === 'start' ? '已开启一轮重看' : (reply.round.finished_at ? '这轮重看已完成' : '已记重看第 ' + reply.round.ep_status + ' 集'),
-        { label: '撤销', fn: function () { closeDlg(); undo(reply.revision); } });
+      if (button.isConnected) {
+        if (reply.history_id) closeDlg();
+        else openWatchDetail(detail.id);
+      }
+      if (reply.history_id) progressFeedback(reply, '重看已记入 · ' + watchProgress(reply.round).text);
+      else toast(action === 'start' ? '已开启一轮重看' : '这轮重看已完成');
       refresh();
     }).catch(function (error) {
       if (button.isConnected) {
@@ -2305,6 +2523,7 @@
     else if (Date.parse(reminder.at) < Date.now()) notes.push('本次提醒时间已过');
     if (lead > 0) notes.push('提前 ' + lead + ' 分钟');
     if (reminder.moved) notes.push('本次已改期');
+    if (reminder.desktop_online === false && reminder.status !== 'quiet') notes.push('桌宠当前离线');
     return { value: value, at: reminder.at, note: notes.join(' · ') };
   }
 
@@ -2349,7 +2568,8 @@
       localNote = '本次改到 ' + watchCstTime(plannedAt);
     return '<dl class="watch-schedule-facts"><div><dt>原播时间</dt><dd><span id="watchOriginal" data-id="' + esc(detail.id) +
       '" data-cached-original="' + esc(cached) + '">' + esc(watchOriginalText(detail.id, cached)) + '</span></dd></div>' +
-      '<div><dt>本机排片</dt><dd>' + esc(local) + (slot?.day ? '<small>' + esc(localNote) + '</small>' : '') + '</dd></div>' +
+      '<div><dt>本机排片</dt><dd>' + esc(local) + (slot?.day ? '<small>' + esc(localNote) + '</small>' : '') +
+      (plannedAt ? '<small>下一次安排 ' + esc(watchCstTime(plannedAt)) + '（北京时间）</small>' : '') + '</dd></div>' +
       '<div><dt>实际提醒时间</dt><dd id="watchReminderStatus">' + watchReminderMarkup(watchReminderFact(reminder)) + '</dd></div></dl>';
   }
 
@@ -2416,10 +2636,16 @@
     }).join('');
 
     var existing = Boolean(detail.id);
+    var candidate = detail.subject;
+    var confirmation = candidate ? '<p class="watch-add-preview"><strong>' + esc(candidate.name) + '</strong> · ' +
+      esc([candidate.season || seasonOfDate(candidate.date) || '季度未定', candidate.platform,
+        candidate.original_name !== candidate.name ? candidate.original_name : ''].filter(Boolean).join(' · ')) + '</p>' : '';
+    if (candidate?.season) confirmation += '<div class="watch-add-reference"><button type="button" id="watchYuc">核对長門番堂资料</button>' +
+      '<div id="watchYucResult" role="status"></div></div>';
     var fields = '<fieldset class="watch-fields" data-watch-fields' + (readonly ? ' disabled' : '') + '>';
     var progressGroup = watchGroup('watchProgressGroup', '进度', '观看方式、补记与每话清单', fields +
-      '<label class="watch-field watch-wide"' + (planned ? ' hidden' : '') + '>观看方式<select id="watchMode"><option value="airing">追连载</option><option value="catchup"' +
-      (detail.watch_mode === 'catchup' ? ' selected' : '') + '>补番</option>' + (!existing ? '<option value="planned">加入待看</option>' : '') + '</select></label>' +
+      '<label class="watch-field watch-wide"' + (planned ? ' hidden' : '') + '>观看方式<select id="watchMode">' +
+      watchModeOptions(detail.watch_mode, !existing) + '</select></label>' +
       (!existing ? '<label class="watch-field watch-wide" data-watch-mode="airing catchup">追番起点<select id="watchStart">' +
         startOptions().replace('value="seen"', 'value="seen" selected') + '</select></label>' +
         '<label class="watch-field watch-wide" id="watchLatestRow" hidden>最新一话是第几话<input id="watchLatest" type="number" min="1" /></label>' : '') +
@@ -2447,7 +2673,7 @@
         (detail.state === 'watching' && !detail.finished && detail.watch_mode !== 'catchup' ? '<button type="button" id="watchSchedule">临时改期与静音</button>' : '') +
         '<button type="button" id="watchReminderHistory">本番提醒记录</button></div>' : ''), false);
     var aboutGroup = watchGroup('watchAboutGroup', '番剧资料', '番名、总集数、播放链接与条目管理', fields +
-      (!existing ? '<div class="watch-wide"><label class="watch-field">Bangumi 条目链接（可选）' +
+      (!existing && !candidate ? '<div class="watch-wide"><label class="watch-field">Bangumi 条目链接（可选）' +
         '<input id="catchupSubjectLink" type="text" maxlength="400" placeholder="https://bgm.tv/subject/…" /></label>' +
         '<button type="button" id="catchupLookup">读取番名与集数</button><p id="catchupLookupStatus" role="status"></p></div>' : '') +
       '<label class="watch-field watch-wide">番名<input id="watchName" type="text" maxlength="160" required value="' + esc(detail.name) + '" /></label>' +
@@ -2464,8 +2690,8 @@
         (detail.id.startsWith('local-') ? '<button type="button" id="watchBinding">绑定 Bangumi</button>' : '') +
         (!removed ? '<button type="button" id="watchRemove" class="watch-danger">移除误加条目</button>' : '') + '</div>' : '') +
       (detail.state === 'watching' ? controls : ''), !existing);
-    openDlg(existing ? '番剧详情' : '手动添加番剧',
-      '<form id="watchForm">' + (existing ? '<section id="watchSummary" aria-label="番剧概要">' + watchSummary(detail, reminder, readonly) + '</section>' : '') +
+    openDlg(existing ? '番剧详情' : '确认加入番库',
+      '<form id="watchForm">' + (existing ? '<section id="watchSummary" aria-label="番剧概要">' + watchSummary(detail, reminder, readonly) + '</section>' : confirmation) +
       (existing && detail.state !== 'watching' ? controls : '') +
       (existing ? progressGroup + scheduleGroup + aboutGroup : aboutGroup + progressGroup + scheduleGroup) +
       '<p id="watchError" class="watch-error" role="alert" hidden></p><div id="duplicateReview"></div></form>',
@@ -2473,6 +2699,34 @@
       (readonly ? '' : '<button type="submit" form="watchForm" id="watchSave" class="primary">' + (existing ? '保存修改' : '加入在追') + '</button>'),
       { watchDetail: true, focus: existing ? '#dlgTitle' : '#watchName' });
     var form = $('#watchForm');
+    var refButton = $('#watchYuc', form);
+    if (refButton) refButton.onclick = function () {
+      var output = $('#watchYucResult', form);
+      refButton.disabled = true;
+      output.textContent = '正在核对原始条目…';
+      json('/api/season/reference?q=' + enc(candidate.season) + '&id=' + enc(candidate.id)).then(function (reply) {
+        if (!output.isConnected) return;
+        var ref = reply.reference, review = ref.review;
+        var messages = { unmatched: '原文没有唯一的日文名匹配', ambiguous: '原文有多个匹配，需人工核对',
+          format_changed: '原文结构变化，需打开原文核对', date_conflict: '首播日期有冲突，需人工核对',
+          unavailable: '暂时无法读取原文' };
+        var facts = [];
+        if (review?.episodes) facts.push('全 ' + review.episodes + ' 话');
+        if (review?.broadcast === 'ended') facts.push('原文标记完结');
+        if (review?.broadcast === 'partial') facts.push('原文标记分段或暂完');
+        if (review?.status === 'matched' && !facts.length) facts.push('暂未取得集数或完播状态');
+        if (candidate.eps && review?.episodes && num(candidate.eps) !== review.episodes) facts.push('与本地目录集数有冲突');
+        var links = (review?.regions || []).map(function (entry) {
+          return '<a href="' + esc(entry.url) + '" target="_blank" rel="noopener noreferrer">' + esc(entry.region) + '来源链接 ↗</a>';
+        });
+        output.innerHTML = '<p>' + esc(facts.join(' · ') || messages[review?.status] || '暂无可核对资料') + '</p><p>' +
+          '<a href="' + esc(ref.url || ref.index) + '" target="_blank" rel="noopener noreferrer">長門番堂 · ' + esc(ref.author) + ' ↗</a>' +
+          ' · <a href="' + esc(ref.license) + '" target="_blank" rel="noopener noreferrer">CC BY-NC-SA 4.0</a>' +
+          (ref.checked_at ? ' · 核由于 ' + esc(watchCstTime(ref.checked_at)) + '（北京时间）' : '') + '</p>' +
+          (links.length ? '<p>' + links.join(' · ') + '</p>' : '');
+      }).catch(function () { if (output.isConnected) output.textContent = '暂时无法读取原文，可以稍后重试。'; })
+        .finally(function () { refButton.disabled = false; });
+    };
     form.addEventListener('click', function (event) {
       var shortcut = event.target.closest('[data-watch-section]');
       if (!shortcut) return;
@@ -2602,7 +2856,8 @@
       seen.disabled = start.value !== 'seen';
     });
     updateWatchMode();
-    if (!detail.id && subject) checkBroadcast(subject);
+    if (!detail.id && subject && !candidate?.season) checkBroadcast(subject);
+    if (candidate?.season && candidate.broadcast_end) broadcastHint.textContent = '原播结束日期 ' + candidate.broadcast_end;
     var draftFields = [
       [name, '番名', function (d) { return d.name; }],
       [seen, '进度', function (d) { return d.ep_status; }],
@@ -2835,7 +3090,10 @@
       if (!detail.id) {
         payload.check_duplicates = true;
         payload.duplicate_revision = duplicateRevision;
-        if (subject) {
+        if (candidate?.season) {
+          payload.season_q = candidate.season;
+          payload.catalog_id = candidate.id;
+        } else if (subject) {
           payload.subject_id = subject;
           payload.broadcast_checked = broadcastChecked;
           if (subject === subjectInfo?.id) {
@@ -2876,6 +3134,10 @@
         if (j.changed) toast(j.rebuild_error ? '已保存，桌宠数据暂未刷新' :
           (j.added ? (j.detail.state === 'planned' ? '已加入待看' :
             j.detail.watch_mode === 'catchup' ? '已加入补番' : '已加入在追') : '详情已保存'), { label: '撤销', fn: undo });
+        if (j.added && candidate?.season) {
+          if (candidate.season === SEASON_Q) delete SEASON_MARK[String(candidate.id)];
+          return refresh();
+        }
         return refresh().then(function () {
           if (j.added || (detail.watch_mode && detail.watch_mode !== j.detail.watch_mode && j.detail.state === 'watching' && !j.detail.finished)) {
             if (j.detail.state === 'planned') {
@@ -2939,17 +3201,17 @@
 
   function openEpisodeList(detail, round) {
     var progress = round || detail;
+    var coverage = watchProgress(progress);
     var extras = new Set(progress.episode_extras || []);
     var floor = round ? 0 : Math.max(0, num(detail.start_episode) - 1);
     var end = num(progress.ep_status);
-    var count = Math.max(0, end - floor) + extras.size;
     var editable = round ? !round.finished_at && detail.state !== 'removed' : detail.state === 'watching' && !detail.finished;
     var day = STATE?.date || new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
     var online = /^[1-9]\d{0,9}$/.test(detail.id);
     var picked = new Set(), titles = new Map(), page = Math.max(0, Math.floor(Math.max(floor, end) / 24));
     openDlg(round ? '重看 · 每话清单' : '首轮 · 每话清单',
-      '<p><strong>' + esc(detail.name) + '</strong> · 累计已看 ' + count + ' 集 · ' +
-      (end > floor ? '连续看到第 ' + end + ' 集' : '尚无连续进度') +
+      '<p><strong>' + esc(detail.name) + '</strong> · ' + esc(coverage.text) +
+      (editable ? ' · 下一集 第 ' + coverage.next + ' 集' : '') +
       (floor ? ' · 从第 ' + (floor + 1) + ' 集开始' : '') + '</p>' +
       (extras.size ? '<p class="note">已跳着看：' + esc(Array.from(extras).slice(0, 15).join('、')) +
         (extras.size > 15 ? ' 等 ' + extras.size + ' 集' : '') + '。</p>' : '') +
@@ -3034,8 +3296,9 @@
       else payload.expected_watch_revision = detail.revision;
       post(round ? '/api/watch/rewatch' : '/api/progress', payload).then(function (reply) {
         if (!reply.ok) throw new Error(reply.error);
-        toast(reply.changed ? '已记入观看历史' : '所选集数已经看过');
-        if (grid.isConnected) openWatchDetail(detail.id);
+        if (!reply.changed) { status.textContent = '所选集数已经记过'; return; }
+        if (grid.isConnected) closeDlg();
+        progressFeedback(reply, '已记入观看历史');
         refresh();
       }).catch(function (error) { if (grid.isConnected) status.textContent = error.message || '暂时没有保存，输入仍在。'; })
         .finally(function () { save.disabled = false; });
@@ -3061,8 +3324,8 @@
         expected_watch_revision: detail.revision }).then(function (reply) {
         if (!reply.ok) throw new Error(reply.error || '补记失败');
         if (form.isConnected) closeDlg();
-        if (reply.became_finished) return showCompletion(detail.id, reply.revision);
-        toast('观看记录已补记', { label: '撤销', fn: function () { undo(reply.revision); } });
+        if (reply.became_finished) return showCompletion(detail.id, reply.revision, reply.history_id);
+        progressFeedback(reply, '观看记录已补记');
         return refresh();
       }).catch(function (error) { if (form.isConnected) $('#backfillError').textContent = error.message || '补记失败'; })
         .finally(function () { submit.disabled = false; });
@@ -3097,18 +3360,23 @@
         }
       });
     };
-    function load(page) {
+    function load(page, record) {
       var params = new URLSearchParams(new FormData(form)), current = ++seq;
       params.set('page', String(page));
+      if (record) params.set('record', record);
       download.hidden = true;
       output.textContent = '正在读取观看记录…';
       json('/api/history/browse?' + params).then(function (reply) {
         if (current !== seq || !output.isConnected) return;
+        page = reply.page;
+        params.set('page', String(page));
+        params.delete('record');
         var modeNames = { airing: '追连载', catchup: '补番', rewatch: '重看' };
         var sources = { backfill: '按观看日期补记', absolute: '旧版手动调整', progress: '进度记账', desktop: '桌宠记账', panel: '网页记账' };
         output.innerHTML = '<p>共 ' + reply.total + ' 条 · 北京时间</p>' + (reply.total ? '<ul class="watch-history">' +
           reply.rows.map(function (r) {
-            return '<li><details><summary>' + esc(r.date) + ' · ' + esc(r.name || r.id) + ' · ' +
+            return '<li><details data-history-record="' + esc(r.history_id) + '"' + (record && r.history_id === record ? ' open' : '') +
+              '><summary>' + esc(r.date) + ' · ' + esc(r.name || r.id) + ' · ' +
               (r.delta > 0 ? '+' : '') + esc(r.delta) + ' 集</summary><p>' +
               esc(modeNames[r.watch_mode || 'airing'] || '其他') + ' · ' + esc(sources[r.source] || '旧版记录') +
               ' · 记账时进度 ' + esc(r.from ?? '—') + ' → ' + esc(r.to ?? '—') + '</p>' +
@@ -3124,20 +3392,35 @@
         output.querySelectorAll('[data-retract-history]').forEach(function (button) {
           button.onclick = function () { previewHistoryRetraction(button.dataset.retractHistory, params); };
         });
+        if (record) {
+          var summary = output.querySelector('[data-history-record="' + CSS.escape(record) + '"] summary');
+          if (summary) {
+            summary.focus({ preventScroll: true });
+            summary.scrollIntoView({ block: 'nearest' });
+          } else {
+            var missing = document.createElement('p');
+            missing.textContent = '这笔记录已撤销，或不在当前筛选范围内。';
+            output.prepend(missing);
+          }
+        }
         params.set('download', '1');
         download.href = '/api/history/browse?' + params;
         download.hidden = reply.total === 0;
       }).catch(function (e) { if (current === seq && output.isConnected) output.textContent = e.message || '读取失败'; });
     }
     form.onsubmit = function (event) { event.preventDefault(); load(1); };
-    load(Number(savedFilters instanceof URLSearchParams ? savedFilters.get('page') : 1) || 1);
+    load(Number(savedFilters?.get('page')) || 1, savedFilters?.get('record'));
   }
 
   function previewHistoryRetraction(id, filters) {
     openDlg('预览撤销观看记录', '<div id="retractPreview" role="status">正在核对进度和后续记录…</div>',
       '<button type="button" id="retractBack">返回观看历史</button><button class="primary" type="button" id="retractConfirm" disabled>确认撤销</button>');
     var body = $('#retractPreview'), confirm = $('#retractConfirm');
-    $('#retractBack').onclick = function () { openWatchHistory(filters); };
+    $('#retractBack').onclick = function () {
+      var returned = new URLSearchParams(filters);
+      returned.set('record', id);
+      openWatchHistory(returned);
+    };
     flushAllBumps();
     POST_CHAIN.then(function () {
       return sendPost('/api/history/retract', { history_id: id, preview: true });
@@ -3191,6 +3474,9 @@
         if (!box.isConnected || request !== seq) return;
         box.innerHTML = '<p><strong>' + esc(r.from) + ' 至 ' + esc(r.to) + '</strong> · 净记 ' + r.count +
           ' 集（追连载 ' + r.mode.airing + '、补番 ' + r.mode.catchup + '、重看 ' + r.mode.rewatch + '）。</p>' +
+          (r.milestones ? '<p>本周有 ' + esc(r.milestones.watching_days) + ' 天记录观看' +
+            (r.milestones.best_day ? ' · 记录最多的一天 ' + esc(r.milestones.best_day.date) + '，' + esc(r.milestones.best_day.count) + ' 集' : '') +
+            '。</p>' : '') +
           '<p class="note">按记账日期汇总。已撤销的记录和手动更正连续进度不计入；负数表示当天有退回。</p>' +
           '<ul class="watch-history">' + r.days.map(function (day) {
             return '<li>' + esc(day.date) + ' · ' + day.count + ' 集</li>';
@@ -3202,9 +3488,6 @@
           '<h4>按番剧核对</h4>' + (r.titles.length ? '<ul>' + r.titles.map(function (entry) {
             return '<li>' + esc(entry.title) + ' · ' + entry.count + ' 集</li>';
           }).join('') + '</ul>' : '<p>这一周没有需要合计的记录。</p>');
-        box.querySelectorAll('[data-detail]').forEach(function (button) {
-          button.onclick = function () { openWatchDetail(button.dataset.detail); };
-        });
         history.disabled = false;
         history.onclick = function () { openWatchHistory(new URLSearchParams({ from: r.from, to: r.to })); };
       }).catch(function (error) { if (box.isConnected && request === seq) box.textContent = error.message || '未能读到本地周报。'; });
@@ -3260,6 +3543,9 @@
         : source.status === 'cached' ? '采用已缓存的 ' + source.count + ' 条 · ' + source.error
         : source.status === 'skipped' ? (source.reason === 'no_token' ? '未设置令牌' : '此次不读取') : source.error;
       if (source.fetched_at && !sample) message += ' · 资料于 ' + new Date(source.fetched_at).toLocaleString('zh-CN') + ' 获取';
+      if (source.status === 'error' && source.cache_available === true) {
+        message += ' · 可用完整缓存 ' + source.cache_count + ' 条，获取于 ' + new Date(source.cache_at).toLocaleString('zh-CN');
+      } else if (source.status === 'error' && source.cache_available === false) message += ' · 暂无可用的完整缓存';
       return '<p><strong>' + names[key] + '</strong> · ' + esc(message) + '</p>';
     }).join('');
   }
@@ -3267,6 +3553,7 @@
   function doSync() {
     if (BUSY) return toast('同步正在进行');
     var mode = 'collections', useCache = false, request = null;
+    var priorChoices = new Map();
     var fields = { '(新增)': '新增条目', collection_state: '收藏状态', name: '原名', name_cn: '番名',
       eps: '总集数', ep_status: '已看集数', air_weekday: '播出星期', start_date: '首播日', calendar_entry: '公开排期' };
     function options() {
@@ -3317,9 +3604,12 @@
       }).then(function (result) {
         if (request !== id || !result || !marker.isConnected || !$('#mask').classList.contains('show')) return;
         if (!result.ok) {
+          var cacheReady = Object.values(result.sources || {}).some(function (source) { return source.cache_available; });
           openDlg('同步预览失败', '<p>' + esc(result.error || '无法取得同步资料') + '</p>' + syncSources(result),
-            '<button data-close>关闭</button><button id="syncRetry">调整选项或重试</button>');
+            '<button data-close>关闭</button><button id="syncRetry">调整选项或重试</button>' +
+            (cacheReady ? '<button class="primary" id="syncUseCache">预览完整缓存</button>' : ''));
           $('#syncRetry').onclick = options;
+          if (cacheReady) $('#syncUseCache').onclick = function () { useCache = true; start(); };
           return;
         }
         review(result);
@@ -3337,7 +3627,18 @@
     }
     function review(result) {
       var changes = result.changes || [], mapped = result.mappings || [], locks = result.protected_fields || [];
-      var groups = new Map(), selected = new Set(changes.filter(function (row) { return row.selected; }).map(function (row) { return row.key; }));
+      var groups = new Map(), selected = new Set();
+      changes.forEach(function (row) {
+        var values = JSON.stringify([row.from, row.to]);
+        var previous = priorChoices.get(row.key);
+        if (previous?.values === values ? previous.selected : row.selected) selected.add(row.key);
+        priorChoices.set(row.key, { values: values, selected: selected.has(row.key) });
+      });
+      function choose(key, checked) {
+        if (checked) selected.add(key);
+        else selected.delete(key);
+        priorChoices.get(key).selected = checked;
+      }
       function group(row) {
         if (!groups.has(String(row.id))) groups.set(String(row.id), { name: row.name, items: [], locks: [], mapping: null });
         return groups.get(String(row.id));
@@ -3346,11 +3647,14 @@
       locks.forEach(function (row) { group(row).locks.push(row); });
       mapped.forEach(function (row) { group(row).mapping = row; });
       var rows = Array.from(groups.values()), page = 0, size = 25;
+      var hasCache = !useCache && Object.values(result.sources || {}).some(function (source) { return source.cache_available; });
       openDlg(result.partial ? '同步预览 · 部分来源未在线读到' : '同步预览',
-        syncSources(result) + '<p class="note">暂停、归档、弃番和补番安排会保留。默认不改已有条目的收藏状态或调低进度。</p>' +
+        syncSources(result) + '<p class="note">' + (mode === 'progress' ? '只会写入勾选的观看进度。' : '本机观看进度会保留。') +
+        '写入前会留下本机番库恢复点 <code>data/library.json.bak</code>。</p>' +
         '<p id="syncSelection" role="status"></p><div id="syncRows"></div>' +
         '<p><button id="syncPrev">上一页</button> <span id="syncPage"></span> <button id="syncNext">下一页</button></p>',
         '<button data-close>关闭</button><button id="syncRetry">重新读取</button>' +
+        (hasCache ? '<button id="syncUseCache">预览完整缓存</button>' : '') +
         '<button class="primary" id="syncGo">写入选中项</button>');
       var go = $('#syncGo'), view = $('#syncRows');
       function count() {
@@ -3378,8 +3682,7 @@
         }).join('') || '<p>没有可核对的条目。</p>';
         view.querySelectorAll('[data-sync-key]').forEach(function (input) {
           input.onchange = function () {
-            if (input.checked) selected.add(input.dataset.syncKey);
-            else selected.delete(input.dataset.syncKey);
+            choose(input.dataset.syncKey, input.checked);
             groupChecks();
             count();
           };
@@ -3395,8 +3698,7 @@
         view.querySelectorAll('[data-sync-group]').forEach(function (input) {
           input.onchange = function () {
             shown[Number(input.dataset.syncGroup)].items.forEach(function (row) {
-              if (input.checked) selected.add(row.key);
-              else selected.delete(row.key);
+              choose(row.key, input.checked);
             });
             draw();
           };
@@ -3410,6 +3712,7 @@
       $('#syncPrev').onclick = function () { page--; draw(); };
       $('#syncNext').onclick = function () { page++; draw(); };
       $('#syncRetry').onclick = options;
+      if (hasCache) $('#syncUseCache').onclick = function () { useCache = true; start(); };
       go.onclick = function () {
         go.disabled = true;
         BUSY = true;
@@ -3488,6 +3791,10 @@
 
   // ---------------- 启动 ----------------
   function boot() {
+    window.addEventListener('online', function () {
+      document.querySelectorAll('.cover[data-cover-season]').forEach(queueSeasonCover);
+      loadSeasonCovers();
+    });
     try { applyLibraryView(JSON.parse(localStorage.getItem('tiara.libraryView') || '{}')); } catch (e) {}
     try {
       homeView = localStorage.getItem('tiara.home') || '';
@@ -3502,6 +3809,20 @@
       if (new URLSearchParams(location.search).get('welcome') === '1') WELCOME_FORCE = true;
     } catch (e) {}
     if (VIEWS.indexOf(TAB) < 0) TAB = 'today';
+    if (TAB === 'season') {
+      var quarter = new URLSearchParams(location.search).get('q');
+      SEASON_Q = supportedSeason(quarter) ? quarter : curSeason();
+      writeSeasonAddress(TAB, SEASON_Q, true);
+    }
+    window.addEventListener('popstate', function () {
+      var params = new URLSearchParams(location.search);
+      var view = params.get('tab');
+      if (view === 'season') {
+        var quarter = params.get('q');
+        chooseSeason(supportedSeason(quarter) ? quarter : curSeason(), true);
+      }
+      if (view !== TAB && (view === 'season' || TAB === 'season')) switchTab(view || 'today', true);
+    });
     if (new URLSearchParams(location.search).get('sync') === '1') {
       var url = new URL(location.href);
       url.searchParams.delete('sync');
@@ -3544,7 +3865,7 @@
         '<label><input type="checkbox" id="backupBrowserPrefs"> 当前浏览器的网页偏好</label></fieldset>' +
         '<button type="button" id="migrationExport">导出迁移文件</button>' +
         '<hr /><label class="row"><span>导入迁移文件</span><input id="migrationFile" type="file" accept=".json,application/json" /></label>' +
-        '<label class="row"><span>旧版的 data 文件夹</span><input id="migrationFolder" type="file" webkitdirectory /></label>' +
+        '<label class="row"><span>旧版安装目录或 data 文件夹</span><input id="migrationFolder" type="file" webkitdirectory /></label>' +
         '<fieldset id="restoreDesktop" hidden><legend>此次恢复的可选资料</legend>' +
         '<label id="restoreNotesLabel"><input type="checkbox" id="restoreNotes"> 桌面便条</label> ' +
         '<label id="restoreAppearanceLabel"><input type="checkbox" id="restoreAppearance"> 桌宠外观与聊天偏好</label> ' +
@@ -3569,7 +3890,7 @@
       var current = null, preview = null, request = 0, limit = 16 * 1024 * 1024;
       var restoreDesktop = $('#restoreDesktop'), notes = $('#restoreNotes'), appearance = $('#restoreAppearance');
       var favorites = $('#restoreFavorites'), browser = $('#restoreBrowser'), currentBrowser = {};
-      var sourceData = null;
+      var sourceData = null, sourceLabel = '';
       function counts(info) {
         var base = '在追 ' + info.watching + ' 部、待看 ' + (info.planned || 0) + ' 部、暂停 ' + info.paused +
           ' 部、归档 ' + info.archived + ' 部、' + (info.removed ? '已移除 ' + info.removed + ' 部、' : '') + '观看记录 ' + info.history + ' 条';
@@ -3587,9 +3908,11 @@
       function fromFolder(files) {
         var entries = {};
         Array.from(files).forEach(function (item) {
-          if (/^[^/]+\/(library\.json|settings\.json|state\.json|companion-import\.json|history(?:-\d{4})?\.jsonl)$/.test(item.webkitRelativePath)) entries[item.name] = item;
+          var relative = item.webkitRelativePath.split('/').slice(1).join('/');
+          if (/^(?:data\/)?(library\.json|settings\.json|state\.json|companion-import\.json|history(?:-\d{4})?\.jsonl)$/.test(relative) ||
+              relative === 'package.json') entries[item.name] = item;
         });
-        if (!entries['library.json']) throw new Error('请选择旧版的 data 文件夹，其中应有 library.json');
+        if (!entries['library.json']) throw new Error('请选择旧版安装目录或含 library.json 的 data 文件夹');
         if (Object.values(entries).reduce(function (n, item) { return n + item.size; }, 0) > limit) throw new Error('迁移数据超过 16 MB');
         var histories = Object.keys(entries).filter(function (name) { return name.startsWith('history'); });
         return Promise.all([readJson(entries['library.json']), readJson(entries['settings.json']),
@@ -3598,7 +3921,8 @@
               return [name, text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(function (line) { return line.trim(); })
                 .map(function (line) { return JSON.parse(line.replace(/^\uFEFF/, '')); })];
             });
-          })), readJson(entries['state.json']), readJson(entries['companion-import.json'])]).then(function (values) {
+          })), readJson(entries['state.json']), readJson(entries['companion-import.json']),
+          readJson(entries['package.json']).catch(function () { return {}; })]).then(function (values) {
           var state = values[3] || {}, pending = values[4] || {};
           var unclaimed = pending.id && pending.id !== state.companion_import ? pending : {};
           var memory = unclaimed.companion ||
@@ -3618,7 +3942,8 @@
             idle_chatter: state.idle_chatter, hourly_chatter: state.hourly_chatter
           };
           Object.assign(desktop, unclaimed.desktop);
-          return { format: 'tiara-migration', schema: 1, library: values[0], settings: values[1], history: Object.fromEntries(values[2]), desktop: desktop,
+          return { format: 'tiara-migration', schema: 1, source_version: values[5]?.version,
+            library: values[0], settings: values[1], history: Object.fromEntries(values[2]), desktop: desktop,
             companion: memory ? { first_seen: memory.first_seen, affinity: memory.affinity,
               stories: memory.stories ? storyProgress : undefined, affinity_daily: memory.affinity_daily,
               first_duty: memory.first_duty, new_year_letter: memory.new_year_letter } : undefined };
@@ -3667,9 +3992,13 @@
           function noteCount(info) {
             return info.total + ' 条（已完成 ' + info.done + ' 条' + (info.scheduled ? '，设有到期时间 ' + info.scheduled + ' 条' : '') + '）';
           }
-          message.innerHTML = '<p>' + (reply.created_at ? '备份日期 ' +
+          message.innerHTML = '<p>来源 <strong>' + esc(sourceLabel) + '</strong>' +
+            (reply.source_version ? ' · v' + esc(reply.source_version) : ' · 未记录版本') + '</p>' +
+            '<p>写入目标 v' + esc(reply.target_version) + ' · <code>' + esc(reply.target_root) + '</code></p>' +
+            '<p>' + (reply.created_at ? '备份日期 ' +
             esc(new Date(reply.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })) + '（北京时间）' : '备份未记录导出日期') + '</p>' +
-            '<p>导入前：' + esc(counts(reply.current)) + '。导入后：' + esc(counts(reply.incoming)) + '。</p>' +
+            '<p>导入前 ' + esc(counts(reply.current)) + '。导入后 ' + esc(counts(reply.incoming)) + '。</p>' +
+            '<p>番库、观看历史和本机设置将采用所选备份。当前数据会先保存到 <code>data/backups/</code>。</p>' +
             diff +
             '<ul><li>桌面便条 ' + (b ? noteCount(b.current) + ' → ' + noteCount(b.incoming) + '，替换当前便条' : '保留当前便条') + '</li>' +
             '<li>桌宠外观 ' + (a ? look(a.current) + ' → ' + look(a.incoming) : '保留当前外观') + '</li>' +
@@ -3707,6 +4036,7 @@
       file.onchange = function () {
         if (!file.files.length) return;
         folder.value = '';
+        sourceLabel = file.files[0].name;
         review(function () {
           if (file.files[0].size > limit) throw new Error('迁移数据超过 16 MB');
           return readJson(file.files[0]);
@@ -3715,6 +4045,7 @@
       folder.onchange = function () {
         if (!folder.files.length) return;
         file.value = '';
+        sourceLabel = folder.files[0].webkitRelativePath.split('/')[0];
         review(function () { return fromFolder(folder.files); });
       };
       download.onclick = function () {
@@ -3739,10 +4070,12 @@
           .finally(function () { download.disabled = false; });
       };
       apply.onclick = function () {
+        if (!preview || !current) return;
         apply.disabled = file.disabled = folder.disabled = notes.disabled = appearance.disabled = favorites.disabled = browser.disabled = true;
         message.textContent = '正在导入…';
         post('/api/migration', { migration: current, source: preview.source, target: preview.target }).then(function (reply) {
           if (!reply.ok) throw new Error(reply.error || '导入失败');
+          file.value = folder.value = ''; sourceData = null; restoreDesktop.hidden = true;
           var browserStatus = '';
           if (Object.keys(currentBrowser).length) {
             try {
@@ -3758,15 +4091,23 @@
             } catch (error) { browserStatus = '。本机数据已恢复，浏览器偏好无法写入'; }
           }
           if (message.isConnected) {
-            message.textContent = '导入成功。导入前的备份在 data/backups/' + reply.backup + browserStatus;
+            message.textContent = '导入成功。导入前的备份在 data/backups/' + reply.backup + browserStatus + '。';
+            if (reply.readback) message.textContent += '已重读番库和设置，' + counts(reply.readback) + '。';
+            else message.textContent += '本机已写入数据，请重新打开面板核对。';
             if (reply.desktop_pending) message.textContent += '。此目录的桌宠运行时会应用选中的桌宠资料。';
             if (reply.rebuild_error) message.textContent += '。桌宠数据重算失败，请查看诊断。';
           }
           refresh();
-        }).catch(function (error) { if (message.isConnected) message.textContent = error.message; })
+        }).catch(function (error) {
+          if (!message.isConnected) return;
+          message.textContent = error.message + '。';
+          var retry = document.createElement('button');
+          retry.textContent = '保留选择并重新预览';
+          retry.onclick = function () { if (sourceData) previewData(sourceData); };
+          message.appendChild(retry);
+        })
           .finally(function () {
             file.disabled = folder.disabled = notes.disabled = appearance.disabled = favorites.disabled = browser.disabled = false;
-            file.value = folder.value = ''; sourceData = null; restoreDesktop.hidden = true;
           });
       };
     }
@@ -3813,15 +4154,20 @@
         function show() {
           var id = entry.value;
           var changes = preview.changes.filter(function (change) { return !id || change.id === id; });
-          diff.innerHTML = changes.length ? '<ul class="sync-changes">' + changes.map(function (change) {
+          var source = version.selectedOptions[0].textContent;
+          var summary = '<p>来源 <strong>' + esc(source) + '</strong> · ' + (id ? '仅恢复选中的番剧' : '恢复整份番库') + '</p>' +
+            '<p>目标 v' + esc(preview.target_version) + ' · <code>' + esc(preview.target_root) + '</code></p>' +
+            (preview.recovery ? '<p>恢复前保存当前文件到 <code>' + esc(preview.recovery) + '</code>。</p>' : '');
+          diff.innerHTML = summary + (changes.length ? '<ul class="sync-changes">' + changes.map(function (change) {
             return '<li><strong>' + esc((change.to || change.from).name) + '</strong><br />' +
               esc(describe(change.from) + ' → ' + describe(change.to)) + '</li>';
-          }).join('') + '</ul>' : '<p>这个范围内没有可见的进度、状态或排期差异。</p>';
+          }).join('') + '</ul>' : '<p>这个范围内没有可见的进度、状态或排期差异。</p>');
           go.textContent = id ? '确认恢复这一部' : '确认恢复整份番库';
           go.disabled = false;
         }
         function load() {
           var seq = ++request;
+          var selectedEntry = entry.value;
           preview = null;
           go.disabled = true;
           diff.textContent = '正在读取备份…';
@@ -3832,6 +4178,7 @@
             entry.innerHTML = '<option value="">整份番库</option>' + (data.current_readable ? data.entries.map(function (row) {
               return '<option value="' + esc(row.id) + '">' + esc(row.name) + '</option>';
             }).join('') : '');
+            if (Array.from(entry.options).some(function (option) { return option.value === selectedEntry; })) entry.value = selectedEntry;
             show();
           }).catch(function () { if (seq === request) diff.textContent = '读不到备份'; });
         }
@@ -3844,7 +4191,7 @@
             expected_revision: preview.revision, backup_revision: preview.backup_revision }).then(function (applied) {
             if (!applied.ok) { load(); toast(applied.error || '恢复失败'); return; }
             if (version.isConnected) closeDlg();
-            toast(applied.id ? '番剧已恢复' : '番库已恢复');
+            toast((applied.id ? '番剧已恢复' : '番库已恢复') + (applied.recovery ? ' · 已保存恢复点' : ''));
             return refresh();
           }).catch(function () { go.disabled = false; toast('没有收到恢复结果'); });
         });
@@ -3984,8 +4331,9 @@
 
     function openSettingsNav() {
       var groups = [
-        ['Bangumi', [['account', 'Bangumi 账号', openBgmAccount], ['sync', '同步 Bangumi', doSync]]],
-        ['数据与导出', [['restore', '备份与恢复', openRestore], ['migration', '升级与换机', openMigration],
+        ['同步、备份与迁移', [['sync', '同步 Bangumi', doSync], ['restore', '备份与恢复', openRestore], ['migration', '升级与换机', openMigration]]],
+        ['Bangumi', [['account', 'Bangumi 账号', openBgmAccount]]],
+        ['日历与导出', [
           ['calendar', '导出日历', openCalendarExport], ['week', '导出周表', function () { location.href = '/api/export?fmt=md'; }],
           ['ssp', '导出私人 SSP 排片', openPrivateSsp]]],
         ['提醒与桌宠', [['reminders', '提醒设置', openReminderSettings],
@@ -4275,6 +4623,7 @@
     refresh().then(function () {
       var watch = new URLSearchParams(location.search).get('watch');
       if (watch) return openWatchDetail(watch);
+      if (new URLSearchParams(location.search).get('report') === '1') return openWatchReport();
       if (new URLSearchParams(location.search).get('reminders') === '1') return openReminderHistory();
       if (TAB === 'season' && !SEASON) loadSeason(false);
     });

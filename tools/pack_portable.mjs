@@ -45,6 +45,7 @@ const runtimeVersion = execFileSync(nodeExe, ['--version'], { windowsHide: true,
 if (!/^v\d+\.\d+\.\d+/.test(runtimeVersion) || Number(runtimeVersion.slice(1).split('.')[0]) < 18) {
   throw new Error(`便携运行时不符合项目要求：${runtimeVersion}`);
 }
+execFileSync(process.execPath, [path.join(ROOT, 'tools/check_season_catalog.mjs'), '--current'], { stdio: 'inherit' });
 
 /** 目录白名单：只有这些目录会被整目录带走 */
 const DIRS = [

@@ -1,12 +1,16 @@
 name: Windows release candidate
 
 on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       previous_version:
         description: Published portable version used for migration (without v)
         required: true
-        default: '0.30.0'
+        default: '0.59.0'
         type: string
 
 permissions:
@@ -17,7 +21,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version || '0.59.0' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

@@ -114,6 +114,11 @@ if (FAST) {
   record('发行台词与立绘', result.code === 0, result.out.trim());
 }
 
+{
+  const result = run(['tools/check_season_catalog.mjs']);
+  record('随包季度目录和封面', result.code === 0, result.out.trim());
+}
+
 // ---------- 5. today.txt 新鲜度 ----------
 {
   const p = path.join(ROOT, 'ghost', 'master', 'today.txt');

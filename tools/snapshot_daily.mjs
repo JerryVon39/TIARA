@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
 import { redactCredentials } from '../lib/migration.mjs';
+import { withLibraryLock } from '../lib/library-lock.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const DAILY_BACKUP_KEEP = 14;
@@ -20,6 +21,13 @@ const FILES = [
   ['state.json', 'state.json'],
 ];
 const HISTORY = 'history.jsonl';
+const STATUS = '_snapshot.json';
+
+function readRecord(file) {
+  const value = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要 JSON 对象');
+  return value;
+}
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function todayCst() {
@@ -39,37 +47,52 @@ export async function snapshot(opts = {}) {
   if (!DAILY_BACKUP_NAME.test(day)) throw new Error('快照日期格式无效');
   const target = join(BK, day);
   const keep = Number.isInteger(opts.keep) && opts.keep > 0 ? opts.keep : DAILY_BACKUP_KEEP;
-  const res = { ok: true, dir: target, wrote: [], skipped: [], pruned: [] };
+  const res = { ok: true, dir: target, wrote: [], skipped: [], pruned: [], missing: [] };
   const existed = existsSync(target);
   if (existed && !lstatSync(target).isDirectory()) throw new Error('同名快照路径不是目录');
-  if (existed && !opts.force) {
-    res.skipped.push('今天已经快照过了（' + day + '）');
-    return res;
-  }
   if (!opts.dryRun) mkdirSync(target, { recursive: true });
 
   for (const [src, name] of FILES) {
     const p = join(DATA, src);
-    if (!existsSync(p)) { res.skipped.push(src + '（没有）'); continue; }
+    const dest = join(target, name);
+    if (!opts.force && existsSync(dest)) {
+      try { readRecord(dest); continue; } catch { /* 用完整源文件补齐 */ }
+    }
     try {
-      const value = redactCredentials(JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, '')));
-      if (!opts.dryRun) await writeJsonAtomic(join(target, name), value);
+      const value = redactCredentials(readRecord(p));
+      if (!opts.dryRun) await writeJsonAtomic(dest, value);
       res.wrote.push(name);
     } catch (error) {
-      res.skipped.push(name + '（无法备份：' + error.message + '）');
+      if (error.code === 'ENOENT' && src !== 'library.json' && !existsSync(dest)) continue;
+      res.missing.push(name);
+      res.skipped.push(name + '（无法备份：' + (error.code || error.name) + '）');
     }
   }
 
   const hp = join(DATA, HISTORY);
-  if (existsSync(hp)) {
-    const lines = readFileSync(hp, 'utf8').split('\n').filter(Boolean);
-    const tail = lines.slice(-DAILY_HISTORY_TAIL).flatMap(line => {
-      try { return [JSON.stringify(redactCredentials(JSON.parse(line.replace(/^\uFEFF/, ''))))]; }
-      catch { return []; }
-    });
-    if (!opts.dryRun) await writeFileAtomic(join(target, HISTORY), tail.join('\n') + (tail.length ? '\n' : ''));
-    res.wrote.push(`${HISTORY}（尾 ${tail.length} 行 / 共 ${lines.length}）`);
+  const historyDest = join(target, HISTORY);
+  if (opts.force || !existsSync(historyDest) || !lstatSync(historyDest).isFile()) {
+    try {
+      const lines = readFileSync(hp, 'utf8').split('\n').filter(line => line.trim());
+      const tail = lines.slice(-DAILY_HISTORY_TAIL).map(line =>
+        JSON.stringify(redactCredentials(JSON.parse(line.replace(/^\uFEFF/, '')))));
+      if (!opts.dryRun) await writeFileAtomic(historyDest, tail.join('\n') + (tail.length ? '\n' : ''));
+      res.wrote.push(`${HISTORY}（尾 ${tail.length} 行 / 共 ${lines.length}）`);
+    } catch (error) {
+      if (error.code !== 'ENOENT' || existsSync(historyDest)) {
+        res.missing.push(HISTORY);
+        res.skipped.push(HISTORY + '（无法备份：' + (error.code || error.name) + '）');
+      }
+    }
   }
+  res.ok = res.missing.length === 0;
+  if (!opts.dryRun) {
+    const status = JSON.stringify({ complete: res.ok, missing: res.missing }) + '\n';
+    const previous = existsSync(join(target, STATUS)) ? readFileSync(join(target, STATUS), 'utf8') : '';
+    if (status !== previous) await writeFileAtomic(join(target, STATUS), status);
+  }
+  if (!res.ok) return res;
+  if (existed && !res.wrote.length) res.skipped.push('今天已经快照过了（' + day + '）');
 
   // 只保留最近 keep 天（按目录名字典序即时间序）
   const days = snapshotInfo(opts.root).days;
@@ -94,11 +117,13 @@ export function snapshotInfo(root = ROOT) {
 
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('tools/snapshot_daily.mjs')) {
   const keepArg = process.argv.indexOf('--keep');
-  const res = await snapshot({
+  const opts = {
     force: process.argv.includes('--force'),
     dryRun: process.argv.includes('--dry-run'),
     keep: keepArg > 0 ? Number(process.argv[keepArg + 1]) : DAILY_BACKUP_KEEP,
-  });
+  };
+  const res = opts.dryRun ? await snapshot(opts) : await withLibraryLock(ROOT, () => snapshot(opts));
+  if (!res.ok) process.exitCode = 1;
   if (process.argv.includes('--json')) console.log(JSON.stringify(res, null, 2));
   else if (res.skipped.length === 1 && !res.wrote.length) console.log('· ' + res.skipped[0]);
   else {

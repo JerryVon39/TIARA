@@ -464,11 +464,17 @@ namespace UkagakaBangumi
             var tabs = new WrapPanel();
             panel.Children.Add(tabs);
             UtilityButton(tabs, "手账", "companion-home", () => OpenCompanion(false));
+            UtilityButton(tabs, "观看周报", "companion-watch-report", () => OpenCompanionTab(5));
             UtilityButton(tabs, "最近台词", "companion-recent", () => OpenCompanion(true));
             UtilityButton(tabs, "收藏", "companion-favorites", () => OpenCompanionTab(2));
             UtilityButton(tabs, _newYearLetter != null && !_newYearLetter.read ? "来信（未读）" : "来信",
                 "companion-letter", () => OpenCompanionTab(4));
             UtilityButton(tabs, "偏好", "companion-preferences", () => OpenCompanionTab(3));
+            if (_companionTab == 5)
+            {
+                ShowCompanionReport(panel);
+                return;
+            }
             if (_companionTab == 4)
             {
                 ShowHolidayLetter(panel);
@@ -507,11 +513,7 @@ namespace UkagakaBangumi
                     bool saved = _favoriteLines.Contains(line);
                     var toggle = UtilityButton(actions, saved ? "取消收藏" : "收藏", "companion-favorite-" + i, () =>
                     {
-                        var previous = new List<string>(_favoriteLines);
-                        if (saved) _favoriteLines.Remove(line);
-                        else if (_favoriteLines.Count < FavoriteLimit) _favoriteLines.Add(line);
-                        if (!SaveState()) { _favoriteLines = previous; status.Text = "暂时无法保存，请稍候重试。"; return; }
-                        RefreshCompanion();
+                        if (ToggleCompanionFavorite(line, status)) RefreshCompanion();
                     });
                     toggle.IsEnabled = saved || _favoriteLines.Count < FavoriteLimit;
                 }
@@ -577,6 +579,123 @@ namespace UkagakaBangumi
                 UtilityButton(choices, current.First, "story-choice-one", () => FinishStory(current, 1));
                 UtilityButton(choices, current.Second, "story-choice-two", () => FinishStory(current, 2));
             }
+        }
+
+        bool ToggleCompanionFavorite(string text, TextBlock status)
+        {
+            var previous = new List<string>(_favoriteLines);
+            if (!_favoriteLines.Remove(text))
+            {
+                if (_favoriteLines.Count >= FavoriteLimit) { status.Text = "收藏已满。"; return false; }
+                _favoriteLines.Add(text);
+            }
+            if (SaveState()) return true;
+            _favoriteLines = previous;
+            status.Text = "暂时无法保存，请稍候重试。";
+            return false;
+        }
+
+        public sealed class CompanionWatchReport
+        {
+            public bool ok { get; set; }
+            public string from { get; set; }
+            public string to { get; set; }
+            public int count { get; set; }
+            public List<CompanionCompletion> completed { get; set; }
+            public Dictionary<string, int> mode { get; set; }
+            public CompanionMilestones milestones { get; set; }
+        }
+
+        public sealed class CompanionCompletion
+        {
+            public string title { get; set; }
+            public string date { get; set; }
+        }
+
+        public sealed class CompanionMilestones
+        {
+            public string first_watch { get; set; }
+            public CompanionCompletion first_completion { get; set; }
+            public int watching_days { get; set; }
+            public CompanionWatchDay best_day { get; set; }
+        }
+
+        public sealed class CompanionWatchDay
+        {
+            public string date { get; set; }
+            public int count { get; set; }
+        }
+
+        void ShowCompanionReport(StackPanel panel)
+        {
+            UtilityText(panel, "本地观看周报", true);
+            var report = new StackPanel();
+            var controls = new WrapPanel();
+            panel.Children.Add(controls);
+            panel.Children.Add(report);
+            UtilityButton(controls, "刷新本周", "companion-report-refresh", RefreshCompanion);
+            UtilityButton(controls, "在网页查看记录", "companion-report-web", () => OpenWebPanel("?tab=library&report=1"));
+            UtilityText(report, "正在读取本机观看记录…");
+            Action<CompanionWatchReport> show = result =>
+            {
+                if (_companionTab != 5 || _companionContent == null || !_companionContent.Children.Contains(report)) return;
+                report.Children.Clear();
+                if (result == null || !result.ok)
+                    UtilityText(report, "暂时读不到观看记录，可点「刷新本周」重试。");
+                else DisplayCompanionReport(report, result);
+            };
+            if (_selfTest) { show(null); return; }
+            UsePanel(port => System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                CompanionWatchReport data = null;
+                try { data = ReadPanelJson<CompanionWatchReport>(port, "/api/watch/report", 4000); }
+                catch (Exception ex) { Log("companion report: " + ex.GetType().Name); }
+                Dispatcher.BeginInvoke(new Action(() => { if (!_closing) show(data); }));
+            }), false, () => show(null));
+        }
+
+        void DisplayCompanionReport(StackPanel panel, CompanionWatchReport report)
+        {
+            var points = report.milestones;
+            string summary = report.from + " 至 " + report.to + "（北京时间）\n本周净记 " + report.count + " 集" +
+                (points == null ? "。" : "，有 " + points.watching_days + " 天记了观看进度。");
+            UtilityText(panel, summary);
+            if (report.mode != null)
+            {
+                int airing, catchup, rewatch;
+                report.mode.TryGetValue("airing", out airing);
+                report.mode.TryGetValue("catchup", out catchup);
+                report.mode.TryGetValue("rewatch", out rewatch);
+                UtilityText(panel, "追连载 " + airing + " 集 · 补番 " + catchup + " 集 · 重看 " + rewatch + " 集");
+            }
+            if (report.completed != null && report.completed.Count > 0)
+            {
+                UtilityText(panel, "本周看完 " + report.completed.Count + " 次", true);
+                for (int i = 0; i < Math.Min(5, report.completed.Count); i++)
+                    UtilityText(panel, report.completed[i].title + " · " + report.completed[i].date);
+            }
+            if (points != null)
+            {
+                UtilityText(panel, "追番里程碑", true);
+                if (points.first_watch != null) UtilityText(panel, "最早一笔保留的观看记录 · " + points.first_watch);
+                if (points.first_completion != null)
+                    UtilityText(panel, "首次看完 · " + points.first_completion.title + " · " + points.first_completion.date);
+                if (points.best_day != null)
+                    UtilityText(panel, "本周观看集数最多的一天 · " + points.best_day.date + " · " + points.best_day.count + " 集");
+                if (points.first_watch == null && points.first_completion == null) UtilityText(panel, "记录观看进度后会显示里程碑。");
+            }
+            var actions = new WrapPanel();
+            var status = ScheduleText("", 12, ScheduleMuted);
+            panel.Children.Add(actions);
+            panel.Children.Add(status);
+            UtilityButton(actions, "朗读周报", "companion-report-speech", () => ReadCompanionLine(summary, status));
+            Button favorite = null;
+            favorite = UtilityButton(actions, _favoriteLines.Contains(summary) ? "取消收藏" : "收藏周报摘要",
+                "companion-report-favorite", () =>
+                {
+                    if (ToggleCompanionFavorite(summary, status))
+                        favorite.Content = _favoriteLines.Contains(summary) ? "取消收藏" : "收藏周报摘要";
+                });
         }
 
         void ShowHolidayLetter(StackPanel panel)
