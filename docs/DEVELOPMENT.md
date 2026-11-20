@@ -8,7 +8,9 @@
 - 改动桌宠后运行 `node tools/build_pet.mjs`。运行 `node tools/ci.mjs` 检查脚本、测试和文档版本。
 - 发布时先运行 `node tools/fetch_runtime.mjs` 准备运行时，再运行 `npm run pack`。脚本编译桌宠，从空番库生成两个公开包，在 `dist/v<版本>/` 校验 SHA-256；可用 `node tools/pack_release.mjs --check` 复查。公开台词模板在 `tools/release/talks.json`。
 
-Windows release candidate 工作流从新检出运行 CI、构建两个包，并通过 SHA-256 取上一版做无系统 Node.js 的升级测试。产物是候选 ZIP 与清单。发布前在交互式 Windows 中运行 `tools/verify_release_windows.ps1`，传入 `-Manifest`、`-PreviousZip`、`-SspRoot` 和 `-YayaMaster`。SSP 路径指一份已完成引导的独立 SSP 测试环境，YAYA 路径下应有 `yaya.dll` 和 `yaya_base`。脚本在临时目录解压、写入样例进度、验证迁移和 SSP 启动。双屏混合缩放另走交互验收。
+面向 `main` 的 PR 和合并后的 `main` 都运行 Windows release candidate。它从干净检出运行 CI 和 Edge 检查，构建便携包、公开 SSP 包与 `manifest.json`，并用校验过的 v0.59.0 便携包做无系统 Node.js 的升级测试。手动运行可指定其它公开迁移基线。发布取合并后通过检查的同一提交，三个文件一起上传。
+
+发布前在交互式 Windows 中运行 `tools/verify_release_windows.ps1`，传入 `-Manifest`、`-PreviousZip`、`-SspRoot` 和 `-YayaMaster`。SSP 路径指一份已完成引导的独立 SSP 测试环境，YAYA 路径下应有 `yaya.dll` 和 `yaya_base`。脚本在临时目录解压、写入样例进度、验证迁移和 SSP 启动。双屏混合缩放另走交互验收。
 
 ## 4. 目录结构
 

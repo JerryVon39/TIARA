@@ -241,6 +241,10 @@
   .board-day li { display: grid; grid-template-columns: 68px 1fr auto; align-items: baseline; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
   .board-day li span { overflow-wrap: anywhere; }
   .board-day time { font-family: var(--mono); color: var(--accent); }
+  @media (forced-colors: active) {
+    .board-next { border: 1px solid CanvasText; }
+    .board-head :focus-visible { outline-color: Highlight; }
+  }
   .show-time .wk, .t.unknown { color: var(--mute); font: inherit; font-size: 11px; }
   .nm {
     font-size: 13px; line-height: 1.4; color: var(--ink); margin-top: 2px; overflow-wrap: anywhere;
@@ -347,15 +351,10 @@
     border-bottom: 1px solid var(--line);
     color: var(--dim);
   }
-  .qstrip { position: relative; display: flex; gap: 4px; overflow-x: auto; max-width: 46vw; padding: 2px 0; scrollbar-width: thin; }
-  .qpill {
-    flex: 0 0 auto; padding: 4px 10px; font-size: 12px; letter-spacing: .04em;
-    color: var(--dim); background: transparent; border: 1px solid transparent; border-radius: 99px;
-    font-variant-numeric: tabular-nums;
-  }
-  .qpill:hover { background: rgba(255, 255, 255, .06); color: var(--ink); }
-  .qpill.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .qpill .dot { display: inline-block; width: 4px; height: 4px; margin-left: 5px; border-radius: 50%; background: var(--ok); vertical-align: middle; }
+  .season-picker { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .season-months { display: grid; grid-template-columns: repeat(4, auto); gap: 4px; }
+  .season-months button { min-height: 30px; padding-inline: 9px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .season-months [aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .qstep { padding: 3px 8px; font-size: 14px; line-height: 1; }
 
   .tag {
@@ -475,6 +474,8 @@
   }
   .watch-summary-link:hover { background: transparent; text-decoration: underline; }
   .watch-detail-group { border: 1px solid var(--line); border-radius: 9px; background: var(--card); }
+  .watch-add-preview { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--mute); }
+  .watch-add-preview strong { color: var(--ink); }
   .watch-detail-group > summary {
     display: grid; grid-template-columns: minmax(74px, auto) minmax(0, 1fr) 12px; gap: 4px 12px; align-items: center;
     list-style: none; cursor: pointer; min-height: 46px; padding: 8px 13px; border-radius: 8px;
@@ -755,7 +756,7 @@
     main { padding: 16px 12px 24px; }
     .sec > .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .dock { padding: 10px 12px; }
-    .qstrip { max-width: calc(100% - 144px); }
+    .season-picker { row-gap: 8px; }
     .sec-head { flex-wrap: wrap; }
     table.grid { table-layout: auto; }
   }

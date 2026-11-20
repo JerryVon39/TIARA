@@ -6,13 +6,19 @@
   const full = $('boardFullscreen');
   const week = $('boardWeek');
   const status = $('boardStatus');
+  const systemTheme = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
   let timer, request, revision;
 
-  try {
-    const theme = localStorage.getItem('kx.theme');
+  function applyTheme() {
+    let theme;
+    try { theme = localStorage.getItem('kx.theme'); } catch (error) {}
     document.documentElement.dataset.theme = theme === 'dark' ||
-      (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
-  } catch (error) {}
+      (theme === 'auto' && systemTheme?.matches) ? 'dark' : 'light';
+  }
+  if (systemTheme?.addEventListener) systemTheme.addEventListener('change', applyTheme);
+  else systemTheme?.addListener(applyTheme);
+  window.addEventListener('storage', event => { if (event.key === 'kx.theme' || event.key === null) applyTheme(); });
+  applyTheme();
 
   function node(tag, text) {
     const element = document.createElement(tag);
@@ -41,7 +47,9 @@
       const list = document.createElement('ul');
       for (const row of rows) {
         const entry = document.createElement('li');
-        entry.append(node('time', row.time || '时间未定'), node('span', row.name),
+        const time = row.time ? node('time', row.time) : node('span', '时间未定');
+        if (row.time) time.dateTime = row.date + 'T' + row.time + ':00+08:00';
+        entry.append(time, node('span', row.name),
           node('small', row.kind === 'catchup' ? '补番' : row.episode ? '第 ' + row.episode + ' 话' : '开播'));
         list.append(entry);
       }
@@ -85,7 +93,9 @@
     operation.catch(() => { status.textContent = '浏览器暂时无法切换全屏。'; });
   });
   document.addEventListener('fullscreenchange', () => {
-    full.textContent = document.fullscreenElement ? '退出全屏' : '全屏';
+    const active = !!document.fullscreenElement;
+    full.textContent = active ? '退出全屏' : '全屏';
+    full.setAttribute('aria-pressed', String(active));
   });
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || event.defaultPrevented) return;

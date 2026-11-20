@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   currentSeason, listCachedSeasons, pruneSeasonCache, readSeasonCache, writeSeasonCache,
-  seasonCacheRel, KEEP_SPAN,
+  seasonCacheRel, seasonRefreshState, shiftSeason, CATALOG_DIRECTORY, KEEP_SPAN,
 } from '../lib/season-cache.mjs';
 
 async function rootWith(quarters) {
@@ -87,4 +87,45 @@ test('readSeasonCache：过期判定与缺失文件', async () => {
   assert.equal(stale.stale, true);
   assert.ok(stale.age_ms > 12 * 3600 * 1000);
   assert.equal(await readSeasonCache(root, '1999Q4'), null);
+});
+
+test('有缺失或重复编号的季度快照不会覆盖有效缓存', async () => {
+  const q = '2019Q1';
+  const root = await rootWith([]);
+  await writeSeasonCache(root, { q, items: [{ id: 'local-catalog-demo' }], total: 1 });
+  const filename = path.join(root, seasonCacheRel(q));
+  const good = await fs.readFile(filename, 'utf8');
+  for (const items of [[{}], [{ id: 1 }, { id: '1' }]]) {
+    await assert.rejects(writeSeasonCache(root, { q, items, total: items.length }), /季度目录条目不完整或重复/);
+    assert.equal(await fs.readFile(filename, 'utf8'), good);
+  }
+});
+
+test('季末核验按北京时间计算，历史季核验后不因过期而刷新', () => {
+  const q = '2025Q4';
+  const boundary = '2026-01-15T00:00:00+08:00';
+  assert.deepEqual(seasonRefreshState(q, null, new Date('2026-01-14T23:59:59+08:00')), { status: 'pending', due: false });
+  assert.deepEqual(seasonRefreshState(q, null, new Date(boundary)), { status: 'pending', due: true });
+  assert.deepEqual(seasonRefreshState(q, { verified_at: boundary }, new Date('2026-07-01')), { status: 'verified', due: false });
+  assert.deepEqual(seasonRefreshState('2026Q2', null, new Date(boundary)), { status: 'preview', due: true });
+  assert.deepEqual(seasonRefreshState('2026Q4', null, new Date(boundary)), { status: 'preview', due: false });
+  assert.equal(shiftSeason(q, 1), '2026Q1');
+});
+
+test('内置目录能兜底旧缓存漏页，核验结果和附加字段在缓存清理后仍有效', async () => {
+  const root = await rootWith([]);
+  const q = '2019Q4';
+  const seed = { q, items: [{ id: 1, weekday: 1, time_cst: '21:00' }], total: 1 };
+  const dir = path.join(root, CATALOG_DIRECTORY);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, q + '.json'), JSON.stringify(seed));
+  await fs.writeFile(path.join(root, seasonCacheRel(q)), JSON.stringify({ q, items: [{ id: 2 }], total: 2 }));
+  assert.equal((await readSeasonCache(root, q)).built_in, true);
+  assert.deepEqual(await listCachedSeasons(root), [q]);
+  await writeSeasonCache(root, { q, total: 1, items: [{ id: 1, eps: 12, weekday: null }] });
+  const saved = await readSeasonCache(root, q);
+  assert.equal(saved.verified_source, 'Bangumi API');
+  assert.deepEqual([saved.items[0].eps, saved.items[0].weekday, saved.items[0].time_cst], [12, 1, '21:00']);
+  assert.deepEqual(await pruneSeasonCache(root, currentSeason()), []);
+  assert.ok(await fs.readFile(path.join(root, seasonCacheRel(q)), 'utf8'));
 });

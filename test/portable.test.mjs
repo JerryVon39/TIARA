@@ -17,6 +17,7 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   await assert.rejects(pack(), error => /runtime\/node.exe/.test(error.stderr));
   await fs.mkdir(path.join(root, 'runtime'));
   await fs.copyFile(process.execPath, path.join(root, 'runtime', 'node.exe'));
+  await fs.cp(path.join(source, 'assets/season-catalog'), path.join(root, 'assets/season-catalog'), { recursive: true });
   const secret = 'PRIVATE_FIXTURE_92726';
   for (const rel of ['data/library.json', 'data/bgm.json', 'data/history.jsonl', 'data/history-2025.jsonl', 'data/talks.json', 'data/state.json', 'data/backups/2026-11-09/bgm.json', 'data/undo/step-1.json', 'ghost/master/basis.dic', 'ghost/master/today.json', 'ghost/master/words.txt', 'ghost-yaya/master/basis.dic', 'shell/custom/surfaces.json', 'tools/ImageTool.exe']) {
     await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
@@ -30,6 +31,7 @@ test('发行包使用全新库，配置/备份/撤销/生成台词都不泄露�
   assert.deepEqual(zip.filter(x => x.name.startsWith('data/')).map(x => x.name).sort(), allowed.sort());
   assert.equal(zip.some(x => x.data.includes(Buffer.from(secret))), false);
   assert.deepEqual(JSON.parse(zip.find(x => x.name === 'data/library.json').data).watching, []);
+  assert.ok(zip.some(x => x.name === 'assets/season-catalog/2019Q1.json'));
   assert.deepEqual(zip.filter(x => x.name.startsWith('ghost')).map(x => x.name).sort(),
     ['basis.dic', 'descript.txt', 'today.json', 'today.txt', 'yaya.txt'].map(name => `ghost/master/${name}`));
   assert.deepEqual(zip.filter(x => x.name.toLowerCase().endsWith('.exe')).map(x => x.name), ['runtime/node.exe']);

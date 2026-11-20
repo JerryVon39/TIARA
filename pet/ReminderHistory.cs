@@ -58,7 +58,9 @@ namespace UkagakaBangumi
                 string row = prefix + i;
                 long at;
                 if (!long.TryParse(V(row + "_unix", ""), out at) || at <= 0) continue;
-                long fire = at - lead * 60L;
+                long fire;
+                if (I("reminder_lead") != lead || !long.TryParse(V(row + "_fire_unix", ""), out fire))
+                    fire = at - lead * 60L;
                 if (fire < from || fire > now) continue;
                 string id = V(row + "_id", "");
                 if (string.IsNullOrEmpty(id)) continue;

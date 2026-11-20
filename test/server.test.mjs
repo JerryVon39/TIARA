@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { cstParts } from '../lib/today.mjs';
+import { buildToday, cstParts } from '../lib/today.mjs';
 import { seasonOf } from '../lib/bgm.mjs';
 import http from 'node:http';
 import { once } from 'node:events';
@@ -178,7 +178,7 @@ test('已完播条目新增默认补番，旧库确认后分流并保留历史',
   const future = cstParts(new Date(Date.now() + 8 * 86400000)).date;
   const weekDay = cstParts().weekday;
   lib.watching = [
-    { id: 543360, name_cn: name, eps: 12, ep_status: 0 },
+    { id: 543360, name_cn: name, eps: 12, ep_status: 0, air_weekday: weekDay, air_time_cst: '22:30' },
     { id: 600001, name_cn: '跨季度仍在播', eps: 3, ep_status: 0, start_date: '2026-04-01', air_weekday: weekDay, air_time_cst: '23:30' },
     { id: 600002, name_cn: '有历史和排期的旧番', eps: 3, ep_status: 0, air_weekday: weekDay, air_time_cst: '23:30' },
     { id: 600005, name_cn: '明确继续追连载', eps: 3, ep_status: 0, watch_mode_manual: true },
@@ -266,6 +266,148 @@ test('已完播条目新增默认补番，旧库确认后分流并保留历史',
   const explicit = (await add(600006, { watch_mode: 'airing' })).json.detail;
   assert.equal(explicit.watch_mode, 'airing');
   assert.equal(explicit.watch_mode_manual, true);
+});
+
+test('打开面板后核对未排期条目，只把确认完播的条目自动转到补番', async t => {
+  const root = await makeFixture();
+  const lib = await readLib(root);
+  const old = { id: 543360, name_cn: '上伊那牡丹，酒醉身姿似百合花般', eps: 12, ep_status: 2,
+    watch_url: 'https://example.invalid/watch' };
+  const row = id => ({ id, eps: 12, ep_status: 0 });
+  lib.watching = [old, row(600011), row(600012), { ...row(600013), watch_mode_manual: true },
+    row(600014), { ...row(600015), schedule_manual: true }, { ...row('local-progress'), watch_mode: 'catchup' }];
+  lib.weekday = { 1: [{ id: 600014, time_cst: '23:30' }] };
+  await fs.writeFile(path.join(root, 'data/library.json'), JSON.stringify(lib));
+  await installBuildTools(root);
+  const future = cstParts(new Date(Date.now() + 86400000 * 8)).date;
+  const queried = new Set();
+  const upstream = http.createServer((req, res) => {
+    const id = Number(req.url.match(/^\/v0\/subjects\/(\d+)$/)?.[1]);
+    const date = id === 600011 ? future : '2026-04-10';
+    if (id) queried.add(id);
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(id ? { id, type: 2, name: String(id), eps: 12, date,
+      infobox: id === 600012 ? [] : [{ key: '播放结束', value: '2026年6月26日' }] } : { data: [], total: 0 }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => upstream.close());
+  const srv = await startServer(root, { BGM_BASE: 'http://127.0.0.1:' + upstream.address().port });
+  t.after(() => srv.child.kill());
+  const progress = await req(srv.port, '/api/progress', { method: 'POST', body: { id: 'local-progress', delta: 1 } });
+  assert.equal(progress.status, 200);
+  assert.equal((await req(srv.port, '/api/state')).status, 200);
+  let today;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    today = await fs.readFile(path.join(root, 'data/today.json'), 'utf8').then(JSON.parse).catch(() => null);
+    if (today?.catchup?.some(w => w.id === 543360)) break;
+    await new Promise(resolve => setTimeout(resolve, 75));
+  }
+  assert.ok(today?.catchup?.some(w => w.id === 543360));
+  const saved = await readLib(root);
+  assert.deepEqual(saved.watching.slice(0, -1), [{ ...old, watch_mode: 'catchup', auto_catchup: true }, ...lib.watching.slice(1, -1)]);
+  assert.deepEqual(saved.weekday, lib.weekday);
+  assert.deepEqual([...queried].sort(), [543360, 600011, 600012]);
+  const state = (await req(srv.port, '/api/state')).json;
+  assert.deepEqual(state.catchup_list.map(w => w.id), [543360, 'local-progress']);
+  assert.ok(!state.watching.some(w => w.id === 543360));
+  const undo = await req(srv.port, '/api/undo', { method: 'POST', body: { expected_revision: progress.json.revision } });
+  assert.equal(undo.status, 200, undo.text);
+  const restored = await readLib(root);
+  assert.equal(restored.watching[0].watch_mode, 'catchup');
+  assert.equal(restored.watching.at(-1).ep_status, 0);
+  assert.equal((await req(srv.port, '/api/stats')).json.total, 0);
+});
+
+test('季表漏页保留完整缓存，重试成功后替换', async t => {
+  const root = await makeFixture();
+  const q = '2026Q2';
+  const row = id => ({ id, type: 2, name: '季表条目 ' + id, date: '2026-04-01' });
+  const file = path.join(root, 'data', 'season', q + '.json');
+  const old = { q, total: 2, items: [row(20), row(21)], fetched_at: '2026-07-01T00:00:00Z' };
+  await fs.writeFile(file, JSON.stringify(old));
+  let fails = true;
+  const upstream = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    const offset = Number(url.searchParams.get('offset'));
+    response.setHeader('Content-Type', 'application/json');
+    if (fails && offset) response.statusCode = 503;
+    response.end(JSON.stringify({ total: 2, data: [row(30 + offset)] }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const srv = await startServer(root, { BGM_BASE: 'http://127.0.0.1:' + upstream.address().port });
+  t.after(() => srv.child.kill());
+  const refresh = () => req(srv.port, '/api/season?q=' + q + '&refresh=1');
+  const fallback = (await refresh()).json;
+  assert.equal(fallback.source, 'cache-stale');
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), old);
+  fails = false;
+  const updated = (await refresh()).json;
+  assert.equal(updated.source, 'net');
+  assert.deepEqual(updated.items.map(item => item.id), [30, 31]);
+});
+
+test('新目录可以离线读取周档和封面，已结束条目加入补番', async t => {
+  const root = await makeFixture();
+  const catalog = 'assets/season-catalog';
+  await fs.mkdir(path.join(root, catalog, 'covers'), { recursive: true });
+  await Promise.all(['2019Q4.json', '2026Q2.json', 'covers/543360.jpg'].map(rel =>
+    fs.copyFile(path.join(ROOT, catalog, rel), path.join(root, catalog, rel))));
+  const srv = await startServer(root, { BGM_PROXY: 'http://127.0.0.1:1' });
+  t.after(() => srv.child.kill());
+  const first = (await req(srv.port, '/api/season?q=2019Q4')).json;
+  assert.equal(first.source, 'builtin');
+  assert.ok(first.items.length > 50);
+  assert.equal(first.article.url, 'https://yuc.wiki/201910/');
+  const found = await req(srv.port, '/api/anime/search?local=1&q=' + encodeURIComponent('上伊那ぼたん'));
+  assert.ok(found.json.candidates.some(item => item.id === 543360 && item.season === '2026Q2'));
+  const q = '2026Q2';
+  const listing = (await req(srv.port, '/api/season?q=' + q)).json;
+  const reference = (await req(srv.port, '/api/season/reference?q=' + q + '&id=543360')).json.reference;
+  assert.equal(reference.url, 'https://yuc.wiki/202604/');
+  assert.equal(reference.review.status, 'unavailable');
+  assert.deepEqual(listing.airings[543360], { weekday: 5, time_cst: '23:00' });
+  assert.equal((await fetch('http://127.0.0.1:' + srv.port + '/cover/543360.jpg?local=1')).headers.get('content-type'), 'image/jpeg');
+  const applied = await req(srv.port, '/api/season/apply', { method: 'POST', body: { q, add: [543360], start_mode: 'head' } });
+  assert.equal(applied.json.added, 1);
+  const library = JSON.parse(await fs.readFile(path.join(root, 'data/library.json'), 'utf8'));
+  assert.equal(library.watching.find(entry => entry.id === 543360)?.watch_mode, 'catchup');
+});
+
+test('损坏事务记录保留原文件，并可启动只读面板', async t => {
+  const root = await makeFixture();
+  const journal = path.join(root, 'data', '.progress-pending.json');
+  const original = await fs.readFile(path.join(root, 'data', 'library.json'), 'utf8');
+  const damage = '{ bad history journal';
+  await fs.writeFile(journal, damage);
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  assert.equal((await req(srv.port, '/api/health')).json.recovery.code, 'progress-recovery');
+  assert.equal((await req(srv.port, '/api/state')).json.recovery.read_only, true);
+  assert.equal((await req(srv.port, '/api/backups')).status, 200);
+  assert.equal((await req(srv.port, '/api/stats')).status, 503);
+  assert.equal((await req(srv.port, '/api/progress', { method: 'POST', body: { id: '554779', delta: 1 } })).status, 503);
+  assert.equal(await fs.readFile(journal, 'utf8'), damage);
+  assert.equal(await fs.readFile(path.join(root, 'data', 'library.json'), 'utf8'), original);
+});
+
+test('日备份缺项时保留先前文件，重新运行只补齐失败项', async () => {
+  const root = await makeFixture();
+  const file = path.join(root, 'data', 'settings.json');
+  await fs.writeFile(file, '{ damaged');
+  const previous = await snapshot({ root, dir: '2026-04-01' });
+  assert.equal(previous.ok, false);
+  assert.deepEqual(previous.missing, ['settings.json']);
+  const firstLibrary = await fs.readFile(path.join(previous.dir, 'library.json'), 'utf8');
+  await fs.writeFile(file, '{"clock":"24h"}');
+  await fs.writeFile(path.join(root, 'data', 'library.json'), '{"watching":[]}');
+  const current = await snapshot({ root, dir: '2026-04-01' });
+  assert.equal(current.ok, true);
+  assert.deepEqual(current.wrote, ['settings.json']);
+  assert.equal(await fs.readFile(path.join(current.dir, 'library.json'), 'utf8'), firstLibrary);
+  assert.equal(JSON.parse(await fs.readFile(path.join(current.dir, 'settings.json'), 'utf8')).clock, '24h');
 });
 
 test('副屏看板只读，显示未来排片和下一话，忽略暂停与已看完条目', async t => {
@@ -438,6 +580,8 @@ test('Bangumi 分页第二页失败不提交半份收藏，可以取消或显式
   mode = 'failure';
   const failure = (await preview()).json;
   assert.equal(failure.sources.collections.status, 'error');
+  assert.equal(failure.sources.collections.cache_available, true);
+  assert.equal(failure.sources.collections.cache_count, 51);
   assert.equal(failure.changes.length, 0);
   const cached = (await preview({ use_cache: true })).json;
   assert.equal(cached.sources.collections.status, 'cached');
@@ -802,16 +946,19 @@ test('调档只移动一档、结束排片仍可补番、静音只取消提醒',
   const moved = await schedule('move', { at: todayAt });
   assert.equal(moved.status, 200);
   const at = new Date(todayAt + ':00+08:00').toISOString();
-  assert.deepEqual(await reminder(), { status: 'scheduled', at, moved: true });
+  const changed = { status: 'scheduled', at, planned_at: at, kind: 'airing', moved: true };
+  const desktop = async () => (await req(srv.port, '/api/schedule/desktop')).json.rows.find(row => row.id === id).reminder;
+  assert.deepEqual(await reminder(), { ...changed, desktop_online: false });
+  assert.deepEqual(await desktop(), changed);
   assert.equal((await slots())[0].time_cst, '23:45');
   assert.equal((await recurring()).time_cst, '23:30');
   assert.equal((await schedule('mute', { muted: true })).json.detail.reminder_muted, true);
-  assert.deepEqual(await reminder(), { status: 'muted' });
+  assert.deepEqual(await reminder(), { status: 'muted', planned_at: at, desktop_online: false });
   const calendar = (await req(srv.port, '/api/export')).text;
   assert.match(calendar, /T234500/);
   assert.ok(!calendar.includes('VALARM'));
   assert.equal((await schedule('end')).status, 200);
-  assert.deepEqual(await reminder(), { status: 'ended' });
+  assert.deepEqual(await reminder(), { status: 'ended', desktop_online: false });
   assert.deepEqual(await slots(), []);
   assert.ok(!(await state()).catchup.some(row => String(row.id) === id));
   assert.equal((await post('/api/progress', { id, delta: 1 })).json.ep_status, 1);
@@ -819,7 +966,8 @@ test('调档只移动一档、结束排片仍可补番、静音只取消提醒',
   assert.equal((await slots())[0].time_cst, '23:45');
   assert.equal((await post('/api/settings', { quiet_start: '23:00', quiet_end: '07:00' })).status, 200);
   assert.equal((await schedule('mute', { muted: false })).status, 200);
-  assert.deepEqual(await reminder(), { status: 'quiet', at });
+  assert.deepEqual(await reminder(), { ...changed, status: 'quiet', desktop_online: false });
+  assert.deepEqual(await desktop(), { ...changed, status: 'quiet' });
 });
 
 test('个人资料可编辑归档番，首选链接同步到桌宠并随备份保留', async t => {
@@ -1112,8 +1260,10 @@ test('逐集记账保留跳集，补齐后完结；首轮和重看可分别撤�
   const root = await makeFixture();
   const lib = await readLib(root);
   const id = String(lib.watching[0].id);
-  lib.watching[0].eps = 4;
-  lib.watching[0].watch_mode = 'catchup';
+  lib.watching = [];
+  const season = seasonOf(new Date());
+  await fs.writeFile(path.join(root, 'data/season', season + '.json'), JSON.stringify({ q: season, total: 1,
+    items: [{ id: Number(id), name: '同一部补番验收', eps: 4 }] }));
   await fs.writeFile(path.join(root, 'data/library.json'), JSON.stringify(lib));
   const srv = await startServer(root);
   t.after(() => srv.child.kill());
@@ -1130,12 +1280,26 @@ test('逐集记账保留跳集，补齐后完结；首轮和重看可分别撤�
     assert.equal(done.status, 200, done.text);
     return done.json.preview;
   }
+  const candidate = { season_q: season, catalog_id: id, name: '同一部补番验收', eps: 4, ep_status: 0, planned: true };
+  const attempts = await Promise.all([post('/api/watch/detail', candidate), post('/api/watch/detail', candidate)]);
+  assert.deepEqual(attempts.map(reply => reply.status).sort(), [201, 409]);
+  assert.equal(attempts.find(reply => reply.status === 409).json.duplicates[0].match, 'id');
+  const deferred = await detail();
+  assert.equal(deferred.state, 'planned');
+  assert.equal((await post('/api/watch/lifecycle', { id, action: 'start', mode: 'catchup',
+    expected_revision: deferred.revision })).status, 200);
   const first = await add([1, 2, 4]);
   assert.equal(first.json.ep_status, 2);
   assert.equal(first.json.watched_count, 3);
   assert.deepEqual((await detail()).episode_extras, [4]);
+  const desktop = buildToday(await readLib(root)).catchup.find(row => String(row.id) === id);
+  assert.deepEqual([desktop.ep_status, desktop.episode_extras], [2, [4]]);
   assert.equal((await add([4])).json.changed, false);
   assert.equal((await browse('catchup')).length, 1);
+  const anchored = await get('/api/history/browse?record=' + first.json.history_id + '&page=45');
+  assert.equal(anchored.located, true);
+  assert.equal(anchored.page, 1);
+  assert.equal(anchored.rows[0].history_id, first.json.history_id);
   assert.equal((await add([3])).json.ep_status, 4);
   assert.equal((await detail()).finished_at, TODAY);
   const fill = (await browse('catchup')).find(row => row.episodes_added.toString() === '3');
@@ -1154,6 +1318,9 @@ test('逐集记账保留跳集，补齐后完结；首轮和重看可分别撤�
   const before = await get('/api/watch/report?week=' + TODAY);
   assert.deepEqual(before.mode, { airing: 0, catchup: 4, rewatch: 4 });
   assert.deepEqual(before.completed.map(row => row.kind).sort(), ['catchup', 'rewatch']);
+  assert.equal(before.milestones.first_watch, TODAY);
+  assert.equal(before.milestones.first_completion.id, id);
+  assert.deepEqual(before.milestones.best_day, { date: TODAY, count: 8 });
   const record = (await browse('rewatch')).find(row => row.episodes_added.toString() === '2,4');
   assert.equal((await retract(record)).round_id, round_id);
   const restored = await detail();
@@ -1161,10 +1328,20 @@ test('逐集记账保留跳集，补齐后完结；首轮和重看可分别撤�
   assert.equal(restored.rewatches[0].ep_status, 1);
   assert.deepEqual(restored.rewatches[0].episode_extras, [3]);
   assert.equal(restored.rewatches[0].finished_at, null);
-  assert.deepEqual((await get('/api/watch/report')).mode, { airing: 0, catchup: 4, rewatch: 2 });
+  const afterRetraction = await get('/api/watch/report');
+  assert.deepEqual(afterRetraction.mode, { airing: 0, catchup: 4, rewatch: 2 });
+  assert.deepEqual(afterRetraction.milestones.best_day, { date: TODAY, count: 6 });
+  assert.equal((await get('/api/state')).catchup_week.watched, 4);
   const migration = (await get('/api/migration')).migration;
   assert.deepEqual(migration.library.watching[0].rewatches[0].episode_extras, [3]);
   assert.ok(migration.library.history_retractions.some(row => row.id === record.history_id && row.episode));
+  for (const [action, next] of [['archive', 'archived'], ['remove', 'removed'], ['restore', 'archived']]) {
+    const previous = await detail();
+    const changed = await post('/api/watch/lifecycle', { id, action, expected_revision: previous.revision });
+    assert.equal(changed.status, 200, changed.text);
+    assert.equal((await detail()).state, next);
+  }
+  assert.deepEqual((await detail()).rewatches[0].episode_extras, [3]);
 });
 
 test('移除误加条目可从原分组找回，备份仍带进度、周档和观看记录', async t => {
@@ -1249,6 +1426,26 @@ test('历史写入失败不前进，重试后可撤销并更正完结日；重�
   assert.equal((await post(rewatch, command)).status, 200);
   assert.equal((await detail()).rewatches[0].ep_status, 1);
   assert.equal((await browse()).length, 2);
+});
+
+test('恢复损坏的本机番库前按原字节留存文件', async t => {
+  const root = await makeFixture();
+  const file = path.join(root, 'data/library.json');
+  const valid = await fs.readFile(file);
+  const damaged = Buffer.concat([Buffer.from('{ "watching": '), Buffer.from([0xff, 0xfe])]);
+  await fs.writeFile(file + '.bak', valid);
+  await fs.writeFile(file, damaged);
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const restore = patch => req(srv.port, '/api/restore', { method: 'POST', body: { name: 'library.json.bak', ...patch } });
+  const preview = (await restore({ dry_run: true })).json;
+  assert.equal(preview.current_readable, false);
+  assert.equal(preview.target_root, root);
+  const saved = await restore({ expected_revision: preview.revision, backup_revision: preview.backup_revision });
+  assert.equal(saved.status, 200, saved.text);
+  assert.match(saved.json.recovery, /^data\/backups\/pre-restore-[a-f0-9]+\.raw$/);
+  assert.deepEqual(await fs.readFile(path.join(root, saved.json.recovery)), damaged);
+  assert.equal((await readLib(root)).watching.length, 1);
 });
 
 test('迁移和普通恢复预览拒绝损坏的重看轮次，保留当前番库', async t => {
@@ -1496,6 +1693,7 @@ test('迁移导出排除凭据，预览锁定源数据与目标数据，导入�
   t.after(() => srv.child.kill());
   const post = (body) => req(srv.port, '/api/migration', { method: 'POST', body });
   const initial = await req(srv.port, '/api/migration');
+  assert.match(initial.json.migration.source_version, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(initial.json.migration.settings, { clock: '24h' });
   assert.doesNotMatch(initial.text, /only-in-local-config|hidden-setting|user:pass/);
 
@@ -1508,6 +1706,9 @@ test('迁移导出排除凭据，预览锁定源数据与目标数据，导入�
   };
   const preview = async () => (await post({ preview: true, migration: data })).json;
   let result = await preview();
+  assert.equal(result.source_version, initial.json.migration.source_version);
+  assert.equal(result.target_version, result.source_version);
+  assert.equal(result.target_root, root);
   const apply = (migration = data) => post({ migration, source: result.source, target: result.target });
   assert.deepEqual(result.incoming, { watching: 1, paused: 1, archived: 1, planned: 0, history: 1 });
   assert.deepEqual(result.changes.totals, { added: 2, replaced: 1, removed: 0, kept: 0 });
@@ -1518,6 +1719,7 @@ test('迁移导出排除凭据，预览锁定源数据与目标数据，导入�
   result = await preview();
   const applied = await apply();
   assert.equal(applied.status, 200);
+  assert.deepEqual(applied.json.readback, result.incoming);
   const backup = JSON.parse(await fs.readFile(file('backups/' + applied.json.backup), 'utf8'));
   assert.deepEqual(backup.library, old);
   assert.equal((await readLib(root)).watching[0].ep_status, 4);
@@ -1611,7 +1813,8 @@ test('备份用量分别统计，日快照排除凭据且滚动保留', async t 
   await snapshot({ root, dir: '2025-12-02', keep: 1 });
   await assert.rejects(fs.stat(file('backups/2025-12-01')), { code: 'ENOENT' });
   const latest = file('backups/2025-12-02');
-  assert.deepEqual((await fs.readdir(latest)).sort(), ['history.jsonl', 'library.json', 'settings.json']);
+  assert.deepEqual((await fs.readdir(latest)).sort(), ['_snapshot.json', 'history.jsonl', 'library.json', 'settings.json']);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(latest, '_snapshot.json'), 'utf8')), { complete: true, missing: [] });
   assert.equal(JSON.parse(await fs.readFile(path.join(latest, 'settings.json'), 'utf8')).clock, '30h');
   assert.doesNotMatch(await fs.readFile(path.join(latest, 'settings.json'), 'utf8'), /legacy-settings-token/);
   const tail = (await fs.readFile(path.join(latest, 'history.jsonl'), 'utf8')).trim().split('\n');
@@ -1652,6 +1855,120 @@ test('离线封面使用缓存，单条重试失败时保留有效图片', async
   await fs.writeFile(file, '<html>Error</html>'.repeat(40));
   assert.equal((await fetch(url + '?test=damaged')).status, 404);
   assert.equal((await retry()).status, 503);
+});
+
+test('季度封面先读本机，缺图可用刚加入的季度地址补取和缓存', async t => {
+  const root = await makeFixture();
+  const imagePath = path.join(ROOT, 'assets/season-catalog/covers/543360.jpg');
+  const preload = path.join(root, 'mock-cover.cjs');
+  await fs.writeFile(preload, `
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (url, options) => {
+      if (url === 'https://lain.bgm.tv/pic/cover/l/test.jpg')
+        return Promise.resolve(new Response(require('node:fs').readFileSync(${JSON.stringify(imagePath)})));
+      return originalFetch(url, options);
+    };
+  `);
+  const srv = await startServer(root, { NODE_OPTIONS: `--require "${preload.replaceAll(path.sep, '/')}"` });
+  t.after(() => srv.child.kill());
+  const origin = 'http://127.0.0.1:' + srv.port;
+  const cover = origin + '/cover/543360.jpg';
+  assert.equal((await fetch(cover)).status, 404);
+
+  const q = '2099Q1';
+  await fs.writeFile(path.join(root, 'data/season', q + '.json'), JSON.stringify({
+    q, total: 2, items: [{ id: 543360, image: 'https://lain.bgm.tv/pic/cover/l/test.jpg' }, { id: 616453 }],
+  }));
+  assert.equal((await fetch(cover + '?local=1')).status, 404);
+  assert.equal((await fetch(cover + '?q=2099Q2')).status, 404);
+  assert.equal((await fetch(origin + '/cover/616453.jpg?q=' + q)).status, 404);
+  const response = await fetch(cover + '?q=' + q);
+  const expected = await fs.readFile(imagePath);
+  assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+  assert.deepEqual(await fs.readFile(path.join(root, 'data/covers/543360.jpg')), expected);
+  assert.equal((await fetch(cover + '?local=1')).status, 200);
+});
+
+test('启动状态含季度封面时正常返回番库并可读本地图片', async t => {
+  const root = await makeFixture();
+  const q = seasonOf(new Date());
+  const id = '554779';
+  const image = 'https://lain.bgm.tv/pic/cover/l/test.jpg';
+  await fs.writeFile(path.join(root, 'data/season', q + '.json'), JSON.stringify({
+    q, total: 1, items: [{ id, image }], fetched_at: new Date().toISOString(),
+  }));
+  await fs.mkdir(path.join(root, 'data/covers'));
+  await fs.copyFile(path.join(ROOT, 'assets/season-catalog/covers/543360.jpg'), path.join(root, 'data/covers', id + '.jpg'));
+  const srv = await startServer(root, { BGM_PROXY: 'http://127.0.0.1:1' });
+  t.after(() => srv.child.kill());
+  const state = await req(srv.port, '/api/state');
+  assert.equal(state.status, 200);
+  assert.equal(state.json.ok, true);
+  assert.equal(state.json.images[id], image);
+  assert.ok(state.json.watching.some(entry => String(entry.id) === id));
+  const cover = await fetch('http://127.0.0.1:' + srv.port + '/cover/' + id + '.jpg?local=1');
+  assert.equal(cover.headers.get('content-type'), 'image/jpeg');
+});
+
+test('季度缓存包含损坏行时，季度接口继续返回随包目录', async t => {
+  const root = await makeFixture();
+  const q = '2019Q1';
+  const catalog = path.join(root, 'assets/season-catalog');
+  await fs.mkdir(catalog, { recursive: true });
+  await fs.copyFile(path.join(ROOT, 'assets/season-catalog', q + '.json'), path.join(catalog, q + '.json'));
+  await fs.writeFile(path.join(root, 'data/season', q + '.json'), JSON.stringify({ q, total: 1, items: [null] }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const season = await req(srv.port, '/api/season?q=' + q);
+  assert.equal(season.status, 200);
+  assert.equal(season.json.source, 'builtin');
+  assert.ok(season.json.items.length);
+});
+
+test('损坏的章节缓存不会让章节清单和完播查询失效', async t => {
+  const root = await makeFixture();
+  const id = '554779';
+  const dir = path.join(root, 'cache/bgm/episodes');
+  await fs.mkdir(dir, { recursive: true });
+  const filename = path.join(dir, id + '.json');
+  await fs.writeFile(filename, JSON.stringify({ items: [null] }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const status = await req(srv.port, '/api/broadcast/status?id=' + id);
+  assert.equal(status.status, 200);
+  assert.equal(status.json.status.state, 'unknown');
+  assert.deepEqual((await req(srv.port, '/api/watch/episodes?id=' + id)).json.chapters, []);
+  const items = [{ number: 1, title: '第 1 话' }];
+  await fs.writeFile(filename, JSON.stringify({ items }));
+  assert.deepEqual((await req(srv.port, '/api/watch/episodes?id=' + id)).json.chapters, items);
+});
+
+test('同步预览拒绝异常放送表并继续利用有效缓存', async t => {
+  const root = await makeFixture();
+  let calendar = [null];
+  const upstream = http.createServer((_, res) => res.end(JSON.stringify(calendar)));
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const srv = await startServer(root, { BGM_BASE: 'http://127.0.0.1:' + upstream.address().port });
+  t.after(() => srv.child.kill());
+  const preview = () => req(srv.port, '/api/sync', { method: 'POST',
+    body: { dry_run: true, mode: 'calendar', use_cache: true } });
+  const failed = await preview();
+  assert.equal(failed.status, 502);
+  assert.equal(failed.json.sources.calendar.cache_available, false);
+  calendar = [{ weekday: { id: 1 }, items: [{ id: 554779 }] }];
+  assert.equal((await preview()).json.sources.calendar.status, 'ok');
+  calendar = [{ items: [null] }];
+  assert.equal((await preview()).json.sources.calendar.status, 'cached');
+  const dir = path.join(root, 'cache/bgm');
+  const name = (await fs.readdir(dir)).find(file => /^sync-.*-calendar\.json$/.test(file));
+  assert.ok(name);
+  await fs.writeFile(path.join(dir, name), JSON.stringify({ at: new Date().toISOString(), data: [null] }));
+  const invalidCache = await preview();
+  assert.equal(invalidCache.status, 502);
+  assert.equal(invalidCache.json.sources.calendar.cache_available, false);
 });
 
 test('旧番库 CSV 离线预览，按编号和年份识别重复，确认只新增所选条目', async t => {

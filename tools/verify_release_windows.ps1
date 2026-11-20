@@ -134,6 +134,12 @@ $env:BGM_BASE = 'http://127.0.0.1:1'
 $env:BGM_BROADCAST_URL = 'http://127.0.0.1:1'
 $env:BGM_PROXY = ''
 $token = 'tiara-release-check-token'
+$portableChecksPassed = $false
+function Remove-SourceFixture {
+    $resolved = (Resolve-Path -LiteralPath $work).Path
+    if ($resolved -ne $work -or (Split-Path -Parent $resolved) -ne $tempRoot) { throw 'Unexpected test workspace path.' }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
 try {
     if ($SourceData) {
         $sourceDir = (Resolve-Path -LiteralPath $SourceData).Path
@@ -168,6 +174,34 @@ try {
         $before = (Invoke-RestMethod "$origin/api/migration").migration
         foreach ($state in 'watching', 'paused', 'archived', 'planned', 'dropped', 'removed') {
             if (@($before.library.$state | Where-Object { $_ }).Count) { throw 'Public portable library is not empty.' }
+        }
+        if ([version]$version -ge [version]'0.60.0') {
+            $dir = Join-Path $current 'assets/season-catalog'
+            $catalog = Get-Content -LiteralPath (Join-Path $dir 'index.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $seasons = Invoke-RestMethod "$origin/api/season?list=1"
+            $firstQuarter = if ([version]$version -ge [version]'0.67.0') { '2019Q1' } else { '2019Q4' }
+            if ($seasons.seasons -notcontains $seasons.current -or $seasons.seasons -notcontains $firstQuarter) {
+                throw 'The portable catalog is missing the first or current quarter.'
+            }
+            $bundledQuarters = @($catalog.seasons.PSObject.Properties.Name)
+            foreach ($q in $bundledQuarters) {
+                $table = Invoke-RestMethod "$origin/api/season?q=$q"
+                if ($table.source -ne 'builtin' -or $table.total -ne $catalog.seasons.$q -or $table.items.Count -ne $table.total) {
+                    throw "Offline catalog or original schedule does not match the portable snapshot for $q."
+                }
+                if ($q -in '2019Q4', $seasons.current -and !$table.airings.PSObject.Properties.Count) {
+                    throw "The portable snapshot does not expose original airings for $q."
+                }
+                $sample = $table.items | Where-Object {
+                    $_.id -match '^\d{1,10}$' -and (Test-Path -LiteralPath (Join-Path $dir "covers/$($_.id).jpg") -PathType Leaf)
+                } | Select-Object -First 1
+                if (!$sample) { throw "No bundled cover for $q." }
+                $cover = Invoke-WebRequest "$origin/cover/$($sample.id).jpg?local=1" -UseBasicParsing
+                if ($cover.Headers.'Content-Type' -notcontains 'image/jpeg' -or $cover.RawContentLength -lt 100) {
+                    throw "A bundled cover could not be read offline for $q."
+                }
+            }
+            Write-Output "Offline catalog: all $($bundledQuarters.Count) bundled seasons and one JPEG per season passed."
         }
         $preview = Post-Json $origin '/api/migration' @{ migration = $export; preview = $true }
         if (!$preview.ok) { throw 'Migration preview failed.' }
@@ -209,16 +243,13 @@ try {
         if ((Get-FileHash -LiteralPath $file).Hash -ne $sourceHashes[$file]) { throw 'An original source file changed.' }
     }
     Write-Output "Portable: $oldVersion to $version migration, bundled runtime, progress and restart passed."
+    $portableChecksPassed = $true
 } finally {
     $env:Path = $savedPath
     $env:BGM_BASE = $savedBase
     $env:BGM_BROADCAST_URL = $savedBroadcast
     $env:BGM_PROXY = $savedProxy
-    if ($SourceData) {
-        $resolved = (Resolve-Path -LiteralPath $work).Path
-        if ($resolved -ne $work -or (Split-Path -Parent $resolved) -ne $tempRoot) { throw 'Unexpected test workspace path.' }
-        Remove-Item -LiteralPath $resolved -Recurse -Force
-    }
+    if ($SourceData -and (!$portableChecksPassed -or $PortableOnly -or !$SspRoot)) { Remove-SourceFixture }
 }
 
 if ($PortableOnly) { return }
@@ -272,4 +303,5 @@ try {
         (Split-Path -Leaf $resolved.Path) -eq $runName) {
         Remove-Item -LiteralPath $resolved.Path -Recurse -Force -ErrorAction SilentlyContinue
     }
+    if ($SourceData) { Remove-SourceFixture }
 }

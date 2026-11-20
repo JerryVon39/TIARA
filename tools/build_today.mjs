@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { buildToday, timeline, summarize, cstParts, reminders, timeOfDay, actualSchedule, scheduledWeek } from '../lib/today.mjs';
 import { remainingEpisodes } from '../lib/watch-start.mjs';
 import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
-import { catchupReminders } from '../lib/watch-schedule.mjs';
+import { catchupReminders, reminderLead, reminderTiming } from '../lib/watch-schedule.mjs';
 import { remindStamp } from '../lib/reminder-snooze.mjs';
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,6 +50,7 @@ async function readSettings() {
     const s = JSON.parse(await fs.readFile(path.join(ROOT, 'data', 'settings.json'), 'utf8'));
     return {
       clock: s.clock === '24h' || s.clock === '30h' ? s.clock : DEFAULT_SETTINGS.clock,
+      reminder_lead: reminderLead(s),
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -83,6 +84,11 @@ async function main() {
   // ---------- 1. 变量表 ----------
   const L = [];
   const put = (k, v) => L.push(`${k}=${v ?? ''}`);
+  function putReminderTimes(key, at) {
+    put(key + '_unix', at);
+    const fire = Number.isFinite(at) ? Date.parse(reminderTiming(at * 1000, settings).at) / 1000 : '';
+    put(key + '_fire_unix', fire);
+  }
 
   L.push('# 番组管家 · 今日数据（由 tools/build_today.mjs 生成，勿手改）');
   put('generated_at', now.toISOString());
@@ -95,6 +101,7 @@ async function main() {
   put('user', lib.user?.name ?? '');
   put('nickname', nick);
   put('clock', settings.clock);
+  put('reminder_lead', reminderLead(settings));
   put('count', t.today.length);
   put('side_count', (t.side || []).length);
   put('has_today', t.today.length > 0 ? 1 : 0);
@@ -114,7 +121,7 @@ async function main() {
     put(`show${n}_time`, s.time_cst ?? '');
     put(`show${n}_time_disp`, s.time_disp ?? s.time_cst ?? '');
     put(`show${n}_wd_disp`, s.weekday_disp ?? t.weekday);
-    put(`show${n}_unix`, tsOf(s.time_cst));
+    putReminderTimes(`show${n}`, tsOf(s.time_cst));
     put(`show${n}_stamp`, stamps.get(String(s.id)) || '');
     put(`show${n}_aired`, s.aired ? 1 : 0);
     put(`show${n}_eps`, s.watched_eps != null ? `${s.watched_eps}/${s.total_eps}` : '');
@@ -128,7 +135,7 @@ async function main() {
     const n = i + 1;
     put(`personal${n}_id`, slot.id);
     put(`personal${n}_name`, slot.name);
-    put(`personal${n}_unix`, Math.floor(Date.parse(slot.at) / 1000));
+    putReminderTimes(`personal${n}`, Math.floor(Date.parse(slot.at) / 1000));
     put(`personal${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`personal${n}_time`, slot.time);
   });
@@ -156,7 +163,7 @@ async function main() {
     const n = i + 1;
     put(`previous${n}_id`, slot.id);
     put(`previous${n}_name`, slot.name);
-    put(`previous${n}_unix`, slot.at);
+    putReminderTimes(`previous${n}`, slot.at);
     put(`previous${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`previous${n}_personal`, slot.personal ? 1 : 0);
   });
@@ -178,7 +185,7 @@ async function main() {
     const n = i + 1;
     put(`next${n}_id`, slot.id);
     put(`next${n}_name`, slot.name);
-    put(`next${n}_unix`, slot.at);
+    putReminderTimes(`next${n}`, slot.at);
     put(`next${n}_time`, slot.time);
     put(`next${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`next${n}_personal`, slot.personal ? 1 : 0);
