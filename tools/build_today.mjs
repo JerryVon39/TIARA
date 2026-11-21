@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { buildToday, timeline, summarize, cstParts, reminders, timeOfDay, actualSchedule, scheduledWeek } from '../lib/today.mjs';
 import { remainingEpisodes } from '../lib/watch-start.mjs';
 import { writeFileAtomic, writeJsonAtomic } from '../lib/atomic.mjs';
-import { catchupReminders, reminderLead, reminderTiming } from '../lib/watch-schedule.mjs';
+import { catchupReminders, reminderLead, reminderOverride, reminderTiming } from '../lib/watch-schedule.mjs';
 import { remindStamp } from '../lib/reminder-snooze.mjs';
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -62,6 +62,7 @@ async function main() {
   const stored = JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, ''));
   const lib = actualSchedule(stored);
   const stamps = new Map((stored.watching || []).map(w => [String(w.id), remindStamp(stored, w)]));
+  const tracked = new Map((stored.watching || []).map(w => [String(w.id), w]));
   const settings = await readSettings();
 
   const now = dateArg ? dateFromArg(dateArg) : new Date();
@@ -84,9 +85,13 @@ async function main() {
   // ---------- 1. 变量表 ----------
   const L = [];
   const put = (k, v) => L.push(`${k}=${v ?? ''}`);
-  function putReminderTimes(key, at) {
+  function putReminderTimes(key, at, id) {
+    const entry = tracked.get(String(id));
+    const start = Date.parse(entry?.start_date + 'T00:00:00+08:00');
+    if (entry?.watch_mode !== 'catchup' && at * 1000 < start) at = '';
     put(key + '_unix', at);
-    const fire = Number.isFinite(at) ? Date.parse(reminderTiming(at * 1000, settings).at) / 1000 : '';
+    put(key + '_lead', reminderOverride(entry?.reminder_lead));
+    const fire = Number.isFinite(at) ? Date.parse(reminderTiming(at * 1000, settings, reminderLead(settings, entry)).at) / 1000 : '';
     put(key + '_fire_unix', fire);
   }
 
@@ -121,7 +126,7 @@ async function main() {
     put(`show${n}_time`, s.time_cst ?? '');
     put(`show${n}_time_disp`, s.time_disp ?? s.time_cst ?? '');
     put(`show${n}_wd_disp`, s.weekday_disp ?? t.weekday);
-    putReminderTimes(`show${n}`, tsOf(s.time_cst));
+    putReminderTimes(`show${n}`, tsOf(s.time_cst), s.id);
     put(`show${n}_stamp`, stamps.get(String(s.id)) || '');
     put(`show${n}_aired`, s.aired ? 1 : 0);
     put(`show${n}_eps`, s.watched_eps != null ? `${s.watched_eps}/${s.total_eps}` : '');
@@ -135,14 +140,13 @@ async function main() {
     const n = i + 1;
     put(`personal${n}_id`, slot.id);
     put(`personal${n}_name`, slot.name);
-    putReminderTimes(`personal${n}`, Math.floor(Date.parse(slot.at) / 1000));
+    putReminderTimes(`personal${n}`, Math.floor(Date.parse(slot.at) / 1000), slot.id);
     put(`personal${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`personal${n}_time`, slot.time);
   });
   // The desktop recovery window can reach into yesterday after a Beijing midnight.
   const previous = new Date(+midnight - 86400000);
   const previousDay = scheduledWeek(lib, previous)[0];
-  const tracked = new Map(lib.watching.map(w => [String(w.id), w]));
   function watchedOnPreviousDay(id) {
     const w = tracked.get(String(id));
     return w && (!w.track_from || w.track_from <= previousDay.date) ? w : null;
@@ -163,7 +167,7 @@ async function main() {
     const n = i + 1;
     put(`previous${n}_id`, slot.id);
     put(`previous${n}_name`, slot.name);
-    putReminderTimes(`previous${n}`, slot.at);
+    putReminderTimes(`previous${n}`, slot.at, slot.id);
     put(`previous${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`previous${n}_personal`, slot.personal ? 1 : 0);
   });
@@ -185,7 +189,7 @@ async function main() {
     const n = i + 1;
     put(`next${n}_id`, slot.id);
     put(`next${n}_name`, slot.name);
-    putReminderTimes(`next${n}`, slot.at);
+    putReminderTimes(`next${n}`, slot.at, slot.id);
     put(`next${n}_time`, slot.time);
     put(`next${n}_stamp`, stamps.get(String(slot.id)) || '');
     put(`next${n}_personal`, slot.personal ? 1 : 0);

@@ -16,6 +16,7 @@ data/history-????.jsonl
 data/.progress-pending.json
 data/reminder-history.json
 data/reminder-snoozes.json
+data/reminder-actions.json
 ghost/master/today.txt
 ghost/master/*.nar
 小春.nar

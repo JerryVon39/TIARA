@@ -36,6 +36,7 @@ const SLOTS = [
   ['surprise', 3],
   ['sleepy', 4],
   ['think', 5],
+  ['bashful', 6],
 ];
 
 const argv = process.argv.slice(2);

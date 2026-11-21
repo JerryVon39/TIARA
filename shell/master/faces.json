@@ -7,14 +7,15 @@
     { "name": "face", "rect": [96, 92, 192, 96] },
     { "name": "body", "rect": [36, 204, 312, 372] }
   ],
-  "mouth": { "src": "talk.png", "interval": "talk" },
+  "mouth": { "src": "talk.png", "interval": "talk", "rect": [177, 163, 32, 22] },
   "faces": {
     "normal": { "base": "surface0.png" },
     "happy": { "base": "surface1.png" },
     "sad": { "base": "surface2.png" },
     "surprise": { "base": "surface3.png" },
-    "sleepy": { "base": "surface2.png", "fallback": true },
-    "think": { "base": "surface0.png", "fallback": true }
+    "sleepy": { "base": "surface4.png" },
+    "think": { "base": "surface5.png" },
+    "bashful": { "base": "surface6.png" }
   },
   "aliases": {
     "normal": "normal",
@@ -22,6 +23,7 @@
     "sad": "sad",
     "surprise": "surprise",
     "sleepy": "sleepy",
-    "think": "think"
+    "think": "think",
+    "bashful": "bashful"
   }
 }

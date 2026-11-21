@@ -55,6 +55,13 @@ export function checkFaces(manPath = MAN, dir = DIR) {
     for (const [i, ov] of (def.overlay || []).entries()) checkPng(ov && ov.src, `faces.${name}.overlay[${i}]`);
   }
   if (man.mouth && man.mouth.src) checkPng(man.mouth.src, 'mouth');
+  if (man.mouth?.rect !== undefined) {
+    const rect = man.mouth.rect;
+    if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(Number.isFinite) ||
+        rect[0] < 0 || rect[1] < 0 || rect[2] <= 0 || rect[3] <= 0 ||
+        rect[0] + rect[2] > cw || rect[1] + rect[3] > ch)
+      res.errors.push('mouth.rect 必须是落在画布内的口型区域');
+  }
 
   for (const [i, r] of (man.regions || []).entries()) {
     res.regions++;

@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildToday, cstParts } from '../lib/today.mjs';
 import { seasonOf } from '../lib/bgm.mjs';
+import { remindStamp } from '../lib/reminder-snooze.mjs';
 import http from 'node:http';
 import { once } from 'node:events';
 import { panelId, probePanel } from '../lib/panel-instance.mjs';
@@ -601,13 +602,15 @@ test('追平保留排片与提醒，已看完退出，撤销或同步新增集�
   const root = await makeFixture();
   await installBuildTools(root);
   const id = '554779';
-  const day = cstParts(new Date(Date.now() + 86400000)).weekday;
+  const tomorrow = new Date(Date.now() + 86400000);
+  const day = cstParts(tomorrow).weekday;
+  const firstAired = cstParts(new Date(+tomorrow - 11 * 7 * 86400000)).date;
   const url = 'https://example.com/watch';
   const library = await readLib(root);
-  Object.assign(library.watching[0], { ep_status: 11, air_weekday: day, watch_url: url });
+  Object.assign(library.watching[0], { ep_status: 11, air_weekday: day, start_date: firstAired, watch_url: url });
   library.paused = [{ ...library.watching[0], id: '554780', ep_status: 12 }];
   library.archived = [{ ...library.watching[0], id: '554781', ep_status: 12 }];
-  library.weekday = { [day]: [{ id, name_cn: '完结验收番', time_cst: '23:00', ep_expected: 12 }] };
+  library.weekday = { [day]: [{ id, name_cn: '完结验收番', time_cst: '23:00' }] };
   await fs.writeFile(path.join(root, 'data/library.json'), JSON.stringify(library));
   await fs.writeFile(path.join(root, 'data/bgm.json'), JSON.stringify({ proxy: 'http://127.0.0.1:1' }));
   const upstream = http.createServer((req, res) => {
@@ -760,7 +763,7 @@ test('提醒记录区分通知请求和已确认操作，只有仍在番库的�
   const at = Math.floor(Date.now() / 1000);
   const airing = { key: 'aired|554779|' + at, kind: 'airing', watch_id: '554779', name: '学生会也有洞！',
     status: 'requested', bubble: true, recovered: true, scheduled_at: at - 70, recorded_at: at - 40,
-    action: 'snoozed', action_at: at - 30, snoozed_until: at + 870 };
+    reminder_at: at - 130, episode: 4, action: 'snoozed', action_at: at - 30, snoozed_until: at + 870 };
   const snoozed = { key: 'snooze|554779|' + at, kind: 'snooze', watch_id: '554779', name: airing.name,
     status: 'quiet', scheduled_at: at, recorded_at: at, bubble: false };
   const testRow = { key: 'test|abc', kind: 'test', name: '测试提醒', status: 'requested', recorded_at: at };
@@ -768,13 +771,110 @@ test('提醒记录区分通知请求和已确认操作，只有仍在番库的�
   await fs.writeFile(path.join(root, 'data/reminder-history.json'), JSON.stringify([
     testRow, snoozed, airing, deleted, null, { key: 'corrupt', recorded_at: 'unknown' },
   ]));
+  await fs.writeFile(path.join(root, 'data/state.json'), JSON.stringify({
+    quiet_until: at + 120, reminder_tray_only: true, pending_reminders: [{ Name: '排队样例' }],
+  }));
   const result = (await req(srv.port, url)).json;
   assert.deepEqual(result.events, [
     { ...testRow, can_open: false }, { ...snoozed, can_open: true }, { ...airing, can_open: true }, { ...deleted, can_open: false },
   ]);
+  assert.equal(result.mode.quiet_until, at + 120);
+  assert.equal(result.mode.tray_only, true);
+  assert.equal(result.mode.queued, 1);
+  assert.doesNotMatch(JSON.stringify(result), /排队样例/);
   assert.equal((await req(srv.port, url, { headers: { Origin: 'https://example.com' } })).status, 403);
   assert.equal((await req(srv.port, url, { method: 'POST', body: {} })).status, 405);
   assert.doesNotMatch((await req(srv.port, '/api/migration')).text, /snoozed_until|test\|abc/);
+});
+
+test('提醒中心逐部处理并保留历史，隐藏改期、过期和已确认的提醒', async t => {
+  const root = await makeFixture();
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const now = Math.floor(Date.now() / 1000);
+  const file = path.join(root, 'data/library.json');
+  const lib = JSON.parse(await fs.readFile(file));
+  lib.weekday[1][0].time_cst = '23:00';
+  lib.watching.push({ id: 'local-2', name: '第二部番', watch_url: 'https://example.invalid/watch',
+    watch_mode: 'catchup', catchup_slot: { day: 1, time: '21:00' }, eps: 12 });
+  await fs.writeFile(file, JSON.stringify(lib));
+  const event = (watch, key, kind, patch = {}) => ({
+    key, kind, watch_id: watch.id, name: watch.name_cn || watch.name, status: 'bubble',
+    scheduled_at: now - 60, reminder_at: now - 60, recorded_at: now - 60, source_stamp: remindStamp(lib, watch), ...patch,
+  });
+  const [a, b] = lib.watching;
+  await fs.writeFile(path.join(root, 'data/reminder-history.json'), JSON.stringify([
+    event(a, 'first', 'airing'), event(b, 'second', 'catchup'),
+    event(a, 'expired', 'airing', { reminder_at: now - 21601 }),
+    event(b, 'old-slot', 'catchup', { source_stamp: 'a'.repeat(24) }),
+    event(a, 'handled', 'airing', { action: 'watch_clicked', action_at: now - 10 }),
+  ]));
+  await fs.writeFile(path.join(root, 'data/state.json'), JSON.stringify({
+    pending_reminders: [{ Name: '等候提示', FireAt: now - 5 }],
+  }));
+  const load = async (query = '') => (await req(srv.port, '/api/reminder/history' + query)).json;
+  const ack = key => req(srv.port, '/api/reminder/acknowledge', { method: 'POST', body: { key, action: 'acknowledged' } });
+  const initial = await load();
+  assert.deepEqual(initial.pending.map(row => row.key), ['first', 'second']);
+  assert.equal(initial.pending[1].watch_url, 'https://example.invalid/watch');
+  assert.deepEqual(initial.queued, [{ name: '等候提示', reminder_at: now - 5 }]);
+  assert.equal((await ack('old-slot')).status, 409);
+  assert.equal((await ack('first')).status, 200);
+  assert.equal((await ack('first')).status, 200);
+  const staleSnooze = await req(srv.port, '/api/reminder/snoozes', { method: 'POST', body: {
+    action: 'create', event_key: 'first', minutes: 15, items: [ { id: a.id, kind: 'airing',
+      slot_at: now - 60, stamp: remindStamp(lib, a) } ],
+  } });
+  assert.equal(staleSnooze.status, 409);
+  assert.match(staleSnooze.json.error, /这条提醒已处理/);
+  const staleMark = await req(srv.port, '/api/progress', { method: 'POST',
+    body: { id: a.id, delta: 1, reminder_event: 'first' } });
+  assert.equal(staleMark.status, 409);
+  assert.deepEqual((await load()).pending.map(row => row.key), ['second']);
+  const history = await load('?watch=' + a.id);
+  assert.equal(history.events.length, 3);
+  assert.equal(history.events[0].action, 'acknowledged');
+  assert.deepEqual(history.pending, []);
+  const stopped = once(srv.child, 'exit');
+  srv.child.kill();
+  await stopped;
+  await fs.rm(path.join(root, 'cache/panel_port.txt'), { force: true });
+  const next = await startServer(root);
+  t.after(() => next.child.kill());
+  assert.deepEqual((await req(next.port, '/api/reminder/history')).json.pending.map(row => row.key), ['second']);
+});
+
+test('单番提醒预览与保存使用同一提前量，覆盖或还原全局都保留原稍后时刻', async t => {
+  const root = await makeFixture();
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = (url, body) => req(srv.port, url, { method: 'POST', body });
+  const at = Math.floor(Date.now() / 60000) * 60 + 35 * 60;
+  const slot = cstParts(new Date(at * 1000));
+  const saved = await post('/api/watch/detail', { name: '可覆盖的补番', ep_status: 0, eps: 12, watch_mode: 'catchup',
+    catchup_slot: { day: slot.weekday, time: [slot.hour, slot.minute].map(x => String(x).padStart(2, '0')).join(':') } });
+  const { id, revision } = saved.json.detail;
+  const detail = async () => (await req(srv.port, '/api/watch/detail?id=' + id)).json;
+  const draft = await post('/api/reminder/preview', { id, settings: { reminder_lead: 30 } });
+  assert.equal(draft.json.preview.next.at, new Date((at - 1800) * 1000).toISOString());
+  assert.equal(draft.json.preview.inherited, true);
+  assert.equal((await detail()).reminder_preview.lead, 0);
+  assert.equal((await post('/api/reminder/preview', { id, settings: { quiet_work_start: '22:00' } })).status, 400);
+  const lib = await readLib(root);
+  const before = await post('/api/reminder/snoozes', { action: 'create', minutes: 15, items: [{ id,
+    kind: 'catchup', slot_at: at, stamp: remindStamp(lib, lib.watching.find(w => w.id === id)) }] });
+  assert.equal(before.status, 200);
+  const newRule = await post('/api/reminder/watch', { id, lead: 15, muted: false, expected_revision: revision });
+  assert.equal(newRule.status, 200);
+  assert.equal((await detail()).reminder_preview.lead, 15);
+  assert.equal((await detail()).reminder_preview.next.kind, 'snooze');
+  assert.equal((await post('/api/reminder/watch', { id, lead: 0, muted: false, expected_revision: revision })).status, 409);
+  const inherit = await post('/api/reminder/watch', { id, lead: null, muted: false, expected_revision: newRule.json.detail.revision });
+  assert.equal(inherit.json.detail.reminder_lead, null);
+  assert.deepEqual((await req(srv.port, '/api/reminder/snoozes')).json.pending, before.json.pending);
+  const muted = await post('/api/reminder/preview', { id, watch: { lead: 0, muted: true } });
+  assert.equal(muted.json.preview.reason, 'muted');
+  assert.equal((await detail()).detail.reminder_muted, false);
 });
 
 async function req(port, pathname, { method = 'GET', body, headers = {} } = {}) {

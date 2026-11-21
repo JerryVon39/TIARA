@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seasonOf } from '../lib/bgm.mjs';
 import { cstParts } from '../lib/today.mjs';
+import { remindStamp } from '../lib/reminder-snooze.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
@@ -203,6 +204,7 @@ async function main() {
 
   // 全程收集页面报错：任何一条未捕获异常 / console.error 都算体检不合格
   const problems = [];
+  let expectedSnoozeConflict = false;
   sock.addEventListener('message', (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
@@ -216,6 +218,8 @@ async function main() {
       // 机器上的系统代理挂了会连本地资源都报 ERR_PROXY_CONNECTION_FAILED，
       // 那是环境噪声，不是面板的 bug。
       if (/ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_INTERNET_DISCONNECTED/.test(text)) return;
+      if (expectedSnoozeConflict && msg.params.entry.source === 'network' && /\b409\b/.test(text) &&
+          msg.params.entry.url === origin + '/api/reminder/snoozes') return;
       if (msg.params.entry.source === 'network' && !new RegExp('127\\.0\\.0\\.1:' + APP_PORT).test(text)) return;
       problems.push('log: ' + text);
     }
@@ -577,7 +581,8 @@ async function main() {
   await openDetail('continue', '900000001');
   const quietOk = await evaluate(`(function() {
     var summary = document.querySelector('#watchSummary');
-    return summary.querySelector('time')?.textContent.endsWith('22:05') && summary.textContent.includes('免打扰，本次不通知');
+    return Boolean(summary && !summary.querySelector('time') && summary.textContent.includes('22:05 跳过') &&
+      summary.textContent.includes('免打扰时段'));
   })()`);
   await closeDetail();
   const detailChecks = { summaryOk, detailFocus, timesOk, detailNarrow, invalidOpened, updatedTimes, linkFocus, catchupTimes, quietSaved, quietOk };
@@ -639,7 +644,7 @@ async function main() {
     await waitFor(() => evaluate(`document.querySelector('#dlgTitle')?.textContent === ${JSON.stringify(title)}`), '设置入口 ' + title);
     await closeDialog();
   }
-  const simpleHeader = await evaluate(`[...document.querySelectorAll('#panelHeader .tools button')].map(button => button.textContent).join('|') === '新增|设置' &&
+  const simpleHeader = await evaluate(`[...document.querySelectorAll('#panelHeader .tools button')].map(button => button.textContent).join('|') === '新增|提醒中心|设置' &&
     !document.querySelector('#panelFooter button')`);
   const navChecks = { compositionPreserved, listOnly, searchFocus, restored, seasonPreserved, seasonRestored, simpleHeader };
   const okNavigation = Object.values(navChecks).every(Boolean);
@@ -785,6 +790,128 @@ async function main() {
   await waitFor(() => evaluate("!!document.querySelector('#schedule-view-today[aria-pressed=true]')"), '托盘直达入口按查询参数打开同一排片视图');
   await send('Page.navigate', { url: origin + '/?tab=library&report=1' });
   await waitFor(() => evaluate("document.querySelector('#weekReportBody')?.textContent.includes('天记录观看')"), '桌宠周报直达本地观看周报');
+
+  const snoozeAt = Math.floor(Date.now() / 60000) * 60;
+  const slot = cstParts(new Date(snoozeAt * 1000));
+  const writeApi = async (route, input) => {
+    const response = await fetch(origin + route, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || 'HTTP ' + response.status);
+    return value;
+  };
+  const snoozeFixture = await writeApi('/api/watch/detail', {
+    name: '验收用稍后提醒', eps: 12, ep_status: 1, watch_mode: 'catchup',
+    catchup_slot: { day: slot.weekday, time: [slot.hour, slot.minute].map(i => String(i).padStart(2, '0')).join(':') },
+  });
+  const snoozeLib = JSON.parse(fs.readFileSync(path.join(fixture, 'data/library.json'), 'utf8'));
+  const snoozeEntry = snoozeLib.watching.find(w => String(w.id) === String(snoozeFixture.detail.id));
+  const queuePath = path.join(fixture, 'data/reminder-snoozes.json');
+  fs.writeFileSync(path.join(fixture, 'data/reminder-history.json'), JSON.stringify([{
+    key: 'ui-snooze-check', name: snoozeFixture.detail.name, watch_id: String(snoozeEntry.id), kind: 'catchup',
+    scheduled_at: snoozeAt, recorded_at: snoozeAt, status: 'requested', source_stamp: remindStamp(snoozeLib, snoozeEntry),
+  }]));
+  await send('Page.navigate', { url: origin + '/?reminders=1' });
+  await waitFor(() => evaluate("!!document.querySelector('[data-snooze-event]')"), '首次稍后提醒按钮');
+  await evaluate("document.querySelector('[data-snooze-event]').click()");
+  await waitFor(() => evaluate("document.querySelector('#snoozeRows')?.textContent.includes('验收用稍后提醒')"), '网页稍后提醒保存后显示待处理');
+  const pendingSnoozes = JSON.parse(fs.readFileSync(queuePath, 'utf8'));
+  if (pendingSnoozes.length !== 1) throw new Error('首次网页稍后提醒未生成唯一记录');
+  await send('Page.navigate', { url: origin + '/?reminders=1' });
+  await waitFor(() => evaluate("document.querySelector('.reminder-history')?.textContent.includes('稍后提醒已安排') && !document.querySelector('[data-snooze-event]')"), '已安排条目不再提供重复按钮');
+
+  // 先还原一个尚未提交的页面，再让另一个客户端完成提醒，复现过期页面。
+  fs.writeFileSync(queuePath, '[]');
+  await send('Page.navigate', { url: origin + '/?reminders=1' });
+  await waitFor(() => evaluate("!!document.querySelector('[data-snooze-event]')"), '过期页面保留原操作按钮');
+  pendingSnoozes[0].due_at = Math.floor(Date.now() / 1000) - 1;
+  fs.writeFileSync(queuePath, JSON.stringify(pendingSnoozes));
+  const claim = await writeApi('/api/reminder/snoozes', { action: 'claim' });
+  if (claim.claimed.length !== 1) throw new Error('完成稍后提醒前未领取');
+  await writeApi('/api/reminder/snoozes', { action: 'ack', items: claim.claimed });
+  expectedSnoozeConflict = true;
+  await evaluate("document.querySelector('[data-snooze-event]').click()");
+  await waitFor(() => evaluate(`document.querySelector('[data-snooze-event][disabled]')?.textContent.includes('已处理') &&
+    !document.querySelector('#snoozeRows')`), '过期页面重复提交停在原记录并说明原因');
+  await evaluate("document.querySelector('#refreshReminderHistory').click()");
+  await waitFor(() => evaluate("document.querySelector('.reminder-history')?.textContent.includes('稍后提醒已处理') && !document.querySelector('[data-snooze-event]')"), '刷新后显示已处理并移除旧按钮');
+  expectedSnoozeConflict = false;
+  console.log('PASS 网页稍后提醒首次保存、处理后重复提交和刷新状态');
+
+  const secondFixture = await writeApi('/api/watch/detail', {
+    name: '验收用第二条提醒', eps: 10, ep_status: 2, watch_mode: 'catchup',
+    catchup_slot: { day: slot.weekday, time: [slot.hour, slot.minute].map(i => String(i).padStart(2, '0')).join(':') },
+  });
+  const latest = JSON.parse(fs.readFileSync(path.join(fixture, 'data/library.json'), 'utf8'));
+  const secondEntry = latest.watching.find(w => String(w.id) === String(secondFixture.detail.id));
+  const reminderHistory = path.join(fixture, 'data/reminder-history.json');
+  const currentEvents = JSON.parse(fs.readFileSync(reminderHistory, 'utf8'));
+  currentEvents.push({ ...currentEvents[0], key: 'ui-center-second', name: secondFixture.detail.name,
+    watch_id: String(secondEntry.id), episode: 3, source_stamp: remindStamp(latest, secondEntry) });
+  fs.writeFileSync(reminderHistory, JSON.stringify(currentEvents));
+  fs.writeFileSync(queuePath, '[]');
+  await send('Page.navigate', { url: origin + '/' });
+  await waitFor(() => evaluate("!!document.querySelector('#reminderCenter')"), '网页提醒中心入口');
+  await evaluate("document.querySelector('#reminderCenter').click()");
+  await waitFor(() => evaluate(`document.querySelector('[data-reminder-tab="pending"]')?.getAttribute('aria-pressed') === 'true' &&
+    document.querySelectorAll('[data-reminder-row]').length === 2`), '提醒中心逐部列出待处理');
+  await evaluate(`document.querySelector('[data-reminder-row="1"] [data-reminder-action="acknowledged"]').click()`);
+  await waitFor(() => evaluate(`document.querySelectorAll('[data-reminder-row]').length === 1 &&
+    document.querySelector('#reminderPane').textContent.includes('验收用稍后提醒')`), '确认一部不影响另一部');
+  await evaluate(`document.querySelector('[data-reminder-row] details').open = true;
+    document.querySelector('[data-minutes="30"]').click();`);
+  await waitFor(() => evaluate(`document.querySelector('[data-reminder-tab="snoozes"]')?.getAttribute('aria-pressed') === 'true' &&
+    !!document.querySelector('[data-snooze-action="undo_create"]')`), '稍后页可撤销新设置');
+  const [rescheduled] = JSON.parse(fs.readFileSync(queuePath, 'utf8'));
+  if (Math.abs(rescheduled.due_at - Math.floor(Date.now() / 1000) - 1800) > 10)
+    throw new Error('提醒中心未按选择的 30 分钟延后');
+  await evaluate(`document.querySelector('[data-snooze-action="undo_create"]').click();`);
+  await waitFor(() => evaluate(`document.querySelector('#reminderFeedback')?.textContent === '已撤销延后' &&
+    !!document.querySelector('[data-reminder-row]')`), '提醒中心撤销后回到待处理');
+  await evaluate(`document.querySelector('[data-reminder-tab="history"]').click()`);
+  await waitFor(() => evaluate(`document.querySelector('#reminderPane').textContent.includes('已点确认') &&
+    document.querySelectorAll('[data-reminder-row]').length === 2`), '提醒记录保留逐部处理结果');
+  await send('Page.navigate', { url: origin + '/?reminders=pending&event=ui-snooze-check' });
+  await waitFor(() => evaluate("document.querySelector('.reminder-highlight details')?.open === true"), '气泡更多直接展开本条提醒');
+  console.log('PASS 提醒中心直达、三页签、逐部确认、可选时长及撤销');
+
+  await evaluate("document.querySelector('#reminderCenterSettings').click()");
+  await waitFor(() => evaluate("!!document.querySelector('#globalReminderPreview')"), '提醒设置预览直达');
+  await evaluate(`(() => {
+    const lead = document.querySelector('#reminderLead');
+    window.oldReminderLead = lead.value;
+    lead.value = lead.value === '30' ? '15' : '30';
+    window.previewLead = lead.value;
+    lead.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(() => evaluate(`document.querySelector('#globalReminderPreview').textContent.includes('全局默认 · 提前 ' + window.previewLead + ' 分钟')`),
+    '改动未保存时即可预览全局提前量');
+  if (!await evaluate(`fetch('/api/settings').then(r => r.json()).then(j => String(j.reminder_lead ?? 0) === window.oldReminderLead)`))
+    throw new Error('预览提前量写入了全局设置');
+  await evaluate(`(() => {
+    const lead = document.querySelector('#reminderLead');
+    lead.value = window.oldReminderLead;
+    const watch = document.querySelector('#reminderPreviewWatch');
+    watch.value = ${JSON.stringify(String(snoozeEntry.id))};
+    document.querySelector('#reminderPreviewEdit').click();
+  })()`);
+  await waitFor(() => evaluate("!!document.querySelector('#singleReminderLead')"), '单番提醒入口');
+  await evaluate(`(() => {
+    const mute = document.querySelector('#singleReminderMute');
+    mute.checked = true;
+    mute.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(() => evaluate("document.querySelector('#singleReminderPreview').textContent.includes('本番提醒已静音')"), '静音预览解释跳过');
+  await evaluate(`(() => {
+    document.querySelector('#singleReminderMute').checked = false;
+    document.querySelector('#singleReminderLead').value = '15';
+    document.querySelector('#singleReminderForm').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate("document.querySelector('.watch-summary-facts')?.textContent.includes('单番覆盖 · 提前 15 分钟')"),
+    '保存单番覆盖返回详情并应用相同预览');
+  console.log('PASS 全局草稿预览、单番静音原因与提前量覆盖');
+
   const emptied = await evaluate(`(async () => {
     const transfer = { format: 'tiara-migration', schema: 1, library: { watching: [], weekday: {} } };
     const send = data => fetch('/api/migration', { method: 'POST', headers: { 'Content-Type': 'application/json' },

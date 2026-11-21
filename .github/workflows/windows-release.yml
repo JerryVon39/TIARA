@@ -10,7 +10,7 @@ on:
       previous_version:
         description: Published portable version used for migration (without v)
         required: true
-        default: '0.59.0'
+        default: '0.67.2'
         type: string
 
 permissions:
@@ -21,7 +21,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      PREVIOUS_VERSION: ${{ inputs.previous_version || '0.59.0' }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version || '0.67.2' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

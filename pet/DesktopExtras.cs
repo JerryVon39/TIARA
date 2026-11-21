@@ -67,7 +67,6 @@ namespace UkagakaBangumi
         Button _bubbleClose;
 
         BubbleTheme ActiveBubbleTheme { get { return BubbleThemes[_bubbleThemeIndex]; } }
-        string ActiveShellPath { get { return Path.Combine(_root, "shell", _shellName); } }
 
         void LoadDesktopExtras(JavaScriptSerializer serializer, Dictionary<string, object> state)
         {
@@ -75,7 +74,10 @@ namespace UkagakaBangumi
             if (notes != null) ReplaceDesktopNotes(notes);
             _notesSort = Math.Max(0, Math.Min(2, StateValue<int>(serializer, state, "notes_sort")));
             string shell = StateValue<string>(serializer, state, "desktop_shell");
-            if (ShellOptions().Contains(shell)) _shellName = shell;
+            var names = ShellOptions();
+            if (names.Contains(shell)) _shellName = shell;
+            string previous = StateValue<string>(serializer, state, "previous_shell");
+            if (previous != _shellName && names.Contains(previous)) _previousShellName = previous;
             if (state.ContainsKey("bubble_theme"))
                 _bubbleThemeIndex = Math.Max(0, Math.Min(BubbleThemes.Length - 1, StateValue<int>(serializer, state, "bubble_theme")));
             if (state.ContainsKey("bubble_size"))
@@ -123,7 +125,7 @@ namespace UkagakaBangumi
             double scale = ClampScale(StateValue<double>(serializer, appearance, "scale"));
             if (_bubbleSkin == null)
             {
-                if (!_scaleFromEnv) _scale = scale;
+                if (!_scaleFromEnv) _scale = _requestedScale = ValidScale(scale);
                 return;
             }
             if (_appearanceWindow != null) _appearanceWindow.Close();
@@ -361,7 +363,7 @@ namespace UkagakaBangumi
             var names = new List<string> { "master" };
             string root = Path.Combine(_root, "shell");
             if (!Directory.Exists(root)) return names;
-            foreach (string folder in Directory.GetDirectories(root))
+            foreach (string folder in Directory.GetDirectories(root).OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
             {
                 string name = Path.GetFileName(folder);
                 if (string.Equals(name, "master", StringComparison.OrdinalIgnoreCase) || name.StartsWith(".") ||
@@ -376,6 +378,7 @@ namespace UkagakaBangumi
             var image = new BitmapImage();
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
+            image.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
             image.UriSource = new Uri(file);
             image.EndInit();
             image.Freeze();
@@ -390,79 +393,6 @@ namespace UkagakaBangumi
             foreach (string value in values) choice.Items.Add(value);
             choice.SelectedIndex = selected;
             return choice;
-        }
-
-        void OpenAppearance()
-        {
-            if (_appearanceWindow != null) { _appearanceWindow.Activate(); return; }
-            StackPanel panel;
-            _appearanceWindow = UtilityWindow("TIARA · 换装与气泡", out panel);
-            _appearanceWindow.Closed += delegate { _appearanceWindow = null; };
-            UtilityText(panel, "换装与气泡", true);
-            var names = ShellOptions();
-            UtilityText(panel, "本地立绘套装");
-            var shell = AppearanceOptions("立绘套装", "appearance-shell", names, Math.Max(0, names.IndexOf(_shellName)));
-            panel.Children.Add(shell);
-            var sprite = new Image { Height = 130, Stretch = Stretch.Uniform, Margin = new Thickness(0, 0, 0, 10) };
-            AutomationProperties.SetName(sprite, "立绘预览");
-            AutomationProperties.SetAutomationId(sprite, "appearance-preview");
-            panel.Children.Add(sprite);
-            UtilityText(panel, "气泡配色与字号");
-            var theme = AppearanceOptions("气泡配色", "appearance-theme", Array.ConvertAll(BubbleThemes, item => item.Name), _bubbleThemeIndex);
-            var size = AppearanceOptions("气泡字号", "appearance-size", new[] { "小", "标准", "大" }, _bubbleSizeIndex);
-            panel.Children.Add(theme);
-            panel.Children.Add(size);
-            UtilityText(panel, "气泡停留时间");
-            var delay = AppearanceOptions("气泡停留时间", "appearance-bubble-time",
-                new[] { "按台词长度", "至少 15 秒", "30 秒", "手动关闭" }, _bubbleTimeIndex);
-            panel.Children.Add(delay);
-            bool reduceMotion = _reduceMotion;
-            CompanionOption(panel, "减弱动画（立即显示全文）", "appearance-reduce-motion", _reduceMotion, value => reduceMotion = value);
-            var sample = new TextBlock { Text = "会长，今天的记录也写好了。", TextWrapping = TextWrapping.Wrap, Foreground = Ink };
-            var bubble = new Border { Child = sample, Padding = new Thickness(12), Margin = new Thickness(0, 0, 0, 10),
-                CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1) };
-            panel.Children.Add(bubble);
-            var actions = new WrapPanel();
-            panel.Children.Add(actions);
-            var status = ScheduleText("", 12, ScheduleMuted);
-            Button apply = UtilityButton(actions, "应用外观", "appearance-apply", () =>
-            {
-                if (sprite.Source == null) return;
-                string selectedShell = names[shell.SelectedIndex];
-                bool changedShell = _shellName != selectedShell;
-                _shellName = selectedShell;
-                _bubbleThemeIndex = theme.SelectedIndex;
-                _bubbleSizeIndex = size.SelectedIndex;
-                _bubbleTimeIndex = delay.SelectedIndex;
-                _reduceMotion = reduceMotion;
-                DismissBubble();
-                if (changedShell) LoadShell();
-                ApplyBubbleTheme();
-                status.Text = SaveState() ? "已应用。" : "已应用。暂时无法写入磁盘。";
-            });
-            UtilityButton(actions, "关闭", "appearance-close", () => _appearanceWindow.Close());
-            panel.Children.Add(status);
-            Action previewShell = delegate
-            {
-                sprite.Source = null;
-                try { sprite.Source = LocalBitmap(Path.Combine(_root, "shell", names[shell.SelectedIndex], "surface0.png")); }
-                catch (Exception ex) { Log("shell preview: " + ex.Message); }
-                apply.IsEnabled = sprite.Source != null;
-                status.Text = sprite.Source == null ? "这套立绘的首张图片无法读取。" : "";
-            };
-            Action previewBubble = delegate
-            {
-                var colors = BubbleThemes[theme.SelectedIndex];
-                bubble.Background = colors.Fill;
-                bubble.BorderBrush = colors.Line;
-                sample.FontSize = 14.5 * BubbleFontFactors[size.SelectedIndex];
-            };
-            shell.SelectionChanged += delegate { previewShell(); };
-            theme.SelectionChanged += delegate { previewBubble(); };
-            size.SelectionChanged += delegate { previewBubble(); };
-            previewShell();
-            previewBubble();
-            _appearanceWindow.Show();
         }
 
         void ApplyBubbleTheme()

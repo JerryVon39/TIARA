@@ -1225,7 +1225,7 @@
       '<div class="season-months" role="group" aria-label="选择季度">' + months + '</div>' +
       '<button type="button" class="icon qstep" data-step="1" aria-label="下一季">›</button>' +
       '<button type="button" id="seasonCurrent" class="ghost">回到本季</button>' +
-      '<button type="button" id="seasonRefresh" class="ghost">刷新</button></div>' +
+      '<button type="button" id="seasonRefresh" class="ghost">联网更新</button></div>' +
       '<span class="sep"></span>' +
       '<label><input type="checkbox" id="onlyTv"' + (SEASON_FILTER.onlyTv ? ' checked' : '') + ' /> 只看 TV</label>' +
       '<label><input type="checkbox" id="hideWatching"' + (SEASON_FILTER.hideWatching ? ' checked' : '') + ' /> 隐藏已在追</label>' +
@@ -1464,7 +1464,10 @@
     } else if (season.catalog_status === 'preview') {
       parts.push('预告可能变动');
     }
-    if (season.warning) parts.push(season.items.length ? '更新失败，已保留上次目录' : '暂时无法联网更新');
+    if (season.warning) parts.push(season.warning + (season.items.length ? '，继续使用本地目录' : ''));
+    else if (season.source === 'net') parts.push('已联网更新');
+    var undated = season.items.filter(function (item) { return !item.date; }).length;
+    if (undated && season.source === 'net') parts.push(undated + ' 部首播日待定');
     return parts.join(' · ');
   }
 
@@ -2064,7 +2067,7 @@
     POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
       if (!marker.isConnected) return;
       if (episodes) openEpisodeList(j.detail);
-      else showWatchForm(j.detail, j.reminder, j.original);
+      else showWatchForm(j.detail, { ...j.reminder, preview: j.reminder_preview }, j.original);
     }).catch(function (e) {
       if (marker.isConnected) openDlg('读不到番剧详情', '<p role="alert">' + esc(e.message || '请刷新后再试') + '</p>');
     });
@@ -2118,99 +2121,281 @@
     $('#animeOnline').onclick = function () { if (input.reportValidity()) load(input.value.trim(), 0, true); };
   }
 
-  function openReminderHistory(watch) {
-    openDlg('提醒记录', '<p id="reminderHistoryLoading" role="status">正在读取本机记录…</p>');
-    var marker = $('#reminderHistoryLoading');
-    var types = { airing: '开播提醒', catchup: '补番提醒', snooze: '稍后提醒', test: '测试提醒' };
-    var statuses = { requested: '已请求 Windows 通知', unavailable: '无法请求 Windows 通知', inactive: '单番状态或设置已阻止提醒',
-      quiet: '免打扰时段', expired: '已过提醒时段', merged: '已并入同一部番的开播提醒' };
-    var actions = { snoozed: '选择了稍后提醒', opened: '已点查看清单', acknowledged: '已点确认', mark_clicked: '已点记一话',
-      history_opened: '已点查看提醒记录' };
-    function clock(value) {
-      if (!value) return '';
-      var date = new Date(Number(value) * 1000);
-      if (!Number.isFinite(+date)) return '';
-      return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+  var reminderTypes = { airing: '开播提醒', catchup: '补番提醒', snooze: '稍后提醒', test: '测试提醒' };
+  var reminderStatuses = { bubble: '已显示桌宠气泡', requested: '已请求 Windows 通知', unavailable: '无法请求 Windows 通知',
+    inactive: '单番状态或设置已阻止提醒', quiet: '计划免打扰时段', temporary_quiet: '临时安静时记录',
+    expired: '已过提醒时段', merged: '已并入同一部番的开播提醒' };
+  var reminderActions = { snoozed: '选择了稍后提醒', opened: '已点查看清单', acknowledged: '已点确认',
+    mark_clicked: '已点记一话', history_opened: '已点查看提醒记录', watch_clicked: '已点去观看',
+    details_opened: '已点查看番剧', snooze_undone: '已撤销延后' };
+  var reminderSnoozeLabels = { pending: '稍后提醒已安排', processing: '稍后提醒正在处理',
+    done: '稍后提醒已处理', cancelled: '稍后提醒已取消', skipped: '稍后提醒已跳过' };
+
+  function reminderReason(code, kind) {
+    var reasons = { paused: '追番已暂停', archived: '已归档', dropped: '已弃番', removed: '已移除',
+      planned: '尚未开始观看', finished: '已看完', ended: '本机排片已停止', muted: '本番提醒已静音',
+      quiet_work: '落在工作日免打扰时段', quiet_weekend: '落在周末免打扰时段',
+      temporary_quiet: '落在临时安静时段', time_passed: '提醒时刻已过', schedule_skipped: '手动跳过这次周播',
+      schedule_changed: '原排期或追番状态已变更', expired: '超出补发时限', already_processed: '这一档已进入提醒流程',
+      unscheduled: kind === 'catchup' ? '未设置个人补番时段' : '未设置本机排片' };
+    return reasons[code] || '';
+  }
+
+  function reminderClock(value) {
+    if (!value) return '';
+    var date = new Date(Number(value) * 1000);
+    return Number.isFinite(+date) ? date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hourCycle: 'h23',
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+  }
+
+  function openReminderCenter(initial, watch, selectedEvent) {
+    var labels = { pending: '待处理', snoozes: '稍后提醒', history: '提醒记录' };
+    var active = Object.hasOwn(labels, initial) ? initial : 'pending';
+    openDlg('提醒中心',
+      '<div class="reminder-tabs" role="group" aria-label="提醒视图">' +
+      Object.entries(labels).map(function (tab) {
+        return '<button type="button" data-reminder-tab="' + tab[0] + '" aria-pressed="' + (tab[0] === active) + '">' + tab[1] + '</button>';
+      }).join('') + '</div><p class="note" id="reminderMode"></p>' +
+      '<p class="note" id="reminderFeedback" role="status" aria-live="polite"></p>' +
+      '<div id="reminderFeedbackActions" class="reminder-actions"></div><div id="reminderPane"></div>',
+      '<button data-close>关闭</button><button type="button" id="refreshReminderHistory">刷新</button>' +
+      '<button type="button" id="reminderCenterSettings">提醒设置</button>',
+      { focus: '[data-reminder-tab="' + active + '"]' });
+    var pane = $('#reminderPane'), status = $('#reminderFeedback'), mode = $('#reminderMode');
+    var buttons = Array.from($('#dlg').querySelectorAll('[data-reminder-tab]'));
+    var feedbackActions = $('#reminderFeedbackActions');
+    var receipts = new Map(), generation = 0;
+
+    function feedback(message, label, handler) {
+      status.textContent = message;
+      feedbackActions.replaceChildren();
+      if (!handler) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.onclick = function () { handler(button); };
+      feedbackActions.append(button);
     }
-    json('/api/reminder/history' + (watch ? '?watch=' + enc(watch) : '')).then(function (result) {
-      if (!marker.isConnected) return;
-      var events = result.events || [];
+
+    function request(url, data) {
+      return sendPost(url, data).then(function (reply) {
+        if (!reply.ok) throw Object.assign(new Error(reply.error || '未能保存，请刷新后重试'), { status: reply.httpStatus });
+        return reply;
+      });
+    }
+
+    function snooze(event, minutes, button) {
+      var id = String(event.watch_id);
+      runButton(button, function () {
+        return request('/api/reminder/snoozes', { action: 'create', event_key: event.key, minutes: minutes, items: [
+          { id: id, kind: event.kind, slot_at: event.scheduled_at, stamp: event.source_stamp }
+        ] }).then(function (reply) {
+          var item = (reply.pending || []).find(function (row) {
+            return row.id === id && row.kind === event.kind && row.slot_at === event.scheduled_at && row.stamp === event.source_stamp;
+          });
+          if (!item) throw new Error('未能确认稍后提醒，请刷新提醒中心');
+          var receipt = (reply.created || []).find(function (row) { return row.key === item.key; });
+          if (receipt) receipts.set(item.key, receipt);
+          feedback((receipt ? '已延后至 ' : '已安排在 ') + reminderClock(item.due_at));
+          if (button.isConnected && pane.isConnected) show('snoozes', true);
+        });
+      }, true);
+    }
+
+    function runButton(button, operation, showConflictOnButton) {
+      var row = button.closest('li');
+      if (button.disabled || row?.getAttribute('aria-busy') === 'true') return;
+      button.disabled = true;
+      if (row) row.setAttribute('aria-busy', 'true');
+      feedback('');
+      return operation().catch(function (error) {
+        if (!button.isConnected || !pane.isConnected) return;
+        feedback(error.message || '本机后台未响应，请刷新');
+        if (error.status === 409 && showConflictOnButton) {
+          button.textContent = error.message;
+          button.dataset.reminderConflict = '1';
+        }
+      }).finally(function () {
+        if (row) row.removeAttribute('aria-busy');
+        if (!button.dataset.reminderConflict) button.disabled = false;
+      });
+    }
+
+    function snoozeButton(event, index) {
+      return event.source_stamp && ['airing', 'catchup'].includes(event.kind) &&
+        Math.abs(Date.now() / 1000 - event.scheduled_at) <= 21600
+        ? '<button type="button" data-snooze-event="' + index + '">稍后 15 分钟</button>' : '';
+    }
+
+    function openEvent(event, link) {
+      if (!link && event.can_open) openWatchDetail(event.watch_id);
+      return request('/api/reminder/acknowledge', { key: event.key, action: link ? 'watch_clicked' : 'details_opened' });
+    }
+
+    function renderEvents(model, history) {
+      var events = history ? model.events : model.pending;
+      events = events || [];
+      var pending = new Set((model.pending || []).map(function (event) { return event.key; }));
+      var states = [], modes = model.mode || {};
+      if (model.desktop_online === false) states.push('桌宠当前未连接');
+      if (modes.scheduled_quiet) states.push('计划免打扰');
+      if (modes.quiet_until) states.push('临时安静至 ' + reminderClock(modes.quiet_until));
+      if (modes.focus) states.push('专注中');
+      if (modes.tray_only) states.push('仅托盘通知');
+      if (modes.queued) states.push(modes.queued + ' 条排队中');
+      mode.textContent = ['北京时间'].concat(states).join(' · ');
+      var filter = history && watch
+        ? '<p class="note">仅显示这部番的提醒 <button type="button" id="allReminderHistory">查看全部</button></p>' : '';
       var rows = events.map(function (event, index) {
-        var title = event.can_open ? watchTitle(event.watch_id, event.name || '番剧', true) : '<strong>' + esc(event.name || '提醒') + '</strong>';
-        var detail = clock(event.scheduled_at) + ' 计划 · ' + clock(event.recorded_at) + ' 处理 · ' + (statuses[event.status] || '已记录');
-        var action = actions[event.action] ? clock(event.action_at) + ' ' + actions[event.action] :
-          event.status === 'requested' ? '暂无已确认的操作' : '';
-        if (event.snoozed_until) action += ' · 下次 ' + clock(event.snoozed_until);
-        return '<li><span class="tag mut">' + esc(types[event.kind] || '提醒') + '</span>' + title +
-          '<small>' + esc(detail + (event.recovered ? ' · 错过提醒摘要' : '') + (event.bubble ? ' · 气泡渠道已启用' : '')) + '</small>' +
-          (action ? '<small>' + esc(action) + '</small>' : '') +
-          (event.source_stamp && event.can_open && !event.snoozed_until && Math.abs(Date.now() / 1000 - event.scheduled_at) <= 21600
-            ? '<button type="button" data-snooze-event="' + index + '">15 分钟后提醒</button>' : '') + '</li>';
+        var name = event.name || '提醒';
+        var detail = [event.episode ? '待看第 ' + event.episode + ' 集' : '',
+          event.reminder_at ? '提醒 ' + reminderClock(event.reminder_at) : '',
+          event.scheduled_at && event.scheduled_at !== event.reminder_at ? '安排 ' + reminderClock(event.scheduled_at) : ''];
+        var title = '<strong>' + esc(name) + '</strong>';
+        var actions = snoozeButton(event, index);
+        var more = '';
+        if (history) {
+          title = event.can_open ? watchTitle(event.watch_id, name, true) : title;
+          var reason = reminderReason(event.reason, event.kind);
+          detail.push(reason || statusLabel(event.status));
+          if (event.recorded_at) detail.push('记录 ' + reminderClock(event.recorded_at));
+          if (event.recovered) detail.push('补发');
+          var operation = reminderActions[event.action] ? reminderClock(event.action_at) + ' ' + reminderActions[event.action] : '';
+          var snoozeLabel = event.snooze && reminderSnoozeLabels[event.snooze.status];
+          if (snoozeLabel && event.snooze.due_at) snoozeLabel += ' · ' + reminderClock(event.snooze.due_at);
+          if (snoozeLabel && event.snooze.reason) snoozeLabel += ' · ' + reminderReason(event.snooze.reason, event.kind);
+          more = [operation, snoozeLabel].filter(Boolean).map(function (text) { return '<small>' + esc(text) + '</small>'; }).join('');
+          actions = pending.has(event.key) ? actions : '';
+        } else {
+          var link = watchLink(event.watch_url, name);
+          var view = link || '<button type="button" data-reminder-event="' + index + '" data-reminder-action="details_opened">查看番剧</button>';
+          var durations = actions ? [5, 30, 60].map(function (n) {
+            return '<button type="button" data-snooze-event="' + index + '" data-minutes="' + n + '">' + n + ' 分钟后</button>';
+          }).join('') : '';
+          actions = view + actions +
+            '<button type="button" data-reminder-event="' + index + '" data-reminder-action="acknowledged">知道了</button>';
+          more = '<details' + (event.key === selectedEvent ? ' open' : '') + '><summary>更多</summary><div class="reminder-actions">' +
+            durations + '<button type="button" data-reminder-event="' + index +
+            '" data-reminder-action="mark_clicked">记一话</button></div></details>';
+        }
+        return '<li data-reminder-row="' + index + '"' + (event.key === selectedEvent ? ' class="reminder-highlight"' : '') +
+          '><span class="tag mut">' + esc(reminderTypes[event.kind] || '提醒') + '</span>' + title +
+          '<small>' + esc(detail.filter(Boolean).join(' · ')) + '</small>' +
+          (actions ? '<div class="reminder-actions">' + actions + '</div>' : '') + more + '</li>';
       }).join('');
-      openDlg(watch ? '这部番的提醒记录' : '提醒记录', '<p class="note">时间为北京时间。Windows 是否实际显示通知由系统决定。' +
-        (result.desktop_online === false ? ' 此安装目录的桌宠当前未连接。' : '') + '</p>' +
-        (rows ? '<ul class="reminder-history">' + rows + '</ul>' : '<p>本机还没有提醒记录。可以先在「提醒设置」发送测试提醒。</p>'),
-        '<button data-close>关闭</button><button type="button" id="refreshReminderHistory">刷新</button><button type="button" id="openSnoozesFromHistory">稍后提醒</button>');
-      $('#refreshReminderHistory').addEventListener('click', function () { openReminderHistory(watch); });
-      $('#openSnoozesFromHistory').onclick = openReminderSnoozes;
-      $('#dlg').querySelectorAll('[data-snooze-event]').forEach(function (button) {
+      var queue = !history && model.queued?.length ? '<section class="reminder-queue"><h4>等候提示</h4><ul>' +
+        model.queued.map(function (row) {
+          return '<li>' + esc(row.name) + ' · ' + esc(reminderClock(row.reminder_at)) + '</li>';
+        }).join('') + '</ul></section>' : '';
+      pane.innerHTML = filter + (rows ? '<ul class="reminder-history">' + rows + '</ul>' :
+        '<p>' + (history ? '还没有提醒记录。' : queue ? '目前没有已提示的待处理提醒。' : '目前没有待处理的提醒。') + '</p>') + queue;
+      var all = $('#allReminderHistory', pane);
+      if (all) all.onclick = function () { watch = null; show('history'); };
+      pane.querySelectorAll('[data-snooze-event]').forEach(function (button) {
+        button.onclick = function () { snooze(events[Number(button.dataset.snoozeEvent)], Number(button.dataset.minutes || 15), button); };
+      });
+      if (history) return;
+      pane.querySelectorAll('[data-reminder-event]').forEach(function (button) {
+        var event = events[Number(button.dataset.reminderEvent)], action = button.dataset.reminderAction;
         button.onclick = function () {
-          var row = events[Number(button.dataset.snoozeEvent)];
-          button.disabled = true;
-          post('/api/reminder/snoozes', { action: 'create', minutes: 15, items: [
-            { id: String(row.watch_id), kind: row.kind, slot_at: row.scheduled_at, stamp: row.source_stamp }
-          ] }).then(function (reply) {
-            if (!reply.ok) throw new Error(reply.error);
-            openReminderSnoozes();
-          }).catch(function (error) {
-            button.disabled = false;
-            button.textContent = error.message || '未能设置，请刷新';
+          runButton(button, function () {
+            if (action === 'details_opened') return openEvent(event, false);
+            if (action === 'mark_clicked') return post('/api/progress', {
+              id: event.watch_id, delta: 1, client: 'panel', expected_watch_revision: event.watch_revision, reminder_event: event.key
+            }).then(function (reply) {
+              if (!reply.ok || !reply.changed) throw new Error(reply.error || '进度没有改动');
+              return request('/api/reminder/acknowledge', { key: event.key, action: action }).then(function () { return '已记一话'; })
+                .catch(function () { return '已记一话，提醒状态未保存'; }).then(function (message) {
+                refresh();
+                if (!pane.isConnected) return;
+                feedback(message, '撤销进度', function (undoButton) {
+                  runButton(undoButton, function () {
+                    return request('/api/undo', { expected_revision: reply.revision }).then(function () {
+                      refresh();
+                      feedback('已撤销进度');
+                    });
+                  });
+                });
+                if (button.isConnected) show('pending', true);
+              });
+            });
+            return request('/api/reminder/acknowledge', { key: event.key, action: action })
+              .then(function () { if (button.isConnected) show('pending'); });
           });
         };
       });
-    }).catch(function (e) { if (marker.isConnected) marker.textContent = e.message || '暂时读不到提醒记录'; });
-  }
+      pane.querySelectorAll('a.watch-link').forEach(function (link) {
+        link.onclick = function (click) {
+          var row = link.closest('[data-reminder-row]');
+          if (row.getAttribute('aria-busy') === 'true') { click.preventDefault(); return; }
+          var event = events[Number(row.dataset.reminderRow)];
+          openEvent(event, true).then(function () { if (link.isConnected) show('pending'); })
+            .catch(function (error) { if (link.isConnected) feedback(error.message); });
+        };
+      });
+      var selected = $('.reminder-highlight', pane);
+      if (selected) selected.scrollIntoView({ block: 'nearest' });
+    }
 
-  function openReminderSnoozes() {
-    openDlg('稍后提醒', '<p class="note">按北京时间显示。暂停、静音、完结或改期后，旧档位不再提醒。</p>' +
-      '<p id="snoozeStatus" role="status"></p><div id="snoozeRows"></div>',
-      '<button data-close>关闭</button><button type="button" id="snoozeRefresh">刷新</button>');
-    var status = $('#snoozeStatus'), rows = $('#snoozeRows'), busy = false;
-    function render(items) {
-      if (!rows.isConnected) return;
-      status.textContent = items.length ? '待生效 ' + items.length + ' 条' : '没有待生效的稍后提醒。';
-      rows.innerHTML = items.map(function (item, i) {
-        var when = new Date(item.due_at * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false,
-          month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-        return '<div class="original-note"><p><strong>' + esc(item.name) + '</strong> · ' +
-          (item.kind === 'catchup' ? '补番' : '开播') + ' · ' + esc(when) + '</p><div class="watch-link-list">' +
-          '<label>重新设置 <select data-snooze-minutes="' + i + '"><option>5</option><option selected>15</option><option>30</option><option>60</option></select> 分钟后</label>' +
+    function statusLabel(key) {
+      return reminderStatuses[key] || '已记录';
+    }
+
+    function renderSnoozes(items) {
+      mode.textContent = '北京时间';
+      pane.innerHTML = items.length ? '<ul id="snoozeRows" class="reminder-history">' + items.map(function (item, i) {
+        return '<li><span class="tag mut">' + esc(reminderTypes[item.kind] || '提醒') + '</span>' +
+          '<strong>' + esc(item.name) + '</strong><small>提醒 ' + esc(reminderClock(item.due_at)) + '</small>' +
+          '<div class="reminder-actions"><label>重新设置 <select data-snooze-minutes="' + i +
+          '"><option>5</option><option selected>15</option><option>30</option><option>60</option></select> 分钟后</label>' +
           '<button type="button" data-change-snooze="' + i + '" data-snooze-action="delay">延后</button>' +
-          '<button type="button" data-change-snooze="' + i + '" data-snooze-action="cancel">取消提醒</button></div></div>';
-      }).join('');
-      rows.querySelectorAll('[data-change-snooze]').forEach(function (button) {
+          '<button type="button" data-change-snooze="' + i + '" data-snooze-action="cancel">取消提醒</button>' +
+          (receipts.has(item.key) ? '<button type="button" data-change-snooze="' + i +
+            '" data-snooze-action="undo_create">撤销延后</button>' : '') + '</div></li>';
+      }).join('') + '</ul>' : '<p>没有待生效的稍后提醒。</p>';
+      pane.querySelectorAll('[data-change-snooze]').forEach(function (button) {
         button.onclick = function () {
-          if (busy) return;
-          var i = Number(button.dataset.changeSnooze), action = button.dataset.snoozeAction;
-          busy = button.disabled = true;
-          post('/api/reminder/snoozes', { action: action, key: items[i].key, minutes: Number(rows.querySelector('[data-snooze-minutes="' + i + '"]').value) })
-            .then(function (reply) {
-              if (!reply.ok) throw new Error(reply.error);
-              render(reply.pending || []);
-            }).catch(function (error) {
-              if (status.isConnected) status.textContent = error.message || '本机后台未响应，请刷新';
-            }).finally(function () { button.disabled = busy = false; });
+          var i = Number(button.dataset.changeSnooze), action = button.dataset.snoozeAction, item = items[i];
+          var receipt = receipts.get(item.key);
+          var minutes = Number(pane.querySelector('[data-snooze-minutes="' + i + '"]').value);
+          runButton(button, function () {
+            return request('/api/reminder/snoozes', { action: action, key: item.key, token: receipt?.token, minutes: minutes })
+              .then(function () {
+                receipts.delete(item.key);
+                if (!button.isConnected) return;
+                feedback(action === 'undo_create' ? '已撤销延后' : action === 'cancel' ? '已取消提醒' : '已更新延后时间');
+                show(action === 'undo_create' ? 'pending' : 'snoozes', true);
+              });
+          }, true);
         };
       });
     }
-    function load() {
-      status.textContent = '正在读取…';
-      json('/api/reminder/snoozes').then(function (reply) { render(reply.pending || []); })
-        .catch(function (error) { if (status.isConnected) status.textContent = error.message || '无法连接本机后台'; });
+
+    function show(tab, keepFeedback) {
+      active = tab;
+      var sequence = ++generation;
+      buttons.forEach(function (button) { button.setAttribute('aria-pressed', String(button.dataset.reminderTab === active)); });
+      if (!keepFeedback) feedback('');
+      mode.textContent = '';
+      pane.innerHTML = '<p role="status">正在读取本机提醒…</p>';
+      var action = tab === 'snoozes' ? '/api/reminder/snoozes' : '/api/reminder/history';
+      if (tab === 'history' && watch) action += '?watch=' + enc(watch);
+      return json(action).then(function (reply) {
+        if (!pane.isConnected || sequence !== generation) return;
+        if (tab === 'snoozes') renderSnoozes(reply.pending || []);
+        else renderEvents(reply, tab === 'history');
+      }).catch(function (error) {
+        if (pane.isConnected && sequence === generation) pane.textContent = error.message || '无法读取本机提醒，请刷新';
+      });
     }
-    $('#snoozeRefresh').onclick = load;
-    load();
+
+    buttons.forEach(function (button) { button.onclick = function () { show(button.dataset.reminderTab); }; });
+    $('#refreshReminderHistory').onclick = function () { show(active); };
+    $('#reminderCenterSettings').onclick = openReminderSettings;
+    show(active);
   }
+
 
   function openCalendarExport() {
     var first = STATE?.date || new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
@@ -2512,6 +2697,7 @@
   }
 
   function watchReminderFact(reminder) {
+    if (reminder?.preview) return reminderPreviewFact(reminder.preview);
     var messages = { paused: '追番已暂停', archived: '已归档', dropped: '已弃番', removed: '已移除',
       planned: '开始观看后可设置', finished: '已看完', ended: '排片已停止', muted: '本番已静音',
       unscheduled: reminder?.kind === 'catchup' ? '未设置个人补番时段' : '未设置本机排片' };
@@ -2525,6 +2711,33 @@
     if (reminder.moved) notes.push('本次已改期');
     if (reminder.desktop_online === false && reminder.status !== 'quiet') notes.push('桌宠当前离线');
     return { value: value, at: reminder.at, note: notes.join(' · ') };
+  }
+
+  function reminderLeadLabel(lead) { return lead ? '提前 ' + lead + ' 分钟' : '准点'; }
+
+  function reminderPreviewFact(preview) {
+    var reason = reminderReason(preview.reason, preview.kind), next = preview.next;
+    var notes = [preview.inherited ? '全局默认 · ' + reminderLeadLabel(preview.lead) : '单番覆盖 · ' + reminderLeadLabel(preview.lead)];
+    if (next?.kind === 'snooze') notes.push('稍后提醒，沿用已保存时刻');
+    if (next?.moved) notes.push('本次已改期');
+    if (preview.queued) notes.push('已有 ' + preview.queued + ' 条排队中');
+    if (preview.focus && next) notes.push('预计先排队，专注结束后提示');
+    if (!preview.desktop_online && next) notes.push('桌宠当前离线');
+    if (reason && preview.first) {
+      var firstAt = watchCstTime(preview.first.at);
+      notes.push(preview.reason === 'time_passed' ? firstAt + ' 的提醒时刻已过' :
+        preview.reason === 'already_processed' ? reason : firstAt + ' 跳过 · ' + reason);
+    }
+    return { at: next?.at, value: next ? watchCstTime(next.at) : (preview.first ? '近期没有可提示的档位' : reason || '暂无提醒'),
+      note: notes.join(' · ') };
+  }
+
+  function reminderPreviewContent(preview) {
+    if (!preview) return '<p>添加在追番剧或补番后可预览。</p>';
+    return '<dl class="reminder-preview"><div><dt>预计实际提醒（北京时间）</dt><dd>' +
+      watchReminderMarkup(reminderPreviewFact(preview)) + '</dd></div>' +
+      (preview.next?.planned_at ? '<div><dt>对应本机排片</dt><dd>' + esc(watchCstTime(preview.next.planned_at)) + '</dd></div>' : '') +
+      (preview.next ? '<div><dt>提示渠道</dt><dd>' + (preview.tray_only ? '仅 Windows 通知' : '桌宠气泡，隐藏时使用 Windows 通知') + '</dd></div>' : '') + '</dl>';
   }
 
   function watchReminderMarkup(fact) {
@@ -2670,7 +2883,8 @@
         '<a href="https://github.com/bangumi-data/bangumi-data" target="_blank" rel="noopener noreferrer">资料来源 ↗</a></div>' +
         '<div id="watchMatches" class="watch-wide" role="status" hidden></div>' : '') +
       '</fieldset>' + (existing ? '<div class="watch-group-actions">' +
-        (detail.state === 'watching' && !detail.finished && detail.watch_mode !== 'catchup' ? '<button type="button" id="watchSchedule">临时改期与静音</button>' : '') +
+        (detail.state === 'watching' && !detail.finished && detail.watch_mode !== 'catchup' ? '<button type="button" id="watchSchedule">临时改期</button>' : '') +
+        (['watching', 'paused'].includes(detail.state) && !detail.finished ? '<button type="button" id="watchReminderSettings">单番提醒设置</button>' : '') +
         '<button type="button" id="watchReminderHistory">本番提醒记录</button></div>' : ''), false);
     var aboutGroup = watchGroup('watchAboutGroup', '番剧资料', '番名、总集数、播放链接与条目管理', fields +
       (!existing && !candidate ? '<div class="watch-wide"><label class="watch-field">Bangumi 条目链接（可选）' +
@@ -2888,9 +3102,9 @@
             else if (previous !== latest && row[0].value !== latest) collisions.push(row[1] + '（本机 ' + (latest || '空') + '）');
           });
           detail = current;
-          reminder = reply.reminder;
           personal = detail.catchup_slot || {};
           $('#watchSummary', form).innerHTML = watchSummary(detail, reminder, readonly);
+          reminder = { ...reply.reminder, preview: reply.reminder_preview };
           $('#watchScheduleFacts', form).innerHTML = watchScheduleFacts(detail, reminder, reply.original);
           updateWatchMode();
           box.replaceChildren();
@@ -2925,7 +3139,7 @@
     });
     if (detail.id) $('#watchReminderHistory').addEventListener('click', function () {
       if ((!archived && edited()) || saving) return showError('请先保存当前详情，再查看提醒记录');
-      openReminderHistory(detail.id);
+      openReminderCenter("history", detail.id);
     });
     var order = $('#watchOrder', form);
     if (order) order.addEventListener('click', function () {
@@ -2976,6 +3190,11 @@
       if (edited()) return showError('请先保存详情修改，再调整排期。');
       openScheduleControls(detail);
     });
+    var watchReminderSettings = $('#watchReminderSettings', form);
+    if (watchReminderSettings) watchReminderSettings.onclick = function () {
+      if (saving || edited()) return showError('请先保存或撤回当前详情修改。');
+      openWatchReminderSettings(detail, reminder?.preview);
+    };
     form.querySelectorAll('[data-life]').forEach(function (b) {
       b.addEventListener('click', function () {
         if (saving) return;
@@ -3496,17 +3715,154 @@
     load();
   }
 
+
+  function reminderLeadOptions(selected, inheritedLabel) {
+    return (inheritedLabel ? '<option value=""' + (selected == null ? ' selected' : '') + '>' + esc(inheritedLabel) + '</option>' : '') +
+      [0, 5, 10, 15, 30, 60].map(function (lead) {
+        return '<option value="' + lead + '"' + (lead === selected ? ' selected' : '') + '>' + reminderLeadLabel(lead) + '</option>';
+      }).join('');
+  }
+
+  function bindReminderPreview(form, box, draft) {
+    var sequence = 0;
+    form.addEventListener('change', function () {
+      var request = ++sequence;
+      box.textContent = '正在预览…';
+      sendPost('/api/reminder/preview', draft()).then(function (reply) {
+        if (!box.isConnected || request !== sequence) return;
+        if (!reply.ok) { box.textContent = reply.error || '预览失败'; return; }
+        box.innerHTML = reminderPreviewContent(reply.preview);
+      }).catch(function () {
+        if (box.isConnected && request === sequence) box.textContent = '读取预览失败，请重试。';
+      });
+    });
+  }
+
+  function openWatchReminderSettings(detail, initial) {
+    openDlg('单番提醒设置',
+      '<form id="singleReminderForm"><p><strong>' + esc(detail.name) + '</strong></p>' +
+      '<label class="row"><span>提醒时间</span><select id="singleReminderLead">' +
+      reminderLeadOptions(detail.reminder_lead, '跟随全局' + (initial ? '（' + reminderLeadLabel(initial.default_lead) + '）' : '')) + '</select></label>' +
+      '<label><input type="checkbox" id="singleReminderMute"' + (detail.reminder_muted ? ' checked' : '') + ' /> 静音此番</label>' +
+      '<p class="note">单番可覆盖提前量。工作日、周末及临时安静仍适用；已延后的提醒沿用保存的时间。</p>' +
+      '<div id="singleReminderPreview" aria-live="polite">' + reminderPreviewContent(initial) + '</div>' +
+      '<p id="singleReminderStatus" role="status"></p></form>',
+      '<button type="button" id="singleReminderBack">返回详情</button><button type="submit" class="primary" form="singleReminderForm">保存</button>');
+    var form = $('#singleReminderForm'), box = $('#singleReminderPreview'), status = $('#singleReminderStatus');
+    var lead = $('#singleReminderLead'), muted = $('#singleReminderMute');
+    function draft() { return { lead: lead.value === '' ? null : Number(lead.value), muted: muted.checked }; }
+    bindReminderPreview(form, box, function () { return { id: detail.id, watch: draft() }; });
+    $('#singleReminderBack').onclick = function () { openWatchDetail(detail.id); };
+    form.onsubmit = function (event) {
+      event.preventDefault();
+      var button = $('#dlg button[form="singleReminderForm"]');
+      if (button.disabled) return;
+      button.disabled = true;
+      post('/api/reminder/watch', { id: detail.id, ...draft(), expected_revision: detail.revision }).then(function (reply) {
+        if (!reply.ok) { status.textContent = reply.error || '保存失败'; return; }
+        if (form.isConnected) openWatchDetail(detail.id);
+        return refresh();
+      }).catch(function () { status.textContent = '面板服务未响应'; })
+        .finally(function () { button.disabled = false; });
+    };
+  }
+
+  function sendTestReminder(button, status) {
+    button.disabled = true;
+    status.textContent = '正在联系桌宠…';
+    sendPost('/api/reminder/test', {}).then(function (reply) {
+      if (!reply.ok) throw new Error(reply.error || '无法发送测试提醒');
+      var until = Date.now() + 12500;
+      function waitForDesktop() {
+        if (!status.isConnected) return;
+        return json('/api/reminder/test?id=' + enc(reply.id)).then(function (result) {
+          if (!status.isConnected) return;
+          if (result.delivered) { status.textContent = '桌宠已触发测试提醒'; return; }
+          if (Date.now() >= until) throw new Error('桌宠未回应。请检查桌宠和网页是否来自同一安装目录。');
+          return new Promise(function (resolve) { setTimeout(resolve, 500); }).then(waitForDesktop);
+        });
+      }
+      return waitForDesktop();
+    }).catch(function (error) { if (status.isConnected) status.textContent = error.message; })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function openReminderSettings() {
+    openDlg('提醒设置', '<p id="reminderSettingsLoading" role="status">正在读取提醒设置…</p>');
+    var loading = $('#reminderSettingsLoading');
+    json('/api/reminder/preview').then(function (model) {
+      if (!loading.isConnected) return;
+      var settings = model.settings;
+      openDlg('提醒设置',
+        '<form id="quietForm" class="reminder-settings"><fieldset><legend>全局默认</legend>' +
+        '<label class="row"><span>开播和补番</span><select id="reminderLead">' + reminderLeadOptions(settings.reminder_lead ?? 0) + '</select></label>' +
+        '<p class="note">单番使用自己的提前量或静音设置。已延后的提醒按保存时刻触发。</p></fieldset>' +
+        '<fieldset><legend>计划免打扰</legend><p class="note">规则按北京时间计算，跨午夜沿用开始那天。两项都留空可关闭。' +
+        '落在免打扰或临时安静期间的提醒只记入记录。</p>' +
+        '<div class="quiet-rule"><strong>工作日</strong><label>开始 <input id="quietStart" type="time" value="' + esc(settings.quiet_work_start ?? settings.quiet_start) + '" /></label>' +
+        '<label>结束 <input id="quietEnd" type="time" value="' + esc(settings.quiet_work_end ?? settings.quiet_end) + '" /></label></div>' +
+        '<div class="quiet-rule"><strong>周末</strong><label>开始 <input id="quietWeekendStart" type="time" value="' + esc(settings.quiet_weekend_start ?? settings.quiet_start) + '" /></label>' +
+        '<label>结束 <input id="quietWeekendEnd" type="time" value="' + esc(settings.quiet_weekend_end ?? settings.quiet_end) + '" /></label></div></fieldset>' +
+        '<fieldset><legend>预览下次提醒</legend>' +
+        (model.targets.length ? '<label class="row"><span>番剧</span><select id="reminderPreviewWatch">' + model.targets.map(function (item) {
+          return '<option value="' + esc(item.id) + '"' + (item.id === model.preview?.id ? ' selected' : '') + '>' + esc(item.name) + '</option>';
+        }).join('') + '</select></label><button type="button" id="reminderPreviewEdit">调整这部番</button>' : '') +
+        '<div id="globalReminderPreview" aria-live="polite">' + reminderPreviewContent(model.preview) + '</div></fieldset>' +
+        '<p id="quietStatus" role="status"></p></form>' +
+        '<div class="reminder-actions"><button type="button" id="reminderTest">测试提示渠道</button>' +
+        '<button type="button" id="reminderSnoozes">提醒中心</button></div><p id="reminderTestStatus" role="status"></p>',
+        '<button data-close>取消</button><button class="primary" type="submit" form="quietForm">保存</button>');
+      var form = $('#quietForm'), selected = $('#reminderPreviewWatch'), status = $('#quietStatus');
+      function draft() {
+        return { quiet_work_start: $('#quietStart', form).value, quiet_work_end: $('#quietEnd', form).value,
+          quiet_weekend_start: $('#quietWeekendStart', form).value, quiet_weekend_end: $('#quietWeekendEnd', form).value,
+          reminder_lead: Number($('#reminderLead', form).value) };
+      }
+      var initialDraft = JSON.stringify(draft());
+      function canNavigate() {
+        if (JSON.stringify(draft()) === initialDraft) return true;
+        status.textContent = '请先保存全局设置或取消编辑。';
+        return false;
+      }
+      bindReminderPreview(form, $('#globalReminderPreview'), function () { return { id: selected?.value, settings: draft() }; });
+      if (selected) $('#reminderPreviewEdit').onclick = function () {
+        if (!canNavigate()) return;
+        var button = this;
+        button.disabled = true;
+        json('/api/watch/detail?id=' + enc(selected.value)).then(function (reply) {
+          if (form.isConnected) openWatchReminderSettings(reply.detail, reply.reminder_preview);
+        }).catch(function (error) { status.textContent = error.message; })
+          .finally(function () { button.disabled = false; });
+      };
+      $('#reminderSnoozes').onclick = function () { if (canNavigate()) openReminderCenter(); };
+      $('#reminderTest').onclick = function () { sendTestReminder(this, $('#reminderTestStatus')); };
+      form.onsubmit = function (event) {
+        event.preventDefault();
+        var button = $('#dlg button[form="quietForm"]');
+        if (button.disabled) return;
+        button.disabled = true;
+        post('/api/settings', draft()).then(function (reply) {
+          if (!reply.ok) { status.textContent = reply.error || '设置保存失败'; return; }
+          if (status.isConnected) closeDlg();
+          toast('提醒设置已保存');
+          return refresh();
+        }).catch(function () { status.textContent = '面板服务未响应'; })
+          .finally(function () { button.disabled = false; });
+      };
+    }).catch(function () { if (loading.isConnected) loading.textContent = '读取提醒设置失败'; });
+  }
+
+
   function openScheduleControls(detail) {
     var pending = (detail.schedule_adjustments || []).find(function (entry) {
       return Math.max(Date.parse(entry.original_at), Date.parse(entry.at) || 0) >= Date.now();
     });
-    openDlg('调档与提醒',
+    openDlg('临时改期',
       '<form id="scheduleForm"><p>' + esc(detail.name) + '</p>' +
       (pending ? '<p class="note">' + esc(pending.at ? '提醒已改到 ' + new Date(pending.at).toLocaleString('zh-CN', {
         timeZone: 'Asia/Shanghai', hour12: false
       }) : '已跳过 ' + pending.date + ' 的周播档') + '</p>' : '') +
       '<label class="row"><span>操作</span><select id="scheduleAction">' +
-      '<option value="mute">' + (detail.reminder_muted ? '恢复单番提醒' : '静音此番') + '</option>' +
       (detail.schedule_ended ? '<option value="restart">恢复排片</option>' :
         '<option value="skip">跳过下一次周播</option><option value="move">调整下一次开播</option><option value="end">完结或停止排片</option>') +
       (pending ? '<option value="clear">撤销待生效的调档</option>' : '') +
@@ -3514,12 +3870,14 @@
       '<p id="scheduleResult" role="status"></p></form>',
       '<button id="scheduleBack">返回详情</button><button class="primary" type="submit" form="scheduleForm" id="scheduleGo">确认</button>');
     var form = $('#scheduleForm'), action = $('#scheduleAction'), at = $('#scheduleAt'), result = $('#scheduleResult'), go = $('#scheduleGo');
-    action.addEventListener('change', function () { at.required = action.value === 'move'; $('#scheduleAtRow').hidden = !at.required; });
+    function syncTime() { at.required = action.value === 'move'; $('#scheduleAtRow').hidden = !at.required; }
+    action.addEventListener('change', syncTime);
+    syncTime();
     $('#scheduleBack').addEventListener('click', function () { openWatchDetail(detail.id); });
     form.addEventListener('submit', function (event) {
       event.preventDefault();
       go.disabled = true;
-      post('/api/watch/schedule', { id: detail.id, action: action.value, at: at.value, muted: !detail.reminder_muted,
+      post('/api/watch/schedule', { id: detail.id, action: action.value, at: at.value,
         expected_revision: detail.revision }).then(function (reply) {
         if (!reply.ok) { result.textContent = reply.error || '没有保存'; return; }
         if (form.isConnected) closeDlg();
@@ -4199,64 +4557,7 @@
       }).catch(function () { if (loading.isConnected) loading.textContent = '读不到备份列表'; });
     }
 
-    function openReminderSettings() {
-      openDlg('提醒设置', '<p id="reminderSettingsLoading" role="status">正在读取提醒设置…</p>');
-      var loading = $('#reminderSettingsLoading');
-      json('/api/settings').then(function (settings) {
-        if (!loading.isConnected) return;
-        openDlg('提醒设置',
-          '<form id="quietForm"><p>以北京时间（UTC+8）计算。跨午夜时沿用开始那一天的规则。每组同时留空时关闭。</p>' +
-          '<fieldset><legend>周一至周五免打扰</legend>' +
-          '<label class="row"><span>开始</span><input id="quietStart" type="time" value="' + esc(settings.quiet_work_start ?? settings.quiet_start) + '" /></label>' +
-          '<label class="row"><span>结束</span><input id="quietEnd" type="time" value="' + esc(settings.quiet_work_end ?? settings.quiet_end) + '" /></label></fieldset>' +
-          '<fieldset><legend>周六与周日免打扰</legend>' +
-          '<label class="row"><span>开始</span><input id="quietWeekendStart" type="time" value="' + esc(settings.quiet_weekend_start ?? settings.quiet_start) + '" /></label>' +
-          '<label class="row"><span>结束</span><input id="quietWeekendEnd" type="time" value="' + esc(settings.quiet_weekend_end ?? settings.quiet_end) + '" /></label></fieldset>' +
-          '<label class="row"><span>开播与补番提醒</span><select id="reminderLead">' +
-          [0, 5, 10, 15, 30, 60].map(function (n) { return '<option value="' + n + '"' +
-            (n === (settings.reminder_lead || 0) ? ' selected' : '') + '>' + (n ? '提前 ' + n + ' 分钟' : '准点') + '</option>'; }).join('') +
-          '</select></label>' +
-          '<p id="quietStatus" role="status"></p></form>' +
-          '<button type="button" id="reminderTest">测试提醒</button> <button type="button" id="reminderSnoozes">稍后提醒</button>' +
-          '<p class="note">测试会让当前桌宠显示一条通知。</p>' +
-          '<p id="reminderTestStatus" role="status"></p>',
-          '<button data-close>取消</button><button class="primary" type="submit" form="quietForm">保存</button>');
-        $('#reminderSnoozes').onclick = openReminderSnoozes;
-        $('#reminderTest').onclick = function () {
-          var button = this, status = $('#reminderTestStatus');
-          button.disabled = true;
-          status.textContent = '正在联系桌宠…';
-          sendPost('/api/reminder/test', {}).then(function (reply) {
-            if (!reply.ok) throw new Error(reply.error || '无法发送测试提醒');
-            var until = Date.now() + 12500;
-            function waitForDesktop() {
-              if (!status.isConnected) return;
-              return json('/api/reminder/test?id=' + enc(reply.id)).then(function (result) {
-                if (!status.isConnected) return;
-                if (result.delivered) { status.textContent = '桌宠已触发测试提醒'; return; }
-                if (Date.now() >= until) throw new Error('桌宠未回应。请检查桌宠和网页是否来自同一安装目录。');
-                return new Promise(function (resolve) { setTimeout(resolve, 500); }).then(waitForDesktop);
-              });
-            }
-            return waitForDesktop();
-          }).catch(function (error) { if (status.isConnected) status.textContent = error.message; })
-            .finally(function () { button.disabled = false; });
-        };
-        $('#quietForm').addEventListener('submit', function (event) {
-          event.preventDefault();
-          var status = $('#quietStatus');
-          post('/api/settings', { quiet_work_start: $('#quietStart').value, quiet_work_end: $('#quietEnd').value,
-            quiet_weekend_start: $('#quietWeekendStart').value, quiet_weekend_end: $('#quietWeekendEnd').value,
-            reminder_lead: Number($('#reminderLead').value) }).then(function (reply) {
-            if (!reply.ok) { status.textContent = reply.error || '设置保存失败'; return; }
-            if (status.isConnected) closeDlg();
-            toast('提醒设置已保存');
-            return refresh();
-          }).catch(function () { status.textContent = '面板服务未响应'; });
-        });
-      }).catch(function () { if (loading.isConnected) loading.textContent = '读取提醒设置失败'; });
-    }
-
+    $('#reminderCenter').onclick = function () { openReminderCenter(); };
     $('#settingsNav').onclick = openSettingsNav;
 
     function openReleaseInfo() {
@@ -4337,7 +4638,7 @@
           ['calendar', '导出日历', openCalendarExport], ['week', '导出周表', function () { location.href = '/api/export?fmt=md'; }],
           ['ssp', '导出私人 SSP 排片', openPrivateSsp]]],
         ['提醒与桌宠', [['reminders', '提醒设置', openReminderSettings],
-          ['reminderHistory', '提醒记录', function () { openReminderHistory(); }], ['nickname', '桌宠称呼', openNickname]]],
+          ['reminderHistory', '提醒中心', function () { openReminderCenter(); }], ['nickname', '桌宠称呼', openNickname]]],
         ['应用与排查', [['board', '打开副屏看板', function () {
           var board = window.open('/board.html', 'tiara-board', 'popup,width=1100,height=760,resizable=yes');
           if (board) board.focus(); else location.href = '/board.html';
@@ -4624,7 +4925,10 @@
       var watch = new URLSearchParams(location.search).get('watch');
       if (watch) return openWatchDetail(watch);
       if (new URLSearchParams(location.search).get('report') === '1') return openWatchReport();
-      if (new URLSearchParams(location.search).get('reminders') === '1') return openReminderHistory();
+      var reminderParams = new URLSearchParams(location.search);
+      if (reminderParams.get('reminder-settings') === '1') return openReminderSettings();
+      var reminderTab = reminderParams.get('reminders');
+      if (reminderTab) return openReminderCenter(reminderTab === '1' ? 'history' : reminderTab, null, reminderParams.get('event'));
       if (TAB === 'season' && !SEASON) loadSeason(false);
     });
     setInterval(function () { if (!document.hidden) refresh(); }, 60000);

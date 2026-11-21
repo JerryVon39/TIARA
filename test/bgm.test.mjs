@@ -10,7 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mergeLibrary, mergeSeason, weekdayMap, parseResponse, decodeChunked, httpGet } from '../lib/bgm.mjs';
+import { mergeLibrary, mergeSeason, weekdayMap, parseResponse, decodeChunked, httpGet, fetchSeason } from '../lib/bgm.mjs';
 import { gzipSync } from 'node:zlib';
 import { expectedEpisode } from '../lib/today.mjs';
 import { remainingEpisodes } from '../lib/watch-start.mjs';
@@ -35,6 +35,24 @@ const collections = [
   { subject_id: 500001, ep_status: 2, subject: { id: 500001, name: 'NEW', name_cn: '新番', eps: 12 } },
   { subject_id: 400602, ep_status: 19, subject: { id: 400602, name: '藥屋少女的呢喃 第二季', name_cn: '药屋少女的呢喃 第二季', eps: 24 } }
 ];
+
+test('季度分页允许只有首播月份的条目，仍拒绝跨季和重复结果', async t => {
+  const rows = [{ id: 10, date: '2026-10-12' }, { id: 11, date: null }, { id: 12, date: '2026-12-31' }];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    const offset = Number(url.searchParams.get('offset'));
+    res.end(JSON.stringify({ total: rows.length, data: rows.slice(offset, offset + 2) }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const options = { q: '2026Q4', base: 'http://127.0.0.1:' + server.address().port, retries: 0 };
+  const found = await fetchSeason(options);
+  assert.deepEqual(found.items.map(row => [row.id, row.date]), [[10, '2026-10-12'], [12, '2026-12-31'], [11, '']]);
+  rows[1].date = '2027-01-01';
+  await assert.rejects(fetchSeason(options), { code: 'season_incomplete' });
+  rows[1] = { ...rows[0] };
+  await assert.rejects(fetchSeason(options), { code: 'season_incomplete' });
+});
 
 test('weekdayMap：把放送表翻成 id → 星期', () => {
   const m = weekdayMap(calendar);

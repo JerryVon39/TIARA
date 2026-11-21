@@ -46,10 +46,25 @@ namespace UkagakaBangumi
                     long now = UnixNow();
                     if (V("date", "") == ReminderDate(now) &&
                         (!_recoverReminders || V("previous_date", "") == ReminderDate(now - 86400)) &&
-                        ReadActiveWatchIds() != null) CheckReminders();
+                        ReadReminderTargets() != null) CheckReminders();
                 }
             });
         }
+
+        static int ValidReminderLead(string value, int fallback)
+        {
+            int lead;
+            return int.TryParse(value, out lead) && Array.IndexOf(new[] { 0, 5, 10, 15, 30, 60 }, lead) >= 0 ? lead : fallback;
+        }
+
+        static int ReadReminderLead(Dictionary<string, object> settings, int fallback = 0)
+        {
+            object value;
+            return settings != null && settings.TryGetValue("reminder_lead", out value) &&
+                value != null ? ValidReminderLead(Str(value), fallback) : fallback;
+        }
+
+        static long ReminderFireAt(long slot, int lead) { return slot - lead * 60L; }
 
         void ReadReminderSlots(List<ReminderCandidate> due, string prefix, int count, long from, long now, int lead)
         {
@@ -57,10 +72,8 @@ namespace UkagakaBangumi
             {
                 string row = prefix + i;
                 long at;
-                if (!long.TryParse(V(row + "_unix", ""), out at) || at <= 0) continue;
-                long fire;
-                if (I("reminder_lead") != lead || !long.TryParse(V(row + "_fire_unix", ""), out fire))
-                    fire = at - lead * 60L;
+                if (!long.TryParse(V(row + "_unix", ""), out at) || at <= 0 || at > UnixTimeLimit) continue;
+                long fire = ReminderFireAt(at, ValidReminderLead(V(row + "_lead", ""), lead));
                 if (fire < from || fire > now) continue;
                 string id = V(row + "_id", "");
                 if (string.IsNullOrEmpty(id)) continue;
@@ -71,30 +84,8 @@ namespace UkagakaBangumi
                 if (_reminded.Contains(key) || (!personal && _reminded.Contains(date + "|" + name)) ||
                     due.Exists(item => item.Key == key)) continue;
                 due.Add(new ReminderCandidate { Id = id, Key = key, At = at, FireAt = fire, Name = name, Personal = personal,
-                    Stamp = V(row + "_stamp", ""),
-                    Time = V(row + "_time_disp", V(row + "_time", "--:--")), Eps = V(row + "_eps", "") });
+                    Stamp = V(row + "_stamp", "") });
             }
-        }
-
-        void ShowMissedReminders(List<ReminderCandidate> due)
-        {
-            _lastReminderSummary = UnixNow();
-            foreach (var item in due) item.Recovered = true;
-            due.Sort((a, b) => a.At.CompareTo(b.At));
-            var lines = due.GetRange(0, Math.Min(4, due.Count)).ConvertAll(item =>
-                ReminderLocalTime(item.At).ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) + " " +
-                (item.Personal ? "补番" : item.Snoozed ? "稍后" : "开播") + " · " + item.Name);
-            string message = "恢复后补发 " + due.Count + " 条提醒\n" + string.Join("\n", lines);
-            if (due.Count > lines.Count) message += "\n其余可在提醒记录查看。";
-            bool bubble = ReminderCanSpeak && !AmbientQuiet;
-            if (bubble)
-            {
-                CancelSequence();
-                SayWithChoices(new Line(message, 1),
-                    new Choice("查看提醒记录", () => { RecordReminders(due, null, action: "history_opened"); OpenWebPanel("?reminders=1"); }),
-                    new Choice("知道了", () => RecordReminders(due, null, action: "acknowledged")));
-            }
-            PublishReminders(due, "TIARA · 错过提醒摘要", message, bubble);
         }
 
         public sealed class ReminderRecord
@@ -104,8 +95,11 @@ namespace UkagakaBangumi
             public string watch_id { get; set; }
             public string name { get; set; }
             public long scheduled_at { get; set; }
+            public long reminder_at { get; set; }
+            public int episode { get; set; }
             public long recorded_at { get; set; }
             public string status { get; set; }
+            public string reason { get; set; }
             public bool bubble { get; set; }
             public bool recovered { get; set; }
             public string action { get; set; }
@@ -115,7 +109,7 @@ namespace UkagakaBangumi
         }
 
         void RecordReminders(IEnumerable<ReminderCandidate> items, string status, bool bubble = false,
-            string action = null, long? snoozedUntil = null)
+            string action = null, long? snoozedUntil = null, string reason = null)
         {
             if (_selfTest || _closing) return;
             string file = Path.Combine(_root, "data", "reminder-history.json");
@@ -133,14 +127,16 @@ namespace UkagakaBangumi
                 {
                     var old = next.Find(entry => entry != null && entry.key == item.Key);
                     if (old != null && (action != null ? old.action == action : old.status == status ||
-                        old.status == "requested" || old.status == "unavailable")) continue;
+                        old.status == "bubble" || old.status == "requested" || old.status == "unavailable")) continue;
                     if (old != null) next.Remove(old);
                     next.Insert(0, new ReminderRecord
                     {
                         key = item.Key, kind = item.Test ? "test" : item.Snoozed ? "snooze" : item.Personal ? "catchup" : "airing",
                         watch_id = item.Id, name = item.Name, scheduled_at = item.At,
+                        reminder_at = item.FireAt, episode = item.Episode,
                         recorded_at = action == null || old == null ? now : old.recorded_at,
                         status = status ?? (old == null ? null : old.status),
+                        reason = reason ?? (old == null ? null : old.reason),
                         bubble = action == null || old == null ? bubble : old.bubble,
                         recovered = item.Recovered || (old != null && old.recovered),
                         action = action, action_at = action == null ? (long?)null : now, snoozed_until = snoozedUntil,
@@ -156,9 +152,9 @@ namespace UkagakaBangumi
             catch (Exception ex) { Log("reminder history: " + ex.Message); }
         }
 
-        void PublishReminders(List<ReminderCandidate> due, string title, string message, bool bubble)
+        void PublishReminders(IEnumerable<ReminderCandidate> due, string title, string message, bool bubble, Action open = null)
         {
-            RecordReminders(due, Notify(title, message) ? "requested" : "unavailable", bubble);
+            RecordReminders(due, bubble ? "bubble" : Notify(title, message, open) ? "requested" : "unavailable", bubble);
         }
     }
 }

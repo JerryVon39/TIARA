@@ -70,6 +70,9 @@ const args = [
   path.join(ROOT, 'pet', 'PanelHost.cs'),
   path.join(ROOT, 'pet', 'ReminderHistory.cs'),
   path.join(ROOT, 'pet', 'ReminderQueue.cs'),
+  path.join(ROOT, 'pet', 'ReminderPresentation.cs'),
+  path.join(ROOT, 'pet', 'ShellLayout.cs'),
+  path.join(ROOT, 'pet', 'DesktopAppearance.cs'),
   versionSource,
 ];
 
