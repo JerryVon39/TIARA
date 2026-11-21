@@ -37,13 +37,18 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node tools/pack_release.mjs
       - name: Verify the previous published asset and exercise the portable upgrade
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $version = $env:PREVIOUS_VERSION
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid previous version' }
           $repo = 'https://api.github.com/repos/JerryVon39/TIARA/releases/tags/'
           $name = "TIARA-portable-$version.zip"
           $url = "https://github.com/JerryVon39/TIARA/releases/download/v$version/$name"
-          $release = Invoke-RestMethod ($repo + "v$version") -Headers @{ Accept = 'application/vnd.github+json' }
+          $release = Invoke-RestMethod ($repo + "v$version") -Headers @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+          }
           $asset = $release.assets | Where-Object { $_.name -eq $name -and $_.browser_download_url -eq $url }
           if (!$asset -or $asset.digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'Verified migration archive not found' }
           $zip = Join-Path $env:RUNNER_TEMP $name
