@@ -851,8 +851,11 @@ async function main() {
     watch_id: String(secondEntry.id), episode: 3, source_stamp: remindStamp(latest, secondEntry) });
   fs.writeFileSync(reminderHistory, JSON.stringify(currentEvents));
   fs.writeFileSync(queuePath, '[]');
+  const centerModel = await fetch(origin + '/api/reminder/history').then(response => response.json());
+  if (!centerModel.ok || centerModel.pending?.length !== 2)
+    throw new Error('提醒中心验收档位不完整，预期待处理 ' + currentEvents.length + ' 条，实际 ' + (centerModel.pending?.length ?? 0) + ' 条');
   await send('Page.navigate', { url: origin + '/' });
-  await waitFor(() => evaluate("!!document.querySelector('#reminderCenter')"), '网页提醒中心入口');
+  await waitFor(() => evaluate("typeof document.querySelector('#reminderCenter')?.onclick === 'function'"), '网页提醒中心入口可用');
   await evaluate("document.querySelector('#reminderCenter').click()");
   await waitFor(() => evaluate(`document.querySelector('[data-reminder-tab="pending"]')?.getAttribute('aria-pressed') === 'true' &&
     document.querySelectorAll('[data-reminder-row]').length === 2`), '提醒中心逐部列出待处理');
