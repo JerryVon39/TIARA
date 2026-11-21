@@ -51,8 +51,8 @@ import { panelId, panelPortFile, panelControlFile, findPanel } from './lib/panel
 import { actualSchedule } from './lib/today.mjs';
 import { editWatchDetail, editWatchPreferences, watchDetail, watchUrl } from './lib/watch-detail.mjs';
 import { broadcastSuggestions, lookupBroadcast } from './lib/broadcast-lookup.mjs';
-import { nextScheduledUpdate, nextWeeklyUpdate, parseWatchSlot, quietAt, reminderLead, reminderTiming, REMINDER_LEADS, scheduleRow, setWatchSlot, personalReminder, catchupReminders } from './lib/watch-schedule.mjs';
-import { reminderSnoozes } from './lib/reminder-snooze.mjs';
+import { nextScheduledUpdate, nextWeeklyUpdate, parseWatchSlot, quietAt, reminderLead, reminderOverride, reminderPreview, reminderTiming, REMINDER_LEADS, scheduleRow, setWatchSlot, personalReminder, catchupReminders } from './lib/watch-schedule.mjs';
+import { remindStamp, reminderSnoozeKey, reminderSnoozeStates, reminderSnoozes } from './lib/reminder-snooze.mjs';
 import { applyWatchStart, remainingEpisodes, watchFloor, WATCH_STARTS } from './lib/watch-start.mjs';
 import { findWatchEntry, inactiveWatchIds, isWatchFinished, isCatchup, moveWatchEntry, WATCH_STATES } from './lib/watch-lifecycle.mjs';
 import { BGM_REL, readBgmConfig as readStoredBgmConfig, effectiveBgmConfig, bgmConfigView, validateBgmProxy, fetchSyncData } from './lib/bgm-sync.mjs';
@@ -102,6 +102,7 @@ const FACES = {
   surprise: 'surface3.png',
   sleepy: 'surface4.png',
   think: 'surface5.png',
+  bashful: 'surface6.png',
 };
 
 const MIME = {
@@ -499,7 +500,7 @@ async function apiState(req, res) {
       watching_count: active.length,
       catchup_list: catchup,
       catchup_reminders: catchupReminders(lib, now).map(slot => ({ ...slot,
-        quiet: reminderTiming(slot.at, settings).quiet })),
+        quiet: reminderTiming(slot.at, settings, reminderLead(settings, findWatchEntry(lib, slot.id)?.entry)).quiet })),
       catchup_week: await catchupWeek(lib, settings, now),
       paused: (lib.paused || []).filter(w => !isWatchFinished(w)),
       planned: lib.planned ?? [],
@@ -850,6 +851,11 @@ async function apiProgress(req, res) {
     const lib = await readLibrary(ROOT);
     const w = (lib.watching || []).find((x) => String(x.id) === id);
     if (!w) return { code: 404, payload: { ok: false, error: 'not watching: ' + id } };
+    if (body.reminder_event !== undefined) {
+      const { pending } = await reminderEntries(lib, Math.floor(Date.now() / 1000));
+      if (!pending.some(row => row.key === body.reminder_event && row.watch_id === id))
+        return { code: 409, payload: { ok: false, error: '这条提醒已处理或变动，请刷新提醒中心' } };
+    }
     if (body.expected_watch_revision !== undefined && watchDetail(lib, w).revision !== body.expected_watch_revision)
       return { code: 409, payload: { ok: false, error: '进度已经更新，请重新打开详情后补记' } };
 
@@ -1136,10 +1142,13 @@ async function apiWatchDetail(req, res) {
     if (!airing && active && !detail.schedule_ended && !found.entry.schedule_manual && /^\d+$/.test(detail.id)) {
       airing = (await broadcastSuggestions(ROOT, [detail.id]).catch(() => ({})))[detail.id] || null;
     }
-    const [settings, pet] = await Promise.all([readSettings(), desktopPresence()]);
+    const now = new Date();
+    const [settings, pet, state, snoozes] = await Promise.all([readSettings(), desktopPresence(), readReminderState(),
+      reminderSnoozes(ROOT, lib, null, Math.floor(+now / 1000)).catch(() => ({ pending: [] }))]);
     const reminder = { ...reminderStatus(detail, scheduleRow(lib, found.entry), settings, found.entry.start_date),
       desktop_online: !!pet };
-    return json(res, { ok: true, detail, airing, original, reminder }, 200, req);
+    const reminder_preview = previewWatchReminder(lib, detail, found.entry, settings, state, now, snoozes.pending, pet);
+    return json(res, { ok: true, detail, airing, original, reminder, reminder_preview }, 200, req);
   }
   if (req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
   if (!guardWrite(req, res)) return;
@@ -1175,7 +1184,7 @@ function reminderStatus(detail, slot, settings, since) {
   if (detail.finished && detail.state !== 'archived') return { status: 'finished' };
   if (detail.state !== 'watching') return { status: detail.state };
   function when(planned_at, kind) {
-    const timing = reminderTiming(planned_at, settings);
+    const timing = reminderTiming(planned_at, settings, reminderLead(settings, detail));
     return { status: timing.quiet ? 'quiet' : 'scheduled', at: timing.at, planned_at: timing.planned_at, kind };
   }
   if (isCatchup(detail)) {
@@ -1418,6 +1427,29 @@ async function apiWatchSchedule(req, res) {
     }
     const next = watchDetail(lib, w);
     return { changed: next.revision !== detail.revision, detail: next };
+  });
+}
+
+async function apiWatchReminder(req, res) {
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
+  if (!guardWrite(req, res)) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  if (typeof body.id !== 'string' || typeof body.muted !== 'boolean' || !validReminderOverride(body.lead))
+    return json(res, { error: '单番提醒设置无效' }, 400, req);
+  return updateWatch(req, res, 'watch:reminder', lib => {
+    const found = findWatchEntry(lib, body.id);
+    if (!found || !['watching', 'paused'].includes(found.state) || isWatchFinished(found.entry))
+      return { code: 409, error: '请先将这部番加入在追或补番' };
+    const { entry, state } = found;
+    const before = watchDetail(lib, entry, state);
+    if (body.expected_revision !== before.revision) return { code: 409, error: '番剧资料已变动，请重新打开详情' };
+    if (body.lead === null) delete entry.reminder_lead;
+    else entry.reminder_lead = body.lead;
+    if (body.muted) entry.reminder_muted = true;
+    else delete entry.reminder_muted;
+    const detail = watchDetail(lib, entry, state);
+    return { changed: detail.revision !== before.revision, detail };
   });
 }
 
@@ -1907,22 +1939,30 @@ async function apiPrivateSsp(req, res) {
 
 // ---------------- /api/settings ----------------
 /** GET 读偏好；POST { clock?: '24h'|'30h' } 写偏好并重算今日数据（桌宠尺寸在 data/state.json） */
-async function apiSettings(req, res) {
-  if (req.method === 'GET') return json(res, await readSettings(), 200, req);
-  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
-  if (!guardWrite(req, res)) return;
-  const body = await readJsonBody(req, res);
-  if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
+const validReminderOverride = value => value === null || REMINDER_LEADS.includes(value);
+
+function reminderSettingsError(body) {
   for (const key of ['quiet', 'quiet_work', 'quiet_weekend']) {
     const start = body[key + '_start'], end = body[key + '_end'];
     if (start === undefined && end === undefined) continue;
     const valid = value => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
     if (!(start === '' && end === '') && !(valid(start) && valid(end) && start !== end)) {
-      return json(res, { error: '请填写两个不同的 24 小时时刻，或同时留空关闭免打扰' }, 400, req);
+      return '请填写两个不同的 24 小时时刻，或同时留空关闭免打扰';
     }
   }
   if (body.reminder_lead !== undefined && !REMINDER_LEADS.includes(body.reminder_lead))
-    return json(res, { error: '请从可选的提前量中选择' }, 400, req);
+    return '请从可选的提前量中选择';
+  return null;
+}
+
+async function apiSettings(req, res) {
+  if (req.method === 'GET') return json(res, await readSettings(), 200, req);
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
+  if (!guardWrite(req, res)) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  const error = reminderSettingsError(body);
+  if (error) return json(res, { error }, 400, req);
   if (body.catchup_goal !== undefined && (!Number.isInteger(body.catchup_goal) || body.catchup_goal < 0 || body.catchup_goal > 999))
     return json(res, { error: '每周补番目标须为 0–999 集，0 表示关闭' }, 400, req);
   if (body.power_save !== undefined && typeof body.power_save !== 'boolean')
@@ -2198,23 +2238,41 @@ async function seasonData(q, cached, { warning, refreshed = false } = {}) {
     ...(warning ? { warning } : {}) };
 }
 
+function seasonRefreshWarning(error) {
+  if (error.code === 'season_incomplete') return 'Bangumi 返回的季度目录不完整';
+  if (error.status === 407 || /代理.*(拒绝|格式)/.test(error.message)) return 'Bangumi 代理设置或认证有误';
+  if (error.name === 'TimeoutError' || error.name === 'AbortError' || /超时/.test(error.message)) return '连接 Bangumi 超时';
+  if (error.status === 429) return 'Bangumi 请求过于频繁';
+  if (error.status >= 400) return 'Bangumi 返回 HTTP ' + error.status;
+  return '暂时无法连接 Bangumi';
+}
+
 function refreshSeason(q) {
   if (seasonInflight.has(q)) return seasonInflight.get(q);
   const work = (async () => {
+    let warning;
     try {
       const cached = await readSeasonCache(ROOT, q);
       const cfg = await readBgmConfig();
-      const data = await fetchSeason({ q, proxy: cfg.proxy, base: cfg.base, retries: 0, signal: AbortSignal.timeout(12_000) });
+      const data = await fetchSeason({ q, proxy: cfg.proxy, base: cfg.base, retries: 1, timeoutMs: 10_000,
+        signal: AbortSignal.timeout(36_000) });
       if (!data.items.length && (cached?.items.length || q < currentSeason()))
-        throw new Error('来源返回空季度，无法核验');
-      await writeSeasonCache(ROOT, data);
-      if (q >= currentSeason()) queueCoverPrefetch(data.items);
-      seasonRetryAfter.delete(q);
-      return { refreshed: true };
+        warning = 'Bangumi 返回空目录，无法核验';
+      else {
+        try { await writeSeasonCache(ROOT, data); }
+        catch { warning = '已取到目录，但无法写入本地缓存'; }
+        if (!warning) {
+          if (q >= currentSeason()) queueCoverPrefetch(data.items);
+          seasonRetryAfter.delete(q);
+          return { refreshed: true };
+        }
+      }
     } catch (error) {
-      seasonRetryAfter.set(q, Date.now() + SEASON_RETRY_MS);
-      return { warning: String(error.message || error) };
+      warning = seasonRefreshWarning(error);
     }
+    seasonRetryAfter.set(q, Date.now() + SEASON_RETRY_MS);
+    logLine('warn', '季度 ' + q + ' 联网更新：' + warning);
+    return { warning };
   })().finally(() => seasonInflight.delete(q));
   seasonInflight.set(q, work);
   return work;
@@ -2626,11 +2684,13 @@ const mdCell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' 
 
 function calendarEvents(lib, plan, { since, length, kind, settings, alarmMin, personalOnly = false }) {
   const events = [];
-  const muted = new Set((lib.watching || []).filter(w => w.reminder_muted).map(w => String(w.id)));
+  const watching = new Map((lib.watching || []).map(w => [String(w.id), w]));
   const tracked = new Set((lib.watching || []).filter(w => !isWatchFinished(w) && !isCatchup(w) && !w.schedule_ended).map(w => String(w.id)));
-  function noAlarm(id, date, time) {
+  function alarmFields(id, date, time) {
+    const entry = watching.get(String(id));
+    const lead = reminderOverride(entry?.reminder_lead) ?? alarmMin;
     const slot = Date.parse(date + 'T00:00:00+08:00') + toMin(time) * 60000;
-    return muted.has(String(id)) || reminderTiming(slot, settings, alarmMin).quiet;
+    return { alarmMin: lead, noAlarm: !!entry?.reminder_muted || reminderTiming(slot, settings, lead).quiet };
   }
   if (kind !== 'catchup') for (const day of plan) {
     for (const r of day.rows) {
@@ -2641,7 +2701,7 @@ function calendarEvents(lib, plan, { since, length, kind, settings, alarmMin, pe
         time: r.time_cst,
         summary: `${r.name_cn || r.id}${typeof r.ep_expected === 'number' ? ` 第${r.ep_expected}话` : ''}`,
         description: 'TIARA · 开播排期（含手动时刻和临时改期） · 北京时间 UTC+8',
-        noAlarm: noAlarm(r.id, day.date, r.time_cst),
+        ...alarmFields(r.id, day.date, r.time_cst),
       });
     }
   }
@@ -2652,7 +2712,7 @@ function calendarEvents(lib, plan, { since, length, kind, settings, alarmMin, pe
         const time = pad2(hour) + ':' + pad2(minute);
         events.push({ uid: `catchup-${date}-${slot.id}@tiara.local`, date, time,
           summary: '补番 · ' + slot.name, description: 'TIARA · 个人补番提醒 · 北京时间 UTC+8',
-          noAlarm: noAlarm(slot.id, date, time) });
+          ...alarmFields(slot.id, date, time) });
       }
     }
   }
@@ -2673,7 +2733,7 @@ async function apiCalendarFeed(req, res) {
     const alarmMin = reminderLead(settings);
     const events = calendarEvents(lib, upcomingDays(lib, since, FEED_DAYS), {
       since, length: FEED_DAYS, kind: 'both', settings, alarmMin, personalOnly: true,
-    }).map(({ noAlarm, ...event }) => event);
+    }).map(({ noAlarm, alarmMin, ...event }) => event);
     const refreshed = refreshCalendarFeed(previous, events, { start, now });
     if (JSON.stringify(previous) !== JSON.stringify(refreshed.stored)) await writeJsonAtomic(file, refreshed.stored);
     return refreshed;
@@ -2990,6 +3050,53 @@ async function desktopPresence() {
     startup_known: Object.hasOwn(pet, 'autostart') };
 }
 
+const readReminderState = () => readJSON('data/state.json').catch(() => null);
+
+function previewWatchReminder(library, detail, entry, settings, state, now, snoozes, pet) {
+  const scheduled = isCatchup(detail) || scheduleRow(library, entry);
+  const forecast = reminderPreview(scheduled ? detail : { ...detail, air_weekday: null, air_time_cst: null, schedule_adjustments: [] }, settings, {
+    since: entry.start_date, state: detail.state, now, quietUntil: state?.quiet_until, snoozes,
+    scanned: new Set(Array.isArray(state?.reminded) ? state.reminded : []),
+  });
+  const focus_until = Number.isSafeInteger(state?.focus_until) && state.focus_until * 1000 > +now ? state.focus_until : null;
+  const queued = Array.isArray(state?.pending_reminders) ? state.pending_reminders.filter(item => item?.Id === detail.id).length : 0;
+  return { ...forecast, desktop_online: Boolean(pet), tray_only: state?.reminder_tray_only === true,
+    focus: Boolean(pet && (state?.focus_paused_seconds > 0 || focus_until * 1000 > Date.parse(forecast.next?.at))), queued };
+}
+
+async function apiReminderPreview(req, res) {
+  if (!guardWrite(req, res)) return;
+  if (req.method !== 'GET' && req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
+  const body = req.method === 'POST' ? await readJsonBody(req, res) :
+    { id: new URL(req.url, 'http://localhost').searchParams.get('id') };
+  if (!body) return;
+  const settingsPatch = body.settings ?? {};
+  const override = body.watch;
+  if (typeof settingsPatch !== 'object' || Array.isArray(settingsPatch) ||
+      (override !== undefined && (!override || !validReminderOverride(override.lead) || typeof override.muted !== 'boolean')))
+    return json(res, { error: '提醒预览参数无效' }, 400, req);
+  const error = reminderSettingsError(settingsPatch);
+  if (error) return json(res, { error }, 400, req);
+  const now = new Date();
+  const [library, saved, state, pet] = await Promise.all([readLibrary(ROOT), readSettings(), readReminderState(), desktopPresence()]);
+  const targets = (library.watching || []).filter(entry => !isWatchFinished(entry)).map(entry => ({
+    id: String(entry.id), name: entry.name_cn || entry.name || String(entry.id),
+  }));
+  const id = body.id ?? targets[0]?.id;
+  if (!id) return json(res, { ok: true, settings: saved, targets, preview: null }, 200, req);
+  const target = findWatchEntry(library, id);
+  if (!target) return json(res, { error: '找不到这部番，请重新选择' }, 404, req);
+  const detail = watchDetail(library, target.entry, target.state);
+  const { pending } = await reminderSnoozes(ROOT, library, null, Math.floor(+now / 1000));
+  if (override) {
+    detail.reminder_lead = override.lead;
+    detail.reminder_muted = override.muted;
+  }
+  const settings = { ...saved, ...settingsPatch };
+  const preview = previewWatchReminder(library, detail, target.entry, settings, state, now, pending, pet);
+  return json(res, { ok: true, settings: saved, targets, preview: { ...preview, id: detail.id, name: detail.name } }, 200, req);
+}
+
 async function apiStartupPath(req, res) {
   if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
   if (!guardWrite(req, res)) return;
@@ -3042,26 +3149,114 @@ async function apiReminderTest(req, res) {
   return json(res, { ok: true, id }, 200, req);
 }
 
+const REMINDER_ACTIONS = 'data/reminder-actions.json';
+const REMINDER_HANDLED = new Set(['acknowledged', 'watch_clicked', 'details_opened', 'mark_clicked']);
+const REMINDER_PRESENTED = new Set(['bubble', 'requested', 'unavailable']);
+const REMINDER_WINDOW_SECONDS = 6 * 3600;
+
+async function readReminderRows(file) {
+  try {
+    const rows = await readJSON(file);
+    if (!Array.isArray(rows)) throw new Error('本机提醒记录的格式不正确');
+    return rows;
+  }
+  catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function reminderPending(event, library, now) {
+  if (!REMINDER_PRESENTED.has(event.status) || REMINDER_HANDLED.has(event.action) || event.snooze ||
+      !['airing', 'catchup', 'snooze'].includes(event.kind) || !Number.isSafeInteger(event.scheduled_at) ||
+      (event.reminder_at || event.scheduled_at) < now - REMINDER_WINDOW_SECONDS) return null;
+  const target = findWatchEntry(library, event.watch_id);
+  if (target?.state !== 'watching') return null;
+  const stamp = remindStamp(library, target.entry, target.state);
+  if (!stamp || (event.source_stamp && event.source_stamp !== stamp)) return null;
+  return { ...event, watch_url: watchUrl(target.entry.watch_url) || null,
+    watch_revision: watchDetail(library, target.entry, target.state).revision };
+}
+
+async function reminderEntries(library, now, subject = null) {
+  const [rows, actionRows, snoozes] = await Promise.all([
+    readReminderRows('data/reminder-history.json'),
+    readReminderRows(REMINDER_ACTIONS),
+    reminderSnoozeStates(ROOT, now, library).catch(() => new Map()),
+  ]);
+  const actions = new Map(actionRows.filter(row => row && REMINDER_HANDLED.has(row.action) &&
+    Number.isSafeInteger(row.action_at)).map(row => [row.key, row]));
+  const known = new Set(['watching', 'paused', 'archived'].flatMap(key => (library[key] || []).map(w => String(w.id))));
+  const events = rows.filter(row => row && typeof row.key === 'string' && Number.isSafeInteger(row.recorded_at) &&
+    (subject === null || row.watch_id === subject))
+    .slice(0, 200).map(({ key, kind, watch_id, name, scheduled_at, reminder_at, episode, recorded_at, status, reason, bubble, recovered, action, action_at, snoozed_until, source_stamp }) => {
+      const source = ['airing', 'catchup'].includes(kind) && /^[a-f0-9]{24}$/.test(source_stamp || '');
+      const snooze = source && snoozes.get(reminderSnoozeKey(watch_id, kind, scheduled_at, source_stamp));
+      const handled = actions.get(key);
+      const latestAction = handled && handled.action_at >= (action_at || 0) ? handled : { action, action_at };
+      return { key, kind, watch_id, name, scheduled_at, recorded_at, status, bubble, recovered,
+        action: latestAction.action, action_at: latestAction.action_at, snoozed_until,
+        ...(typeof reason === 'string' ? { reason } : {}),
+        ...(Number.isSafeInteger(reminder_at) && reminder_at > 0 ? { reminder_at } : {}),
+        ...(Number.isSafeInteger(episode) && episode > 0 ? { episode } : {}),
+        ...(source ? { source_stamp } : {}),
+        ...(snooze ? { snooze } : {}),
+        can_open: typeof watch_id === 'string' && known.has(watch_id) };
+    });
+  const pending = events.map(event => reminderPending(event, library, now)).filter(Boolean);
+  return { events, pending, actionRows };
+}
+
 async function apiReminderHistory(req, res) {
   if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
   if (!guardWrite(req, res)) return;
-  let rows;
-  try { rows = await readJSON('data/reminder-history.json'); }
-  catch (error) {
-    if (error.code !== 'ENOENT') return json(res, { error: '读不到本机提醒记录' }, 500, req);
-    rows = [];
-  }
-  if (!Array.isArray(rows)) return json(res, { error: '本机提醒记录的格式不正确' }, 500, req);
   const library = await readLibrary(ROOT).catch(() => ({}));
-  const known = new Set(['watching', 'paused', 'archived'].flatMap(key => (library[key] || []).map(w => String(w.id))));
   const subject = new URL(req.url, 'http://localhost').searchParams.get('watch');
-  const events = rows.filter(row => row && typeof row.key === 'string' && Number.isSafeInteger(row.recorded_at) &&
-    (subject === null || row.watch_id === subject))
-    .slice(0, 200).map(({ key, kind, watch_id, name, scheduled_at, recorded_at, status, bubble, recovered, action, action_at, snoozed_until, source_stamp }) =>
-      ({ key, kind, watch_id, name, scheduled_at, recorded_at, status, bubble, recovered, action, action_at, snoozed_until,
-        ...(['airing', 'catchup'].includes(kind) && /^[a-f0-9]{24}$/.test(source_stamp || '') ? { source_stamp } : {}),
-        can_open: typeof watch_id === 'string' && known.has(watch_id) }));
-  return json(res, { ok: true, events, desktop_online: Boolean(await desktopPresence()) }, 200, req);
+  const now = new Date();
+  let entries;
+  try { entries = await reminderEntries(library, Math.floor(+now / 1000), subject); }
+  catch { return json(res, { error: '读不到本机提醒记录' }, 500, req); }
+  const [desktop, state, settings] = await Promise.all([
+    desktopPresence(), readJSON('data/state.json').catch(() => null), readSettings(),
+  ]);
+  const quiet_until = Number.isSafeInteger(state?.quiet_until) && state.quiet_until * 1000 > +now ? state.quiet_until : null;
+  const mode = {
+    scheduled_quiet: quietAt(settings, now), quiet_until,
+    focus: Boolean(desktop && (state?.focus_until * 1000 > +now || state?.focus_paused_seconds > 0)),
+    tray_only: state?.reminder_tray_only === true,
+    queued: Array.isArray(state?.pending_reminders) ? state.pending_reminders.length : 0,
+  };
+  const queued = (mode.queued ? state.pending_reminders : []).filter(row => typeof row?.Name === 'string' &&
+    Number.isSafeInteger(row.FireAt) && row.FireAt > +now / 1000 - REMINDER_WINDOW_SECONDS)
+    .sort((a, b) => a.FireAt - b.FireAt).slice(0, 40)
+    .map(row => ({ name: row.Name, reminder_at: row.FireAt }));
+  return json(res, { ok: true, events: entries.events, pending: entries.pending, queued, desktop_online: Boolean(desktop), mode }, 200, req);
+}
+
+async function apiReminderAcknowledge(req, res) {
+  if (!guardWrite(req, res)) return;
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
+  const input = await readJsonBody(req, res);
+  if (!input) return;
+  const { key, action } = input;
+  if (typeof key !== 'string' || !key || key.length > 200 || !REMINDER_HANDLED.has(action))
+    return json(res, { error: '提醒操作无效' }, 400, req);
+  const handled = await withWriteLock(async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const library = await readLibrary(ROOT);
+    const { events, pending, actionRows } = await reminderEntries(library, now);
+    const event = events.find(row => row.key === key);
+    if (event && REMINDER_HANDLED.has(event.action)) return true;
+    // 完结可能发生在网页刚记下最后一话时，此时仍要保存这次操作。
+    if (!pending.some(row => row.key === key) &&
+        !(action === 'mark_clicked' && event?.can_open && REMINDER_PRESENTED.has(event.status) &&
+          event.recorded_at >= now - REMINDER_WINDOW_SECONDS)) return false;
+    const next = [{ key, action, action_at: now }, ...actionRows.filter(row => row?.key !== key)].slice(0, 200);
+    await writeJsonAtomic(path.join(ROOT, REMINDER_ACTIONS), next);
+    return true;
+  });
+  return handled ? json(res, { ok: true }, 200, req)
+    : json(res, { error: '这条提醒已变动，请刷新提醒中心' }, 409, req);
 }
 
 async function apiReminderSnoozes(req, res) {
@@ -3069,7 +3264,20 @@ async function apiReminderSnoozes(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
   const input = req.method === 'POST' ? await readJsonBody(req, res) : null;
   if (req.method === 'POST' && !input) return;
-  const result = await withWriteLock(async () => reminderSnoozes(ROOT, await readLibrary(ROOT), input));
+  const result = await withWriteLock(async () => {
+    const library = await readLibrary(ROOT);
+    const now = Math.floor(Date.now() / 1000);
+    if (input?.action === 'create' && input.event_key !== undefined) {
+      const { events } = await reminderEntries(library, now);
+      const event = events.find(row => row.key === input.event_key);
+      const item = Array.isArray(input.items) && input.items.length === 1 ? input.items[0] : null;
+      if (!event || !item || !REMINDER_PRESENTED.has(event.status) ||
+          event.watch_id !== item.id || event.kind !== item.kind || event.scheduled_at !== item.slot_at ||
+          event.source_stamp !== item.stamp || REMINDER_HANDLED.has(event.action))
+        return { code: 409, error: '这条提醒已处理或变动，请刷新提醒中心' };
+    }
+    return reminderSnoozes(ROOT, library, input, now);
+  });
   if (result.error) return json(res, { error: result.error }, result.code, req);
   return json(res, { ok: true, ...result }, 200, req);
 }
@@ -3120,6 +3328,9 @@ const server = http.createServer(async (req, res) => {
     if (url === '/api/panel-revision') return await apiPanelRevision(req, res);
     if (url === '/api/reminder/test') return await apiReminderTest(req, res);
     if (url === '/api/reminder/history') return await apiReminderHistory(req, res);
+    if (url === '/api/reminder/preview') return await apiReminderPreview(req, res);
+    if (url === '/api/reminder/watch') return await apiWatchReminder(req, res);
+    if (url === '/api/reminder/acknowledge') return await apiReminderAcknowledge(req, res);
     if (url === '/api/reminder/snoozes') return await apiReminderSnoozes(req, res);
     if (url === '/api/watch/lifecycle') return await apiWatchLifecycle(req, res);
     if (url === '/api/watch/preferences') return await apiWatchPreferences(req, res);
@@ -3333,8 +3544,7 @@ async function maintainSeasonCatalog() {
     if (stopping) return;
     if (Date.now() < (seasonRetryAfter.get(q) || 0)) continue;
     if (!seasonRefreshState(q, await readSeasonCache(ROOT, q), now).due) continue;
-    const result = await refreshSeason(q);
-    if (result.warning) logLine('warn', '季度 ' + q + ' 更新失败，保留本地资料');
+    await refreshSeason(q);
   }
 }
 

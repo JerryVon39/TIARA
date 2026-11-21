@@ -45,6 +45,11 @@ Write-Output "Release check workspace: $work"
 
 function Start-IsolatedPet($root, $expected, [scriptblock]$check) {
     $exe = Join-Path $root 'pet/Pet.exe'
+    $normalized = (Resolve-Path -LiteralPath $root).Path.Replace('\', '/').TrimEnd('/').ToLowerInvariant()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $instance = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized))).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
     $pet = Start-Process -FilePath $exe -WorkingDirectory $root -WindowStyle Hidden -PassThru
     try {
         $origin = $null
@@ -55,7 +60,10 @@ function Start-IsolatedPet($root, $expected, [scriptblock]$check) {
                 $port = [int](Get-Content -LiteralPath $portFile)
                 $candidate = "http://127.0.0.1:$port"
                 $health = Invoke-RestMethod "$candidate/api/health" -TimeoutSec 1
-                if ($health.app -eq 'tiara' -and $health.version -eq $expected) { $origin = $candidate; break }
+                if ($health.app -eq 'tiara' -and $health.version -eq $expected -and $health.instance -eq $instance) {
+                    $origin = $candidate
+                    break
+                }
             } catch {}
             Start-Sleep -Milliseconds 250
         }
@@ -274,21 +282,27 @@ try {
     foreach ($item in 'yaya.dll', 'yaya_base') {
         Copy-Item -LiteralPath (Join-Path $yaya $item) -Destination $master -Recurse
     }
+    $windowNames = @([IO.File]::ReadAllLines((Join-Path $master 'descript.txt'), [Text.Encoding]::UTF8) |
+        ForEach-Object { if ($_ -match '^(?:sakura\.name|name),(.+)$') { $Matches[1].Trim() } })
+    if (!$windowNames.Count) { throw 'The packaged SSP ghost has no display name.' }
+    $expectedYaya = Join-Path $master 'yaya.dll'
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     $exe = Join-Path $sspRun 'ssp.exe'
-    $hostProcess = Start-Process -FilePath $exe -WorkingDirectory $sspRun -ArgumentList '--ghost tiara-yaya --option readonly --sstp-listen none' -PassThru
+    $hostProcess = Start-Process -FilePath $exe -WorkingDirectory $sspRun -ArgumentList '--ghost tiara-yaya --option readonly --sstp-listen none' -WindowStyle Hidden -PassThru
     $nameProperty = [Windows.Automation.AutomationElement]::NameProperty
     $processProperty = [Windows.Automation.AutomationElement]::ProcessIdProperty
     $byProcess = [Windows.Automation.PropertyCondition]::new($processProperty, [int]$hostProcess.Id)
-    $ghost = $null
+    $loadedGhost = $false
     for ($attempt = 0; $attempt -lt 32; $attempt++) {
         if ($hostProcess.HasExited) { throw 'SSP quit before loading the ghost.' }
         $ghost = [Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children, $byProcess) |
-            Where-Object { $_.GetCurrentPropertyValue($nameProperty) -match 'YAYA' } | Select-Object -First 1
-        if ($ghost) { break }
+            Where-Object { $windowNames -contains $_.GetCurrentPropertyValue($nameProperty) } | Select-Object -First 1
+        $hostProcess.Refresh()
+        $yayaModule = $hostProcess.Modules | Where-Object FileName -EQ $expectedYaya | Select-Object -First 1
+        if ($ghost -and $yayaModule) { $loadedGhost = $true; break }
         Start-Sleep -Milliseconds 250
     }
-    if (!$ghost) { throw 'TIARA did not expose a YAYA ghost window during SSP startup.' }
+    if (!$loadedGhost) { throw 'SSP did not load both the packaged TIARA window and its YAYA module.' }
     Write-Output 'SSP: installed public ZIP, loaded TIARA/YAYA on the desktop.'
 } finally {
     if ($hostProcess -and !$hostProcess.HasExited) {

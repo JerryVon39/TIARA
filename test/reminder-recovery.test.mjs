@@ -25,9 +25,10 @@ test('补发快照包含跨午夜的上一天档位，并沿用临时调档和�
       personal('catchup', 6, '22:00'), personal('today-catchup', 7, '00:30'),
       personal('new-catchup', 6, '22:15', { track_from: current }),
       airing('after-midnight', { air_weekday: 7, air_time_cst: '24:15' }),
+      airing('future-premiere', { air_weekday: 7, start_date: '2026-11-22' }),
     ],
     paused: [airing('paused')],
-    weekday: { 7: [{ id: 'after-midnight', time_cst: '24:15' }], 6: [
+    weekday: { 7: [{ id: 'after-midnight', time_cst: '24:15' }, { id: 'future-premiere', time_cst: '12:00' }], 6: [
       { id: 'airing', time_cst: '23:25' }, { id: 'late', time_cst: '25:30' },
       { id: 'moved', time_cst: '21:00' }, { id: 'finished', time_cst: '22:00' },
       { id: 'new', time_cst: '22:00' }, { id: 'paused', time_cst: '23:00' },
@@ -39,7 +40,7 @@ test('补发快照包含跨午夜的上一天档位，并沿用临时调档和�
     '--root', root, '--date', current], { windowsHide: true });
   const raw = await fs.readFile(path.join(root, 'ghost/master/today.txt'), 'utf8');
   const vars = Object.fromEntries(raw.split(/\r?\n/).filter(line => /^[\w]+=/.test(line)).map(line => line.split('=')));
-  const rows = prefix => Object.keys(vars).filter(key => new RegExp('^' + prefix + '\\d+_id$').test(key)).map(key => {
+  const rows = prefix => Object.keys(vars).filter(key => new RegExp('^' + prefix + '\\d+_id$').test(key) && vars[key.slice(0, -3) + '_unix']).map(key => {
     const row = key.slice(0, -3);
     return [vars[key], new Date(Number(vars[row + '_unix']) * 1000).toISOString(), vars[row + '_personal']];
   }).sort((a, b) => a[0].localeCompare(b[0]));
@@ -54,4 +55,7 @@ test('补发快照包含跨午夜的上一天档位，并沿用临时调档和�
   assert.deepEqual(rows('personal'), [['today-catchup', '2026-11-14T16:30:00.000Z', undefined]]);
   assert.deepEqual(rows('next'), [['after-midnight', '2026-11-15T16:15:00.000Z', '0']]);
   assert.match(vars.next1_stamp, /^[a-f0-9]{24}$/);
+  const premiere = Object.keys(vars).find(key => /^show\d+_id$/.test(key) && vars[key] === 'future-premiere');
+  assert.ok(premiere, '首播前仍可在排片上看到番剧');
+  assert.equal(vars[premiere.slice(0, -3) + '_unix'], '', '首播前没有桌宠提醒时间');
 });

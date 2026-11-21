@@ -88,6 +88,7 @@ namespace UkagakaBangumi
         int _bubbleTimeIndex;
         Action _pendingChatter;
         bool _pendingHour;
+        bool _speakingChatter, _bubbleIsChatter;
         long _chatterExpires;
         Dictionary<string, int> _storyProgress = new Dictionary<string, int>();
         string _companionImport = "";
@@ -116,14 +117,20 @@ namespace UkagakaBangumi
 
         bool ChatterCanSpeak
         {
-            get { return IsVisible && !_closing && !_dragging && !BubbleReading && !CompanionReading && _seq == null; }
+            get { return IsVisible && !_closing && !_dragging && !BubbleReading && !CompanionReading &&
+                _seq == null && !_recoverReminders && _pendingReminders.Count == 0 &&
+                _snoozeSettingsPending == 0 && _progressPending.Count == 0 && !_progressUndoPending; }
         }
 
         bool ReminderCanSpeak
         {
             get
             {
-                return IsVisible && !_reminderTrayOnly && !_dragging && !BubbleReading && !CompanionReading && _seq == null;
+                return IsVisible && !_reminderTrayOnly && !_dragging && !CompanionReading &&
+                    _snoozeSettingsPending == 0 && _progressPending.Count == 0 && !_progressUndoPending &&
+                    !PanelOpen && (ContextMenu == null || !ContextMenu.IsOpen) &&
+                    (!BubbleReading || (_bubbleIsChatter && !_bubble.IsMouseOver && !_bubble.IsKeyboardFocusWithin &&
+                        _choices.Visibility != Visibility.Visible));
             }
         }
 
@@ -149,7 +156,9 @@ namespace UkagakaBangumi
             if (!ChatterCanSpeak) return;
             var speak = _pendingChatter;
             _pendingChatter = null;
-            speak();
+            _speakingChatter = true;
+            try { speak(); }
+            finally { _speakingChatter = false; }
         }
 
         static string CompanionDate(string value)
@@ -308,6 +317,7 @@ namespace UkagakaBangumi
             if (duration >= 1 && duration <= 180) _focusMinutes = duration;
             _focusDuty = FocusActive && StateValue<bool>(serializer, state, "focus_duty");
             _quietUntil = StateValue<long>(serializer, state, "quiet_until");
+            LoadQuietPeriods(serializer, state);
             _reminderTrayOnly = StateValue<bool>(serializer, state, "reminder_tray_only");
             _favoriteLines = ValidFavorites(StateValue<List<string>>(serializer, state, "favorite_lines"));
             _firstDuty = CompanionDate(StateValue<string>(serializer, state, "first_duty"));
@@ -875,22 +885,26 @@ namespace UkagakaBangumi
                 int selected = minutes;
                 UtilityButton(quietOptions, "安静 " + minutes + " 分钟", "focus-quiet-" + minutes, () =>
                 {
-                    _quietUntil = UnixNow() + selected * 60;
+                    SetTemporaryQuiet(selected, UnixNow());
                     FocusChanged();
                 });
             }
             if (quiet) UtilityButton(quietOptions, "取消临时安静", "focus-quiet-cancel", () =>
             {
-                _quietUntil = 0;
+                SetTemporaryQuiet(0, UnixNow());
                 FocusChanged();
             });
-            UtilityText(panel, "专注暂停闲聊和报时。临时安静也会静音桌宠的开播与补番通知。");
+            UtilityText(panel, "专注期间暂停闲聊和报时，开播与补番提醒排队等候。临时安静和计划免打扰期间的提醒会记入提醒记录。");
             var tray = new CheckBox { Content = "开播与补番提醒只走托盘", IsChecked = _reminderTrayOnly, Foreground = ScheduleInk };
             AutomationProperties.SetAutomationId(tray, "focus-tray-only");
             tray.Checked += delegate { _reminderTrayOnly = true; SaveState(); };
             tray.Unchecked += delegate { _reminderTrayOnly = false; SaveState(); };
             panel.Children.Add(tray);
             UtilityText(panel, "托盘模式全天生效。单番静音和免打扰优先于开播通知。");
+            var reminders = new WrapPanel();
+            panel.Children.Add(reminders);
+            UtilityButton(reminders, ReminderCenterMenuLabel, "focus-reminder-center", OpenReminderCenter);
+            UtilityButton(reminders, "提醒设置", "focus-reminder-settings", () => OpenWebPanel("?reminder-settings=1"));
         }
 
         void UpdateFocusLabel()
@@ -899,7 +913,8 @@ namespace UkagakaBangumi
             int seconds = _focusUntil > 0 ? (int)Math.Max(0, _focusUntil - UnixNow()) : _focusPausedSeconds;
             string remaining = (seconds / 60).ToString("00") + ":" + (seconds % 60).ToString("00");
             _focusStatus.Text = (FocusActive ? (_focusUntil > 0 ? "剩余 " : "已暂停 ") + remaining : "计时待命") +
-                (_quietUntil > UnixNow() ? " · 临时安静" : "");
+                (_quietUntil > UnixNow() ? "\n临时安静至 " + ReminderClock(_quietUntil) + "（北京时间）" : "") +
+                (_pendingReminders.Count > 0 ? "\n" + _pendingReminders.Count + " 条提醒排队中" : "");
         }
 
         void TickFocus()
@@ -930,8 +945,8 @@ namespace UkagakaBangumi
                     if (choice == 2) text = "值日结束。会长，喝口水，起来走两步吧。";
                 }
                 if (gain > 0) text += "\n好感 +" + gain;
-                if (!AmbientQuiet && ChatterCanSpeak) Say(new Line(text, 1), true);
-                Notify(duty ? "TIARA · 值日结束" : "TIARA · 专注结束", text);
+                if (!AmbientQuiet && !_reminderTrayOnly && ChatterCanSpeak) Say(new Line(text, 1), true);
+                else Notify(duty ? "TIARA · 值日结束" : "TIARA · 专注结束", text);
             }
         }
     }

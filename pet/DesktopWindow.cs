@@ -30,7 +30,6 @@ namespace UkagakaBangumi
         bool _recallKeyEnabled, _recallKeyRegistered;
         IntPtr _fullscreenOverride;
         DispatcherTimer _recallLayerTimer;
-        Window _desktopWindowSettings;
 
         [DllImport("user32.dll", SetLastError = true)]
         static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
@@ -83,6 +82,21 @@ namespace UkagakaBangumi
             return space <= 0 ? 0 : Math.Max(0, Math.Min(1, (double)offset / space));
         }
 
+        internal static Rect WorkAreaForWindow(System.Drawing.Rectangle area, int px, int py, double left, double top, double dpi)
+        {
+            return new Rect(left + (area.Left - px) / dpi, top + (area.Top - py) / dpi, area.Width / dpi, area.Height / dpi);
+        }
+
+        internal static System.Drawing.Point MonitorRecallPosition(System.Drawing.Rectangle area, int width, int height,
+            int bubbleBand, bool bubbleBelow, ScreenPosition saved)
+        {
+            if (saved == null) return RecallPosition(area, width, height);
+            return new System.Drawing.Point(
+                area.Left + (int)Math.Round(Math.Max(0, area.Width - width) * saved.X),
+                area.Top + (int)Math.Round(Math.Max(0, area.Height - (height - bubbleBand)) * saved.Y) -
+                    (bubbleBelow ? 0 : bubbleBand));
+        }
+
         void RecordScreenPosition(bool acceptNewScreen = false)
         {
             if (!_locationReady || !IsVisible) return;
@@ -107,29 +121,23 @@ namespace UkagakaBangumi
             _lastScreen = screen.DeviceName;
         }
 
-        void MoveToScreen(Screen screen, bool raise)
+        void MoveToScreen(Screen screen, bool raise, bool useSavedPosition = true)
         {
             var hwnd = new WindowInteropHelper(this).Handle;
             RECT bounds;
             if (hwnd == IntPtr.Zero || screen == null || !GetWindowRect(hwnd, out bounds)) return;
             var work = screen.WorkingArea;
-            ScreenPosition saved;
-            _screenPositions.TryGetValue(screen.DeviceName, out saved);
+            ScreenPosition saved = null;
+            if (useSavedPosition) _screenPositions.TryGetValue(screen.DeviceName, out saved);
             for (int pass = 0; pass < 2; pass++)
             {
                 int width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top;
-                var position = RecallPosition(work, width, height);
-                if (saved != null)
-                {
-                    int band = BubbleBandPixels(height);
-                    int artHeight = height - band;
-                    int offset = _bubbleBelow ? 0 : band;
-                    position.X = work.Left + (int)Math.Round(Math.Max(0, work.Width - width) * saved.X);
-                    position.Y = work.Top + (int)Math.Round(Math.Max(0, work.Height - artHeight) * saved.Y) - offset;
-                }
+                var position = MonitorRecallPosition(work, width, height, BubbleBandPixels(height), _bubbleBelow, saved);
                 SetWindowPos(hwnd, IntPtr.Zero, position.X, position.Y, 0, 0,
                     SWP_NOSIZE | SWP_NOACTIVATE | (raise && pass == 0 ? 0 : SWP_NOZORDER));
                 // Moving between monitors can resize the window through WM_DPICHANGED.
+                UpdateLayout();
+                if (pass == 0) FitDisplayScale();
                 UpdateLayout();
                 if (!GetWindowRect(hwnd, out bounds) || (width == bounds.Right - bounds.Left && height == bounds.Bottom - bounds.Top))
                     break;
@@ -141,6 +149,7 @@ namespace UkagakaBangumi
         {
             if (_lastScreen.Length > 0)
                 MoveToScreen(Screen.AllScreens.FirstOrDefault(screen => screen.DeviceName == _lastScreen) ?? Screen.PrimaryScreen, false);
+            FitDisplayScale();
             SnapIntoWorkArea();
             _locationReady = true;
             RecordScreenPosition(true);
@@ -153,6 +162,14 @@ namespace UkagakaBangumi
                 handled = true;
                 Dispatcher.BeginInvoke(new Action(RecallFromTray));
             }
+            if (message == 0x02E0 || message == 0x007E) // WM_DPICHANGED / WM_DISPLAYCHANGE
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                {
+                    if (!_locationReady || !IsVisible || _closing || _dragging) return;
+                    FitDisplayScale();
+                    if (BubbleReading) ApplyHeight(true);
+                    SnapIntoWorkArea();
+                }));
             return IntPtr.Zero;
         }
 
@@ -171,36 +188,15 @@ namespace UkagakaBangumi
             }
         }
 
-        void OpenDesktopWindowSettings()
+        void AddPositionReset(Panel panel, string id)
         {
-            if (_desktopWindowSettings != null) { _desktopWindowSettings.Activate(); return; }
-            StackPanel content;
-            var win = UtilityWindow("TIARA · 显示与召回", out content);
-            _desktopWindowSettings = win;
-            win.Closed += delegate { _desktopWindowSettings = null; };
-            UtilityText(content, "显示与召回", true);
-            CompanionOption(content, "本屏有全屏窗口时暂时隐藏桌宠", "window-hide-fullscreen", _hideFullscreen, value =>
+            var result = ScheduleText("", 12, ScheduleMuted);
+            UtilityButton(panel, "重置桌宠位置", id, () =>
             {
-                _hideFullscreen = value;
-                TickDesktopVisibility();
-                SaveState();
+                result.Text = RecallDesktop(true) ? "桌宠已移到鼠标所在屏幕中央。"
+                    : "已移动桌宠，暂时无法保存位置。";
             });
-            var status = ScheduleText("", 12, ScheduleMuted);
-            Action update = delegate
-            {
-                status.Text = !_recallKeyEnabled ? "也可以从托盘选择「找回桌宠」。" : _recallKeyRegistered
-                    ? "快捷键已启用。" : "该快捷键当前不可用，可能已被占用。也可以从托盘找回。";
-            };
-            CompanionOption(content, "启用召回快捷键 " + RecallKeys, "window-recall-hotkey", _recallKeyEnabled, value =>
-            {
-                _recallKeyEnabled = value;
-                ApplyRecallHotkey(new WindowInteropHelper(this).Handle);
-                SaveState();
-                update();
-            });
-            content.Children.Add(status);
-            update();
-            win.Show();
+            panel.Children.Add(result);
         }
 
         void ResetManualVisibility(bool show)
