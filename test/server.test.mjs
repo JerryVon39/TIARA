@@ -22,6 +22,8 @@ import { remindStamp } from '../lib/reminder-snooze.mjs';
 import http from 'node:http';
 import { once } from 'node:events';
 import { panelId, probePanel } from '../lib/panel-instance.mjs';
+import { withLibraryLock } from '../lib/library-lock.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { snapshot } from '../tools/snapshot_daily.mjs';
 import { readZip } from '../lib/zip.mjs';
 
@@ -344,10 +346,62 @@ test('季表漏页保留完整缓存，重试成功后替换', async t => {
   const fallback = (await refresh()).json;
   assert.equal(fallback.source, 'cache-stale');
   assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), old);
+  assert.equal(fallback.last_refresh.warning, fallback.warning);
+  const local = (await req(srv.port, '/api/season?q=' + q)).json;
+  assert.equal(local.refresh_due, false);
+  assert.deepEqual(local.last_refresh, fallback.last_refresh);
+  assert.deepEqual(local.items.map(item => item.id), [20, 21]);
   fails = false;
   const updated = (await refresh()).json;
   assert.equal(updated.source, 'net');
   assert.deepEqual(updated.items.map(item => item.id), [30, 31]);
+  assert.equal(updated.last_refresh.source, 'Bangumi API');
+  assert.equal(updated.warning, undefined);
+});
+
+test('季度批量逐部建议观看方式，保留已有条目并解释改季与不存在', async t => {
+  const root = await makeFixture();
+  const q = '2019Q1';
+  const dir = path.join(root, 'assets/season-catalog');
+  const quarterFile = quarter => path.join(root, 'data', 'season', quarter + '.json');
+  await fs.mkdir(dir, { recursive: true });
+  const relocated = { id: 9003, name: '原内置目录保留', date: '2019-01-01' };
+  await fs.writeFile(path.join(dir, q + '.json'), JSON.stringify({ q, total: 1, items: [relocated], source: '随包' }));
+  const now = cstParts().date;
+  const entries = [
+    { id: 9000, name: '待确认', date: '2019-01-02' },
+    { id: 9001, name: '已完播', date: '2019-01-03', broadcast_end: '2019-03-09', eps: 8, weekday: 2 },
+    { id: 9002, name: '开播活动', date: now, weekday: 4 },
+    { id: 554779, name: '已有番', eps: 12 },
+  ];
+  await fs.writeFile(quarterFile(q), JSON.stringify({ q, items: entries, total: entries.length }));
+  await fs.writeFile(quarterFile('2019Q2'), JSON.stringify({ q: '2019Q2', total: 1,
+    items: [{ ...relocated, date: '2019-04-01' }] }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const post = body => req(srv.port, '/api/season/apply', { method: 'POST', body });
+  const scope = [9000, 9001, 9002, 9003, 554779, 98765];
+  const preview = await post({ q, add: scope, preview: true });
+  assert.equal(preview.status, 200, preview.text);
+  assert.deepEqual(preview.json.rows.map(row => [row.id, row.mode || row.reason]), [
+    ['9000','planned'], ['9001','catchup'], ['9002','airing'], ['9003','moved_quarter'],
+    ['554779','already_watching'], ['98765','not_in_catalog'],
+  ]);
+  assert.equal((await readLib(root)).watching.length, 1, '预览不写入番库');
+  const local = (await req(srv.port, '/api/season?q=' + q)).json;
+  assert.deepEqual(local.relocations, { '9003': '2019Q2' });
+  assert.equal((await post({ q, add: scope, modes: { '9000': 'planned' } })).status, 400);
+  const modes = { '9000': 'planned', '9001': 'catchup', '9002': 'airing', '9003': 'airing', '554779': 'planned', '98765': 'catchup' };
+  const result = await post({ q, add: scope, modes, start_mode: 'head' });
+  assert.equal(result.status, 200, result.text);
+  assert.deepEqual(result.json.added_ids, ['9000','9001','9002']);
+  assert.deepEqual(result.json.skipped_details.map(row => row.reason).sort(), ['already_watching','moved_quarter','not_in_catalog']);
+  const library = await readLib(root);
+  assert.ok(library.planned.some(row => row.id === 9000));
+  assert.ok(library.watching.some(row => row.id === 9001 && row.watch_mode === 'catchup'));
+  assert.ok(!Object.values(library.weekday).flat().some(row => row.id === 9001));
+  assert.ok(library.watching.some(row => row.id === 9002 && !row.watch_mode));
+  assert.equal((await post({ q, add: scope, modes })).json.added, 0, '重复提交不重复入库');
 });
 
 test('新目录可以离线读取周档和封面，已结束条目加入补番', async t => {
@@ -458,6 +512,15 @@ test('桌宠写入刷新标记，升级向导区分本版自启、旧路径和�
   const after = await get('/api/panel-revision');
   assert.notEqual(after.revision, before.revision);
   assert.equal((await get('/api/panel-revision')).revision, after.revision);
+  assert.equal(after.reminder_revision, before.reminder_revision);
+  let previousRevision = after.reminder_revision;
+  for (const file of ['reminder-history.json', 'reminder-actions.json', 'reminder-snoozes.json', 'state.json']) {
+    await fs.writeFile(path.join(root, 'data', file), '[]');
+    const next = await get('/api/panel-revision');
+    assert.equal(next.revision, after.revision);
+    assert.notEqual(next.reminder_revision, previousRevision, file);
+    previousRevision = next.reminder_revision;
+  }
 });
 
 test('Bangumi 连接结果分别报告，确认只写预览中的变更', async t => {
@@ -1022,6 +1085,71 @@ test('桌宠原播周档跟随时制，临时调档和提醒单独计算', async
   assert.equal(Date.parse(after.at) - Date.parse(before.at), 7 * 86400000);
   const skippedSlotOutsideThisWeek = cstParts(new Date(before.at)).date > cstParts(new Date(Date.now() + 6 * 86400000)).date;
   assert.equal(((await req(srv.port, '/api/state')).json.week[1] || []).some(row => row.id === '554779'), skippedSlotOutsideThisWeek);
+});
+
+test('桌宠离线首屏和网页接着看共用排片、备用链接及实际提醒状态', async t => {
+  const root = await makeFixture();
+  const now = new Date();
+  const slot = new Date(+now + 15 * 60000);
+  const cst = cstParts(slot);
+  const time = [cst.hour, cst.minute].map(value => String(value).padStart(2, '0')).join(':');
+  const title = { id: '554779', name_cn: '仅备用播放入口', eps: 2, ep_status: 1,
+    air_weekday: cst.weekday, air_time_cst: time, user_details: {
+      pinned_at: now.toISOString(),
+      links: [{ url: 'file:///invalid' }, { url: 'https://example.invalid/backup' }],
+    } };
+  const entries = Array.from({ length: 9 }, (_, i) => ({ id: 'local-continue-' + i,
+    name_cn: '接着看 ' + i, eps: 5, ep_status: i % 2, watch_mode: i % 2 ? 'catchup' : 'airing' }));
+  const weekday = { [cst.weekday]: [{ id: title.id, name_cn: title.name_cn, time_cst: time }] };
+  await fs.writeFile(path.join(root, 'data/library.json'), JSON.stringify({ watching: [...entries, title], weekday }));
+  await fs.writeFile(path.join(root, 'data/state.json'), JSON.stringify({
+    quiet_until: Math.floor(+now / 1000) + 3600, pending_reminders: [{ Id: title.id }],
+  }));
+
+  let requested;
+  const requestReceived = new Promise(resolve => { requested = resolve; });
+  const upstream = http.createServer((_, res) => requested(res));
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const srv = await startServer(root, { BGM_BROADCAST_URL: 'http://127.0.0.1:' + upstream.address().port });
+  t.after(() => srv.child.kill());
+  const read = async route => (await req(srv.port, route)).json;
+
+  const original = read('/api/schedule/original');
+  const waiting = await Promise.race([requestReceived, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error('未开始原播刷新')), 5000);
+    timer.unref();
+  })]);
+  const local = await read('/api/schedule/desktop?local=1');
+  assert.equal(waiting.writableEnded, false, '本机排片不等待未返回的原播资料');
+  const state = await read('/api/state');
+  assert.deepEqual(state.continue_ids, local.continuing.map(row => row.id));
+  assert.equal(local.continuing.length, 10);
+  const card = local.continuing[0];
+  assert.equal(card.id, title.id);
+  assert.deepEqual(card.playback, { url: 'https://example.invalid/backup', backup: true });
+  assert.equal(state.schedule_cards[title.id].schedule_note, card.schedule_note);
+  assert.match(card.schedule_note, /下次安排.*已有 1 条排队中.*本次临时安静.*下次提醒/);
+  if (cst.date === cstParts(now).date) assert.equal(local.today.find(row => row.id === title.id).watch_url, card.playback.url);
+  assert.equal(local.rows.find(row => row.id === title.id).source, 'custom');
+
+  const originalAt = new Date(+now - 6 * 86400000);
+  originalAt.setUTCSeconds(0, 0);
+  waiting.writeHead(200, { 'Content-Type': 'application/json' });
+  waiting.end(JSON.stringify({ items: [{ title: title.name_cn, broadcast: 'R/' + originalAt.toISOString() + '/P7D',
+    sites: [{ site: 'bangumi', id: title.id }] }] }));
+  assert.equal((await original).ok, true);
+  const enriched = await read('/api/schedule/desktop?local=1');
+  assert.equal(enriched.rows.find(row => row.id === title.id).source, 'original');
+  assert.equal(enriched.continuing[0].schedule_note, card.schedule_note);
+
+  const completed = await req(srv.port, '/api/progress', { method: 'POST', body: { id: title.id, delta: 1, client: 'desktop' } });
+  assert.equal(completed.json.became_finished, true);
+  assert.equal((await read('/api/state')).continue_ids.includes(title.id), false);
+  assert.equal((await read('/api/schedule/desktop?local=1')).continuing.some(row => row.id === title.id), false);
+  assert.equal((await req(srv.port, '/api/undo', { method: 'POST', body: { expected_revision: completed.json.revision } })).json.ok, true);
+  assert.equal((await read('/api/state')).continue_ids[0], title.id);
 });
 
 test('调档只移动一档、结束排片仍可补番、静音只取消提醒', async t => {
@@ -1829,6 +1957,61 @@ test('迁移导出排除凭据，预览锁定源数据与目标数据，导入�
   assert.deepEqual(exported.history, data.history);
   assert.deepEqual(exported.settings, data.settings);
   assert.doesNotMatch(JSON.stringify(exported), /hidden-row|hidden-setting|only-in-local-config/);
+});
+
+test('桌宠外观与尺寸在同一份设置中提交，失败保留旧值，迁移使用最新外观', async t => {
+  const root = await makeFixture();
+  const file = name => path.join(root, 'data', name);
+  const original = { clock: '24h', power_save: true, reminder_lead: 15 };
+  await fs.writeFile(file('settings.json'), JSON.stringify(original));
+  await fs.writeFile(file('state.json'), JSON.stringify({ desktop_shell: 'master', pet_scale: 0.85,
+    bubble_theme: 0, idle_chatter: false }));
+  const srv = await startServer(root);
+  t.after(() => srv.child.kill());
+  const appearance = { shell: 'tiara2', previous_shell: 'master', layer: 'normal', theme: 2, size: 1,
+    bubble_time: 3, reduce_motion: true, hide_fullscreen: true, recall_hotkey: false };
+  const post = (body, url = '/api/desktop/appearance') => req(srv.port, url, { method: 'POST', body });
+  const stored = async () => JSON.parse(await fs.readFile(file('settings.json'), 'utf8'));
+  const migrating = async (scope = '') => (await req(srv.port, '/api/migration' + scope)).json.migration;
+  assert.equal((await post({ appearance: { ...appearance, shell: '../elsewhere' }, pet_scale: 1.25 })).status, 400);
+  assert.equal((await post({ appearance, pet_scale: 4 })).status, 400);
+  assert.deepEqual(await stored(), original);
+
+  const saved = await post({ appearance, fallback_scale: 0.85 });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.ok, true);
+  assert.deepEqual(await stored(), { ...original, desktop_appearance: appearance, pet_scale: 0.85 });
+  assert.equal((await post({ pet_scale: 1.25 }, '/api/settings')).status, 200);
+  assert.equal((await post({ appearance, fallback_scale: 0.85 })).json.settings.pet_scale, 1.25);
+  const before = await fs.readFile(file('settings.json'));
+  // Unreadable destination must fail without overwriting the existing settings.
+  await fs.rename(file('settings.json'), file('preserved-settings.json'));
+  await fs.mkdir(file('settings.json'));
+  assert.equal((await post({ appearance, pet_scale: 1.5 })).status, 500);
+  assert.equal((await fs.stat(file('settings.json'))).isDirectory(), true);
+  assert.deepEqual(await fs.readFile(file('preserved-settings.json')), before);
+  await fs.rmdir(file('settings.json'));
+  await fs.rename(file('preserved-settings.json'), file('settings.json'));
+  const retry = await post({ appearance, pet_scale: 1.5 });
+  assert.equal(retry.json.settings.pet_scale, 1.5);
+  const backup = await migrating('?desktop=appearance');
+  assert.deepEqual(backup.desktop.appearance, { shell: 'tiara2', theme: 2, size: 1, scale: 1.5,
+    bubble_time: 3, reduce_motion: true, idle_chatter: false });
+  assert.equal(backup.settings.desktop_appearance, undefined);
+
+  const restore = async migration => {
+    const preview = await post({ migration, preview: true }, '/api/migration');
+    assert.equal(preview.status, 200);
+    const applied = await post({ migration, source: preview.json.source, target: preview.json.target }, '/api/migration');
+    assert.equal(applied.status, 200);
+  };
+  await restore(await migrating());
+  assert.deepEqual((await stored()).desktop_appearance, appearance);
+  const next = { ...backup, desktop: { appearance: { shell: 'master', theme: 0, size: 1, scale: 0.9 } } };
+  await restore(next);
+  const restored = await stored();
+  assert.deepEqual(restored.desktop_appearance, { ...appearance, shell: 'master', previous_shell: null, theme: 0 });
+  assert.equal(restored.pet_scale, 0.9);
 });
 
 test('用户备份可选便条、外观和台词收藏，可预览和回滚', async t => {
@@ -2663,6 +2846,40 @@ test('托管服务隔离目录、合并并发启动，桌宠管道关闭后只�
   serving.child.stdin.end();
   assert.equal((await serving.exited)[0], 0);
   assert.ok(await probePanel(foreign.port, panelId(foreignRoot)));
+});
+
+test('停止面板要等已经收到的记账落盘，再允许复制数据目录', { timeout: 15000 }, async t => {
+  const root = await makeFixture();
+  await fs.mkdir(path.join(root, 'lib'));
+  for (const file of ['package.json', 'lib/version.mjs', 'lib/panel-instance.mjs', 'tools/panel_service.mjs']) {
+    await fs.copyFile(path.join(ROOT, file), path.join(root, file));
+  }
+  const srv = await startServer(root);
+  const serverExit = once(srv.child, 'exit');
+  t.after(() => { if (srv.child.exitCode === null) srv.child.kill(); });
+
+  let entered, unlock;
+  const held = new Promise(resolve => { entered = resolve; });
+  const release = new Promise(resolve => { unlock = resolve; });
+  const locked = withLibraryLock(root, async () => { entered(); await release; });
+  t.after(unlock);
+  await held;
+  const write = req(srv.port, '/api/progress', { method: 'POST', body: { id: '554779', delta: 1 } });
+  await delay(160);
+  const stop = spawn(process.execPath, [path.join(root, 'tools/panel_service.mjs'), '--stop'], {
+    cwd: root, windowsHide: true, stdio: 'ignore',
+  });
+  const stopped = once(stop, 'exit');
+  const early = await Promise.race([stopped.then(() => true), delay(900).then(() => false)]);
+  unlock();
+  await locked;
+  const saved = await write;
+  assert.equal((await stopped)[0], 0);
+  assert.equal((await serverExit)[0], 0);
+  assert.equal(early, false, '停止命令在数据仍被写锁占用时便返回成功');
+  assert.equal(saved.status, 200);
+  assert.equal((await readLib(root)).watching[0].ep_status, 1);
+  assert.equal((await fs.readFile(path.join(root, 'data/history.jsonl'), 'utf8')).trim().split('\n').length, 1);
 });
 
 test('--no-portfile：临时实例不改写端口指针，主实例的 panel_port.txt 不被踩掉', async (t) => {

@@ -45,7 +45,12 @@ async function stop() {
   if (r && !r.ok) throw new Error('服务没有接受关闭请求，请重试。');
   const deadline = Date.now() + 6000;
   while (Date.now() < deadline) {
-    if ((await findPanel(root))?.pid !== service.pid) return;
+    // The listener closes before pending writes finish. Wait for the verified process.
+    try { process.kill(service.pid, 0); }
+    catch (error) {
+      if (error.code === 'ESRCH') return;
+      throw error;
+    }
     await delay(100);
   }
   throw new Error('等待网页服务退出超时。');

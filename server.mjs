@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { buildToday, timeline, summarize, cstParts, reminders, DEFAULT_SETTINGS, toMin, expectedEpisode, expectedEpisodes, scheduledWeek, displayClock } from './lib/today.mjs';
-import { fetchSeason, fetchSubject, searchAnime, mergeSeason, seasonOf, seasonRange, weekdayFromInfobox, httpGet } from './lib/bgm.mjs';
+import { fetchSubject, searchAnime, mergeSeason, seasonOf, seasonRange, weekdayFromInfobox, httpGet } from './lib/bgm.mjs';
 import { reviewBgmLibrary } from './lib/bgm-review.mjs';
 import { libraryMatches, matchesSearch, titleKey } from './lib/watch-matches.mjs';
 import { animeRelations, orderedRelations, readRelationCache, relationId, setWatchOrder } from './lib/watch-order.mjs';
@@ -34,7 +34,7 @@ import { readEpisodeCatalog, refreshEpisodeCatalog } from './lib/episode-catalog
 import { broadcastDate, broadcastStatus, readBroadcastMeta, saveBroadcastMeta } from './lib/broadcast-status.mjs';
 import { watchHistoryDelta, watchWeekStart, watchWeekReport } from './lib/watch-report.mjs';
 import { commitProgress, progressJournal, recoverProgress } from './lib/progress-commit.mjs';
-import { readSeasonCache, writeSeasonCache, listCachedSeasons, CATALOG_DIRECTORY, FIRST_CATALOG_SEASON, currentSeason, seasonRefreshState, shiftSeason } from './lib/season-cache.mjs';
+import { readSeasonCache, writeSeasonCache, listCachedSeasons, findSeasonRelocations, CATALOG_DIRECTORY, FIRST_CATALOG_SEASON, currentSeason, seasonRefreshState, shiftSeason } from './lib/season-cache.mjs';
 import { lookupYuc, yucReference } from './lib/yuc-source.mjs';
 import { coverIdOf, coverCachePath, coverMediaType, isAllowedCoverUrl, downloadCover, pickCoverUrl,
   COVER_MAX_AGE, COVER_MAX_BYTES } from './lib/cover.mjs';
@@ -49,7 +49,7 @@ import { withLibraryLock } from './lib/library-lock.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { panelId, panelPortFile, panelControlFile, findPanel } from './lib/panel-instance.mjs';
 import { actualSchedule } from './lib/today.mjs';
-import { editWatchDetail, editWatchPreferences, watchDetail, watchUrl } from './lib/watch-detail.mjs';
+import { editWatchDetail, editWatchPreferences, watchDetail, watchPlayback, watchUrl } from './lib/watch-detail.mjs';
 import { broadcastSuggestions, lookupBroadcast } from './lib/broadcast-lookup.mjs';
 import { nextScheduledUpdate, nextWeeklyUpdate, parseWatchSlot, quietAt, reminderLead, reminderOverride, reminderPreview, reminderTiming, REMINDER_LEADS, scheduleRow, setWatchSlot, personalReminder, catchupReminders } from './lib/watch-schedule.mjs';
 import { remindStamp, reminderSnoozeKey, reminderSnoozeStates, reminderSnoozes } from './lib/reminder-snooze.mjs';
@@ -62,6 +62,8 @@ import { FEED_DAYS, refreshCalendarFeed } from './lib/calendar-feed.mjs';
 import { findRemoteChapter, identifyWriteback, readRemoteChapter, writeRemoteChapter, writebackError, writebackWatched } from './lib/bgm-writeback.mjs';
 import { desktopRestorePlan, importMigration, migrationChanges, migrationExport, MIGRATION_LIMIT, migrationSourceRevision, migrationState, migrationSummary, parseMigration, recoverMigration, validateRestorableLibrary } from './lib/migration.mjs';
 import { launchDiagnostics } from './lib/launch-diagnostics.mjs';
+import { desktopAppearance, desktopScale } from './lib/desktop-appearance.mjs';
+import { refreshSeasonFromSources, SEASON_BACKUP } from './lib/season-source.mjs';
 
 const DEFAULT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STARTED_AT = new Date().toISOString();
@@ -125,7 +127,7 @@ async function readJSON(rel) {
 // ---------------- 用户偏好（data/settings.json） ----------------
 const SETTINGS_REL = 'data/settings.json';
 
-async function readSettings({ strict = false } = {}) {
+async function readSettings({ strict = false, fallbackScale = DEFAULT_SETTINGS.pet_scale } = {}) {
   try {
     const raw = await fs.readFile(path.join(ROOT, SETTINGS_REL), 'utf8');
     const s = JSON.parse(raw.replace(/^\uFEFF/, ''));
@@ -134,16 +136,16 @@ async function readSettings({ strict = false } = {}) {
     return {
       ...s,
       clock: s.clock === '24h' || s.clock === '30h' ? s.clock : DEFAULT_SETTINGS.clock,
-      pet_scale: Number.isFinite(scale) && scale >= 0.5 && scale <= 2 ? scale : DEFAULT_SETTINGS.pet_scale,
+      pet_scale: desktopScale(scale) ?? fallbackScale,
     };
   } catch (error) {
     if (strict && error.code !== 'ENOENT') throw new Error('无法读取现有设置，未保存变更。请检查 data/settings.json。');
-    return { ...DEFAULT_SETTINGS };
+    return { ...DEFAULT_SETTINGS, pet_scale: fallbackScale };
   }
 }
 
-async function writeSettings(patch) {
-  const cur = await readSettings({ strict: true });
+async function writeSettings(patch, { appearance, fallbackScale } = {}) {
+  const cur = await readSettings({ strict: true, fallbackScale });
   const scale = Number(patch.pet_scale);
   const next = {
     ...cur,
@@ -162,6 +164,8 @@ async function writeSettings(patch) {
   if (patch.reminder_lead !== undefined) next.reminder_lead = patch.reminder_lead;
   if (patch.catchup_goal !== undefined) next.catchup_goal = patch.catchup_goal;
   if (patch.power_save !== undefined) next.power_save = patch.power_save;
+  if (patch.season_backup !== undefined) next.season_backup = patch.season_backup;
+  if (appearance) next.desktop_appearance = appearance;
   await fs.mkdir(path.dirname(path.join(ROOT, SETTINGS_REL)), { recursive: true });
   await writeFileAtomic(path.join(ROOT, SETTINGS_REL), JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8' });
   return next;
@@ -228,7 +232,7 @@ const searchCoverUrls = new Map();
 let coverIndexCache = { at: 0, urls: new Map() };
 
 /** id → 远程封面地址：扫一遍已缓存的季度表，10 分钟内不重复扫 */
-async function findCoverUrl(id) {
+async function findCoverUrl(id, backup) {
   if (searchCoverUrls.has(id)) return searchCoverUrls.get(id);
   const now = Date.now();
   if (now - coverIndexCache.at > 10 * 60 * 1000) {
@@ -237,13 +241,13 @@ async function findCoverUrl(id) {
     for (const q of seasons) {
       const c = await readSeasonCache(ROOT, q, 365 * 24 * 3600 * 1000).catch(() => null);
       for (const it of (c && c.items) || []) {
-        if (it && it.image && !urls.has(String(it.id))) urls.set(String(it.id), it.image);
+        if (it && it.image && !urls.has(String(it.id))) urls.set(String(it.id), it);
       }
     }
     coverIndexCache = { at: now, urls };
   }
   const direct = coverIndexCache.urls.get(String(id));
-  if (direct) return pickCoverUrl([{ id, image: direct }], id);
+  if (direct) return pickCoverUrl([direct], id, backup);
   return null;
 }
 
@@ -274,12 +278,15 @@ async function refreshCover(id, lookupSubject = false, source = null) {
     return refreshCover(id, lookupSubject, source);
   }
   const work = (async () => {
-    const url = source || await findCoverUrl(id);
+    const backup = (await readSettings()).season_backup === SEASON_BACKUP.id;
+    const url = source || await findCoverUrl(id, backup);
     if (!url && !lookupSubject) return null;
     const cfg = await readBgmConfig().catch(() => ({}));
     const signal = AbortSignal.timeout(12000);
-    const fetchImage = source => httpGet(source, { proxy: cfg.proxy, timeoutMs: 9000, signal, redirect: 'manual' });
-    let bytes = url && await downloadCover(url, fetchImage).catch(() => null);
+    const fetchImage = source => httpGet(source, {
+      proxy: isAllowedCoverUrl(source) ? cfg.proxy : '', timeoutMs: 9000, signal, redirect: 'manual',
+    });
+    let bytes = url && await downloadCover(url, fetchImage, backup && !isAllowedCoverUrl(url)).catch(() => null);
     if (!bytes && lookupSubject) {
       const subject = await fetchSubject(id, { base: cfg.base, proxy: cfg.proxy, timeoutMs: 5000, retries: 0, signal, animationOnly: true });
       const candidate = pickCoverUrl([{ id, image: subject.image }], id);
@@ -340,7 +347,8 @@ async function apiCover(req, res, idRaw) {
       image = await refreshCover(id);
     } else {
       const season = await readSeasonCache(ROOT, q);
-      const source = pickCoverUrl(season?.items, id);
+      const backup = (await readSettings()).season_backup === SEASON_BACKUP.id;
+      const source = pickCoverUrl(season?.items, id, backup);
       if (source) image = await refreshCover(id, false, source);
     }
   }
@@ -396,9 +404,9 @@ function json(res, obj, code = 200, req = null) {
 
 // ---------------- /api/state ----------------
 async function apiState(req, res) {
-  let lib;
+  let library;
   try {
-    lib = actualSchedule(await readLibrary(ROOT));
+    library = await readLibrary(ROOT);
   } catch (e) {
     // 库坏了别只丢一句 JSON 解析错误：告诉用户还能从备份救回来
     return json(res, {
@@ -411,6 +419,7 @@ async function apiState(req, res) {
   // talks.json 一旦被删/写坏，首屏就 500，还把绝对路径回显给浏览器。
   const now = new Date();
   const settings = await readSettings();
+  const lib = actualSchedule(library);
   const t = buildToday(lib, now, { clock: settings.clock });
   const tl = timeline(t.today, now);
   const active = lib.watching.filter(w => !isWatchFinished(w) && !isCatchup(w));
@@ -418,6 +427,7 @@ async function apiState(req, res) {
   const finished = [...lib.watching, ...(lib.paused || [])].filter(isWatchFinished);
   const todayIds = new Set(t.today.filter(x => x.aired).map(x => String(x.id)));
   const expectedByEntry = expectedEpisodes(active, lib, now, todayIds);
+  const scheduleCards = await localScheduleCards(library, settings, now);
 
   const faces = {};
   for (const [k, f] of Object.entries(FACES)) {
@@ -497,6 +507,9 @@ async function apiState(req, res) {
       })(),
       week: slimWeek(Object.fromEntries(scheduledWeek(lib, now).map(day => [day.weekday, day.rows]))),
       weekly: slimWeek(lib.weekday || {}),
+      schedule_cards: Object.fromEntries([...scheduleCards].map(([id, card]) =>
+        [id, { playback: card.playback, schedule_note: card.schedule_note }])),
+      continue_ids: [...scheduleCards.keys()],
       watching_count: active.length,
       catchup_list: catchup,
       catchup_reminders: catchupReminders(lib, now).map(slot => ({ ...slot,
@@ -594,6 +607,7 @@ function enterRecovery(error) {
 }
 
 function withWriteLock(fn) {
+  if (stopping) return Promise.reject(new Error('本地服务正在停止，请在重新打开后重试。'));
   const run = writeChain.then(async () => {
     if (recoveryIssue) throw Object.assign(new Error(recoveryIssue.message), { code: 'ERECOVERYREADONLY' });
     try { return await withLibraryLock(ROOT, fn); }
@@ -1162,6 +1176,11 @@ async function apiWatchDetail(req, res) {
     const cache = await readSeasonCache(ROOT, body.season_q);
     catalog = cache?.items.find(item => String(item.id) === String(body.catalog_id));
     if (!catalog) return json(res, { error: '季度条目已有变化，请返回季度目录重新选择' }, 409, req);
+    const id = String(catalog.id);
+    if (cache.catalog_sources?.retained_ids.includes(id)) {
+      const moved = (await findSeasonRelocations(ROOT, body.season_q, [id]))[id];
+      if (moved) return json(res, { error: '条目已改到 ' + moved + '，请到对应季度加入', quarter: moved }, 409, req);
+    }
   }
   const subject = String(body.subject_id ?? '');
   const autoMode = body.id == null && body.watch_mode === undefined && body.planned !== true && relationId(subject);
@@ -1967,9 +1986,29 @@ async function apiSettings(req, res) {
     return json(res, { error: '每周补番目标须为 0–999 集，0 表示关闭' }, 400, req);
   if (body.power_save !== undefined && typeof body.power_save !== 'boolean')
     return json(res, { error: '省电模式必须是布尔值' }, 400, req);
+  if (body.season_backup !== undefined && !['', SEASON_BACKUP.id].includes(body.season_backup))
+    return json(res, { error: '季度备用源无效' }, 400, req);
   const next = await withWriteLock(() => writeSettings(body));
   const rebuilt = await rebuildToday();
   json(res, { ok: true, settings: next, ...rebuildInfo(rebuilt) }, 200, req);
+}
+
+async function apiDesktopAppearance(req, res) {
+  if (req.method !== 'POST') return json(res, { error: 'use POST' }, 405, req);
+  if (!guardWrite(req, res)) return;
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  const appearance = desktopAppearance(body.appearance);
+  const scale = desktopScale(body.pet_scale);
+  const fallbackScale = desktopScale(body.fallback_scale);
+  if (!appearance || (body.pet_scale !== undefined && scale === null) ||
+      (body.fallback_scale !== undefined && fallbackScale === null))
+    return json(res, { error: '外观或尺寸参数无效，尚未保存' }, 400, req);
+
+  // All appearance preferences, including the shared scale, commit in the same file.
+  const settings = await withWriteLock(() =>
+    writeSettings({ pet_scale: scale ?? undefined }, { appearance, fallbackScale: fallbackScale ?? undefined }));
+  return json(res, { ok: true, settings }, 200, req);
 }
 
 // ---------------- /api/nickname ----------------
@@ -2213,8 +2252,26 @@ async function apiToken(req, res, test = false) {
  *   · list=1 → 只列已缓存季度
  */
 const seasonInflight = new Map();
-const seasonRetryAfter = new Map();
+const seasonAttempts = new Map();
 const SEASON_RETRY_MS = 15 * 60_000;
+const seasonAttemptFile = q => 'data/season/' + q + '.refresh.json';
+
+async function readSeasonAttempt(q) {
+  if (seasonAttempts.has(q)) return seasonAttempts.get(q);
+  const cached = await readJSON(seasonAttemptFile(q)).catch(() => null);
+  return cached && Number.isFinite(Date.parse(cached.at)) ? cached : null;
+}
+
+async function storeSeasonAttempt(q, result) {
+  const record = { ...result, at: new Date().toISOString() };
+  seasonAttempts.set(q, record);
+  await writeJsonAtomic(path.join(ROOT, seasonAttemptFile(q)), record).catch(() => {});
+  return record;
+}
+
+function seasonCanRetry(attempt) {
+  return !attempt?.warning || Date.now() - Date.parse(attempt.at) >= SEASON_RETRY_MS;
+}
 
 function seasonAirings(items) {
   return Object.fromEntries(items.filter(item => item.weekday && item.time_cst)
@@ -2223,7 +2280,10 @@ function seasonAirings(items) {
 
 async function seasonData(q, cached, { warning, refreshed = false } = {}) {
   const state = seasonRefreshState(q, cached);
+  const last = await readSeasonAttempt(q);
+  warning ||= last?.warning;
   const items = cached?.items || [];
+  const relocations = await findSeasonRelocations(ROOT, q, cached?.catalog_sources?.retained_ids);
   const known = await broadcastSuggestions(ROOT, items.map(item => item.id), { online: false, originalOnly: true }).catch(() => ({}));
   const airings = {
     ...seasonAirings(items),
@@ -2232,13 +2292,16 @@ async function seasonData(q, cached, { warning, refreshed = false } = {}) {
     }])),
   };
   const source = refreshed ? 'net' : warning && cached ? 'cache-stale' : cached?.built_in ? 'builtin' : cached ? 'cache' : 'empty';
-  return { ...cached, ok: true, q, source, items, total: cached?.total ?? 0, airings,
+  return { ...cached, ok: true, q, source, items, total: cached?.total ?? 0, airings, relocations,
     article: yucReference(q),
-    catalog_status: state.status, refresh_due: state.due && Date.now() >= (seasonRetryAfter.get(q) || 0),
-    ...(warning ? { warning } : {}) };
+    catalog_status: state.status, refresh_due: state.due && seasonCanRetry(last),
+    ...(last ? { last_refresh: last } : {}), ...(warning ? { warning } : {}) };
 }
 
 function seasonRefreshWarning(error) {
+  if (error.backupError) return '官方 · ' + seasonRefreshWarning(error.officialError) +
+    '；备用源 · ' + seasonRefreshWarning(error.backupError);
+  if (error.code === 'season_empty') return '返回空目录，无法核验';
   if (error.code === 'season_incomplete') return 'Bangumi 返回的季度目录不完整';
   if (error.status === 407 || /代理.*(拒绝|格式)/.test(error.message)) return 'Bangumi 代理设置或认证有误';
   if (error.name === 'TimeoutError' || error.name === 'AbortError' || /超时/.test(error.message)) return '连接 Bangumi 超时';
@@ -2253,24 +2316,23 @@ function refreshSeason(q) {
     let warning;
     try {
       const cached = await readSeasonCache(ROOT, q);
-      const cfg = await readBgmConfig();
-      const data = await fetchSeason({ q, proxy: cfg.proxy, base: cfg.base, retries: 1, timeoutMs: 10_000,
-        signal: AbortSignal.timeout(36_000) });
-      if (!data.items.length && (cached?.items.length || q < currentSeason()))
-        warning = 'Bangumi 返回空目录，无法核验';
-      else {
-        try { await writeSeasonCache(ROOT, data); }
-        catch { warning = '已取到目录，但无法写入本地缓存'; }
-        if (!warning) {
-          if (q >= currentSeason()) queueCoverPrefetch(data.items);
-          seasonRetryAfter.delete(q);
-          return { refreshed: true };
-        }
+      const [cfg, settings] = await Promise.all([readBgmConfig(), readSettings()]);
+      const data = await refreshSeasonFromSources(q, {
+        officialBase: cfg.base, officialProxy: cfg.proxy,
+        backup: settings.season_backup === SEASON_BACKUP.id, allowEmpty: !cached?.items.length && q >= currentSeason(),
+      });
+      try { await writeSeasonCache(ROOT, data); }
+      catch { warning = '已取到目录，但无法写入本地缓存'; }
+      if (!warning) {
+        if (!data.catalog_source && q >= currentSeason()) queueCoverPrefetch(data.items);
+        coverIndexCache.at = 0;
+        await storeSeasonAttempt(q, { source: data.catalog_source || 'Bangumi API' });
+        return { refreshed: true };
       }
     } catch (error) {
       warning = seasonRefreshWarning(error);
     }
-    seasonRetryAfter.set(q, Date.now() + SEASON_RETRY_MS);
+    await storeSeasonAttempt(q, { warning });
     logLine('warn', '季度 ' + q + ' 联网更新：' + warning);
     return { warning };
   })().finally(() => seasonInflight.delete(q));
@@ -2293,7 +2355,7 @@ async function apiSeason(req, res) {
   const cached = await readSeasonCache(ROOT, q);
   const refresh = params.get('refresh');
   if (refresh === '1' || (refresh === 'auto' && seasonRefreshState(q, cached).due &&
-      Date.now() >= (seasonRetryAfter.get(q) || 0))) {
+      seasonCanRetry(await readSeasonAttempt(q)))) {
     const result = await refreshSeason(q);
     return json(res, await seasonData(q, result.refreshed ? await readSeasonCache(ROOT, q) : cached, result), 200, req);
   }
@@ -2348,14 +2410,18 @@ async function apiOriginalSchedule(req, res) {
 
 async function apiDesktopSchedule(req, res) {
   if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
-  const lib = actualSchedule(await readLibrary(ROOT));
+  const local = new URL(req.url, 'http://localhost').searchParams.get('local') === '1';
+  const library = await readLibrary(ROOT);
+  const lib = actualSchedule(library);
   const active = lib.watching.filter(w => !w.schedule_ended && !isWatchFinished(w) && !isCatchup(w));
   const settings = await readSettings();
   const { clock } = settings;
-  const { proxy } = await readBgmConfig();
+  const now = new Date();
+  const cards = await localScheduleCards(library, settings, now);
+  const { proxy } = local ? {} : await readBgmConfig();
   let warning = '';
   const airings = await broadcastSuggestions(ROOT, active.map(w => w.id).filter(id => /^\d+$/.test(String(id))),
-    { proxy, online: true, originalOnly: true }).catch(() => {
+    { proxy, online: !local, originalOnly: true }).catch(() => {
     warning = '原播周档暂时无法读取。';
     return {};
   });
@@ -2367,18 +2433,20 @@ async function apiDesktopSchedule(req, res) {
     const weekday = original?.weekday ?? local?.day ?? (platformOnly ? null : w.air_weekday);
     const time = original?.time_cst ?? (platformOnly ? '' : (local ? local.row.time_cst : w.air_time_cst));
     const slot = displayClock(time, weekday, clock);
-    const url = watchUrl(w.watch_url);
-    const reminder = reminderStatus({ ...w, state: 'watching' }, scheduleRow(lib, w), settings, w.start_date);
-    return { id, name: w.name_cn || w.name || id, weekday: slot.weekday_disp || 0, time: slot.time_disp, reminder,
-      source: original ? 'original' : time ? 'custom' : '', seen: w.ep_status ?? 0, total: w.eps ?? 0,
-      ...(url ? { watch_url: url } : {}) };
+    return { ...cards.get(id), weekday: slot.weekday_disp || 0, time: slot.time_disp,
+      source: original ? 'original' : time ? 'custom' : '' };
   });
   rows.sort((a, b) => (a.weekday || 8) - (b.weekday || 8) || (a.time || '99:99').localeCompare(b.time || '99:99'));
-  const personalById = new Map(lib.watching.filter(isCatchup).map(item => [String(item.id), item]));
-  const personal = catchupReminders(lib).map(slot => ({
-    ...slot, reminder: reminderStatus({ ...personalById.get(String(slot.id)), state: 'watching' }, null, settings),
-  }));
-  return json(res, { rows, personal, clock, warning }, 200, req);
+  const personal = catchupReminders(lib, now).map(slot => ({ ...slot, reminder: cards.get(String(slot.id)).reminder }));
+  const personalRows = personal.map(slot => ({ ...cards.get(String(slot.id)), weekday: slot.day, time: slot.time, source: 'catchup' }));
+  const snapshot = buildToday(lib, now, { clock });
+  const today = snapshot.today.flatMap(slot => {
+    const card = cards.get(String(slot.id));
+    return card ? [{ ...card, time: slot.time_disp || slot.time_cst, time_cst: slot.time_cst, source: 'custom' }] : [];
+  }).concat(personalRows.filter(row => row.weekday === snapshot.weekday))
+    .sort((a, b) => toMin(a.time_cst || a.time) - toMin(b.time_cst || b.time));
+  const continuing = [...cards.values()].map(card => ({ ...card, source: card.mode === 'catchup' ? 'catchup' : 'continue' }));
+  return json(res, { rows, personal, personal_rows: personalRows, today, continuing, clock, warning }, 200, req);
 }
 
 async function apiCatchupSubject(req, res) {
@@ -2501,7 +2569,7 @@ async function apiSeasonApply(req, res) {
   const body = await readJsonBody(req, res);
   if (!body) return;   // 坏 JSON / 超限已经回过响应，别再往下走（以前就是这里让进程 exit 1）
 
-  const add = Array.isArray(body.add) ? body.add.map(String).filter(Boolean) : [];
+  const add = Array.isArray(body.add) ? [...new Set(body.add.map(String).filter(Boolean))] : [];
   // 兼容 items 形式：把名字一起带进来（面板本季页就是这么传的）
   const inlineItems = [];
   if (Array.isArray(body.items)) {
@@ -2514,7 +2582,20 @@ async function apiSeasonApply(req, res) {
     }
   }
   const remove = Array.isArray(body.remove) ? body.remove.map(String).filter(Boolean) : [];
-  if (body.mode != null && !['planned', 'airing', 'catchup'].includes(body.mode))
+  const allowedModes = ['planned', 'airing', 'catchup'];
+  let modes;
+  if (body.modes != null || body.preview === true) {
+    if (!body.q || inlineItems.length || remove.length || body.mode != null || add.length > 200)
+      return json(res, { error: '请选择同一季度内最多 200 部番剧' }, 400, req);
+    if (body.modes != null) {
+      if (typeof body.modes !== 'object' || Array.isArray(body.modes))
+        return json(res, { error: '逐部观看方式无效' }, 400, req);
+      modes = new Map(Object.entries(body.modes));
+      if (modes.size !== add.length || add.some(id => !allowedModes.includes(modes.get(id))))
+        return json(res, { error: '请确认每部番的观看方式' }, 400, req);
+    }
+  }
+  if (body.mode != null && !allowedModes.includes(body.mode))
     return json(res, { error: '观看方式无效' }, 400, req);
   if (body.mode === 'planned' && body.start_mode != null)
     return json(res, { error: '开始观看后再设置进度' }, 400, req);
@@ -2536,28 +2617,58 @@ async function apiSeasonApply(req, res) {
     return json(res, { ok: false, error: `还没有 ${q} 的番剧表，先在「本季」页刷新一次`, q }, 409, req);
   }
   const items = [...(cache?.items || []), ...inlineItems];
-  const known = new Set(items.map((x) => String(x.id)));
-  const missing = add.filter((id) => !known.has(id));
-  const usable = add.filter((id) => known.has(id));
-  if (add.length && !usable.length) {
+  const known = new Map(items.map(item => [String(item.id), item]));
+  const retained = cache?.catalog_sources?.retained_ids?.filter(id => add.includes(id));
+  const moved = new Map(Object.entries(await findSeasonRelocations(ROOT, q, retained)));
+  const missing = add.filter(id => !known.has(id) || moved.has(id));
+  const usable = add.filter(id => known.has(id) && !moved.has(id));
+  if (add.length && !usable.length && !modes && body.preview !== true) {
     return json(res, { ok: false, error: '这些 id 在本季表里找不到，没有写入（避免写出只有 id 的脏条目）', missing }, 400, req);
   }
   const airings = body.start_mode === 'latest'
     ? { ...await broadcastSuggestions(ROOT, usable, { online: false }).catch(() => ({})), ...seasonAirings(items) } : {};
-  const usableIds = new Set(usable);
-  const candidates = items.filter(item => usableIds.has(String(item.id)));
-  const classified = [];
-  for (let i = 0; i < candidates.length; i += 4) {
-    const states = await Promise.all(candidates.slice(i, i + 4).map(async item => [String(item.id),
-      await showBroadcastStatus(String(item.id), { meta: item })]));
-    classified.push(...states);
+  const classified = new Map();
+  if (body.preview === true || !modes && !body.mode) {
+    for (let i = 0; i < usable.length; i += 4) {
+      const states = await Promise.all(usable.slice(i, i + 4).map(async id => [id,
+        await showBroadcastStatus(id, { meta: known.get(id) })]));
+      for (const [id, state] of states) classified.set(id, state);
+    }
   }
-  const ended = new Set(classified.filter(([, status]) => status.state === 'ended').map(([id]) => id));
+  const ended = new Set([...classified].filter(([, status]) => status.state === 'ended').map(([id]) => id));
+  const existingReason = (lib, id) => findWatchEntry(lib, id)?.state;
+  function describe(id, reason) {
+    const item = known.get(id);
+    if (moved.has(id)) return { id, name: item?.name_cn || item?.name || id, reason: 'moved_quarter', quarter: moved.get(id) };
+    return { id, name: item?.name_cn || item?.name || id, reason };
+  }
+  if (body.preview === true) {
+    const lib = await readLibrary(ROOT);
+    const today = cstParts().date;
+    const rows = add.map(id => {
+      if (!known.has(id) || moved.has(id)) return { ...describe(id, 'not_in_catalog'), blocked: true };
+      const existing = existingReason(lib, id);
+      if (existing) return { ...describe(id, 'already_' + existing), blocked: true };
+      const item = known.get(id);
+      if (broadcastDate(item.date) > today) return { ...describe(id, 'future'), mode: 'planned' };
+      if (ended.has(id)) return { ...describe(id, 'ended'), mode: 'catchup' };
+      if (classified.get(id)?.state === 'airing') return { ...describe(id, 'airing'), mode: 'airing' };
+      return { ...describe(id, 'unknown'), mode: 'planned' };
+    });
+    return json(res, { ok: true, rows }, 200, req);
+  }
 
   const outcome = await withWriteLock(async () => {
     const lib = await readLibrary(ROOT);
+    const unavailable = modes ? missing.map(id => describe(id, 'not_in_catalog')) : [];
+    const eligible = modes ? usable.filter(id => {
+      const existing = existingReason(lib, id);
+      if (!existing) return true;
+      unavailable.push(describe(id, 'already_' + existing));
+      return false;
+    }) : usable;
     const { next, changes, skipped } = mergeSeason(lib, items, {
-      add: usable,
+      add: eligible,
       remove,
       track_from: body.track_from || cstParts().date,
       now: new Date(),
@@ -2566,8 +2677,12 @@ async function apiSeasonApply(req, res) {
       airings,
       ended,
       mode: body.mode,
+      modes,
     });
-    if (!changes.length) return { code: 200, payload: { ok: true, q, added: 0, changes: 0, detail: [], missing, skipped } };
+    const added_ids = changes.filter(change => ['watching', 'planned'].includes(change.scope) &&
+      ['(新增)', '(恢复)'].includes(change.field)).map(change => change.id);
+    const skipped_details = modes ? unavailable.concat(skipped.map(id => describe(id, 'start_unknown'))) : undefined;
+    if (!changes.length) return { code: 200, payload: { ok: true, q, added: 0, changes: 0, detail: [], missing, skipped, added_ids, skipped_details } };
     await saveLibrary(next, { source: 'season:apply' });
     for (const c of changes) {
       await appendHistory({ ts: new Date().toISOString(), date: cstParts().date, event: 'season', ...c });
@@ -2579,7 +2694,9 @@ async function apiSeasonApply(req, res) {
         q,
         // added 是「新进在追的部数」（面板拿它报「加了 N 部」），别把 weekday 那条也算进去；
         // changes 保留字段级 diff 条数，两个数字用途不同。
-        added: changes.filter((c) => ['watching', 'planned'].includes(c.scope) && (c.field === '(新增)' || c.field === '(恢复)')).length,
+        added: added_ids.length,
+        added_ids,
+        skipped_details,
         changes: changes.length,
         detail: changes.slice(0, 20),
         missing,
@@ -3064,6 +3181,45 @@ function previewWatchReminder(library, detail, entry, settings, state, now, snoo
     focus: Boolean(pet && (state?.focus_paused_seconds > 0 || focus_until * 1000 > Date.parse(forecast.next?.at))), queued };
 }
 
+function scheduleNote(reminder, preview) {
+  function at(value) {
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? new Date(time + 8 * 3600000).toISOString().slice(5, 16).replace('T', ' ') : '';
+  }
+  const parts = [];
+  if (reminder.planned_at) parts.push((reminder.moved ? '改期 ' : '下次安排 ') + at(reminder.planned_at));
+  if (preview.queued) parts.push('已有 ' + preview.queued + ' 条排队中');
+  if (preview.reason === 'temporary_quiet') parts.push('本次临时安静，不提示');
+  if (preview.reason === 'quiet_work' || preview.reason === 'quiet_weekend') parts.push('本次免打扰，不提示');
+  if (preview.next) parts.push((preview.next.kind === 'snooze' ? '稍后提醒 ' : '下次提醒 ') + at(preview.next.at));
+  if (preview.focus && preview.next) parts.push('专注中，提醒会先排队');
+  if (preview.reason === 'muted') parts.push('本番已静音');
+  if (!parts.length) return preview.reason === 'ended' ? '排片已停止' : '未安排提醒';
+  return parts.join(' · ');
+}
+
+async function localScheduleCards(library, settings, now) {
+  const active = library.watching.filter(w => !isWatchFinished(w)).sort((a, b) =>
+    String(b.user_details?.pinned_at || '').localeCompare(String(a.user_details?.pinned_at || '')) ||
+    String(b.last_watched || '').localeCompare(String(a.last_watched || '')) ||
+    String(b.last_watched_at || '').localeCompare(String(a.last_watched_at || '')));
+  if (!active.length) return new Map();
+  const [state, pet, snoozes] = await Promise.all([readReminderState(), desktopPresence(),
+    reminderSnoozes(ROOT, library, null, Math.floor(+now / 1000)).catch(() => ({ pending: [] }))]);
+  return new Map(active.map(entry => {
+    const id = String(entry.id);
+    const slot = scheduleRow(library, entry);
+    const detail = { ...entry, id, state: 'watching', name: entry.name_cn || entry.name || id,
+      air_weekday: slot?.day ?? entry.air_weekday, air_time_cst: slot ? slot.row.time_cst : entry.air_time_cst };
+    const reminder = reminderStatus(detail, slot, settings, entry.start_date);
+    const preview = previewWatchReminder(library, detail, entry, settings, state, now, snoozes.pending, pet);
+    const playback = watchPlayback(entry);
+    return [id, { id, name: detail.name, seen: entry.ep_status ?? 0, total: entry.eps ?? 0, reminder,
+      mode: preview.kind,
+      schedule_note: scheduleNote(reminder, preview), playback, ...(playback ? { watch_url: playback.url } : {}) }];
+  }));
+}
+
 async function apiReminderPreview(req, res) {
   if (!guardWrite(req, res)) return;
   if (req.method !== 'GET' && req.method !== 'POST') return json(res, { error: 'use GET or POST' }, 405, req);
@@ -3109,9 +3265,16 @@ async function apiStartupPath(req, res) {
 
 async function apiPanelRevision(req, res) {
   if (req.method !== 'GET') return json(res, { error: 'use GET' }, 405, req);
-  const files = await Promise.all(['data/library.json', 'data/settings.json', 'data/history.jsonl']
-    .map(file => fs.stat(path.join(ROOT, file)).then(stat => [stat.mtimeMs, stat.size, stat.ino]).catch(() => null)));
-  return json(res, { ok: true, revision: hash(JSON.stringify(files)), version: VERSION }, 200, req);
+  const revisionOf = async files => {
+    const stats = await Promise.all(files.map(file =>
+      fs.stat(path.join(ROOT, file)).then(stat => [stat.mtimeMs, stat.size, stat.ino]).catch(() => null)));
+    return hash(JSON.stringify(stats));
+  };
+  const [revision, reminder_revision] = await Promise.all([
+    revisionOf(['data/library.json', 'data/settings.json', 'data/history.jsonl']),
+    revisionOf(['data/state.json', 'data/reminder-history.json', REMINDER_ACTIONS, 'data/reminder-snoozes.json']),
+  ]);
+  return json(res, { ok: true, revision, reminder_revision, version: VERSION }, 200, req);
 }
 
 async function apiDiagnosticsReport(req, res) {
@@ -3174,7 +3337,7 @@ function reminderPending(event, library, now) {
   if (target?.state !== 'watching') return null;
   const stamp = remindStamp(library, target.entry, target.state);
   if (!stamp || (event.source_stamp && event.source_stamp !== stamp)) return null;
-  return { ...event, watch_url: watchUrl(target.entry.watch_url) || null,
+  return { ...event, watch_url: watchPlayback(target.entry)?.url || null,
     watch_revision: watchDetail(library, target.entry, target.state).revision };
 }
 
@@ -3344,11 +3507,12 @@ const server = http.createServer(async (req, res) => {
     if (url === '/api/watch/schedule') return await apiWatchSchedule(req, res);
     if (url === '/api/schedule/lookup') return await apiScheduleLookup(req, res);
     if (url === '/api/schedule/original') return await apiOriginalSchedule(req, res);
-    if (url === '/api/schedule/desktop') return await apiDesktopSchedule(req, res);
+    if (url === '/api/schedule/desktop' || url.startsWith('/api/schedule/desktop?')) return await apiDesktopSchedule(req, res);
     if (url === '/api/schedule/board') return await apiScheduleBoard(req, res);
     if (url === '/api/watch') return await apiWatch(req, res);
     if (url.startsWith('/api/sync')) return await apiSync(req, res);
     if (url.startsWith('/api/settings')) return await apiSettings(req, res);
+    if (url === '/api/desktop/appearance') return await apiDesktopAppearance(req, res);
     if (url.startsWith('/api/nickname')) return await apiNickname(req, res);
     if (url === '/api/history/browse') return await apiHistoryBrowse(req, res);
     if (url === '/api/history/retract') return await apiHistoryRetract(req, res);
@@ -3508,7 +3672,8 @@ function shutdown() {
     process.exit(0);
   });
   server.closeIdleConnections?.();
-  setTimeout(() => process.exit(0), 5000).unref();
+  // Drop lingering HTTP connections, but let accepted transactions drain before exiting.
+  setTimeout(() => server.closeAllConnections?.(), 5000).unref();
 }
 
 // 进程级兜底：以前任何一个漏网的 Promise 拒绝都会让 node 静默退出，
@@ -3542,7 +3707,7 @@ async function maintainSeasonCatalog() {
   for (let q = shiftSeason(current, -1); q >= FIRST_CATALOG_SEASON; q = shiftSeason(q, -1)) quarters.push(q);
   for (const q of quarters) {
     if (stopping) return;
-    if (Date.now() < (seasonRetryAfter.get(q) || 0)) continue;
+    if (!seasonCanRetry(await readSeasonAttempt(q))) continue;
     if (!seasonRefreshState(q, await readSeasonCache(ROOT, q), now).due) continue;
     await refreshSeason(q);
   }

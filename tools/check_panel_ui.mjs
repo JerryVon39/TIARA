@@ -263,7 +263,7 @@ async function main() {
     const body = document.querySelector('#seasonBody');
     const cover = body.querySelector('img[data-cover-id="301779"]');
     cover?.scrollIntoView({ block: 'nearest' });
-    return body.textContent.includes('内置目录') && body.textContent.includes('季末已核验') && cover?.naturalWidth > 0;
+    return body.textContent.includes('内置目录') && body.textContent.includes('内置目录季末核验') && cover?.naturalWidth > 0;
   })()`), '年份与季度直达、离线封面与核验状态');
   if (await evaluate("new URLSearchParams(location.search).get('q')") !== '2019Q4')
     throw new Error('所选季度未写入地址');
@@ -452,6 +452,19 @@ async function main() {
   await waitFor(async () => kbId && (await statusOf(kbId)) === kbBefore, '键盘撤销');
   const kbUndone = kbId ? await statusOf(kbId) : null;
   console.log('键盘：选中=' + kbSelected + ' id=' + kbId + ' ' + kbBefore + '→' + kbAfter + ' 撤销后=' + kbUndone);
+
+  const reloadId = '900000001';
+  const reloadSeen = await statusOf(reloadId);
+  await evaluate(`(() => {
+    window.startedProgressReload = true;
+    document.querySelector('.show[data-card="${reloadId}"] [data-op="1"]').click();
+    location.reload();
+  })()`);
+  await waitFor(() => evaluate("!window.startedProgressReload && document.readyState === 'complete'"), '记一话后立刻刷新打开新页面');
+  await waitFor(async () => (await statusOf(reloadId)) === reloadSeen + 1, '立刻刷新后仍保留记一话');
+  await evaluate("document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'u', bubbles: true }))");
+  await waitFor(async () => (await statusOf(reloadId)) === reloadSeen, '刷新后可以撤销刚写入的进度');
+  console.log('PASS 记一话后立刻刷新，恢复并撤销已保存的进度');
 
   // 主题偏好与系统最终配色分别校验
   const themeSeq = [];
@@ -653,12 +666,21 @@ async function main() {
   await evaluate(`(() => {
     window.syncTestFetch = window.fetch;
     window.fetch = (route, settings) => {
-      if (route !== '/api/sync' || !settings?.body || !JSON.parse(settings.body).dry_run)
-        return window.syncTestFetch(route, settings);
+      if (route !== '/api/sync' || !settings?.body) return window.syncTestFetch(route, settings);
+      const body = JSON.parse(settings.body);
+      if (body.preview_id) {
+        window.syncAttemptedSelection = body.selected;
+        if (window.syncWriteOffline) return Promise.reject(new TypeError('验收用本地服务断线'));
+        return Promise.resolve(new Response(JSON.stringify({ error: '验收用本机番库变动，请重新预览' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (!body.dry_run) return window.syncTestFetch(route, settings);
       return Promise.resolve(new Response(JSON.stringify({
         ok: true, preview_id: 'test-preview', sources: { calendar: { status: 'ok', count: 1 } },
         changes: [{ id: 900000001, name: '验收番', key: 'saved-field', field: 'eps',
-          selected: true, from: 12, to: 13, source: 'calendar' }],
+          selected: true, from: 12, to: 13, source: 'calendar' },
+          { id: 900000001, name: '验收番', key: 'other-field', field: 'name_cn',
+            selected: true, from: '原番名', to: '新番名', source: 'collections' }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     };
   })()`);
@@ -668,10 +690,20 @@ async function main() {
   await waitFor(() => evaluate("!!document.querySelector('[data-sync-key=saved-field]:checked')"), '同步字段默认选中');
   await evaluate("document.querySelector('[data-sync-key=saved-field]').click()");
   await evaluate("document.querySelector('#syncRetry').click()");
-  await evaluate("document.querySelector('#syncPreview').click()");
   await waitFor(() => evaluate("document.querySelector('[data-sync-key=saved-field]')?.checked === false"), '重新预览保留未勾选字段');
+  await evaluate("window.syncWriteOffline = true; document.querySelector('#syncGo').click()");
+  await waitFor(() => evaluate(`document.querySelector('#syncSelection').textContent.includes('未收到写入结果') &&
+    !document.querySelector('#syncGo').disabled &&
+    !document.querySelector('[data-sync-key=saved-field]').checked &&
+    document.querySelector('[data-sync-key=other-field]').checked`), '同步写入断线后保持勾选与可重试状态');
+  await evaluate("window.syncWriteOffline = false");
+  await evaluate("document.querySelector('#syncGo').click()");
+  await waitFor(() => evaluate("document.querySelector('#syncRetry')?.textContent === '保留选择并重新预览' && window.syncAttemptedSelection?.join(',') === 'other-field'"), '同步冲突保留原选择');
+  await evaluate("document.querySelector('#syncRetry').click()");
+  await waitFor(() => evaluate("document.querySelector('[data-sync-key=saved-field]')?.checked === false && document.querySelector('[data-sync-key=other-field]')?.checked === true"), '冲突后重新预览保留勾选与取消');
   await closeDialog();
   await evaluate('window.fetch = window.syncTestFetch');
+  console.log('PASS 同步重新预览、写入断线和本机数据冲突后保留勾选');
 
   await evaluate("document.querySelector('.tab[data-tab=library]').click()");
   await changeSelect('libraryFilter', 'catchup_list');
@@ -736,8 +768,36 @@ async function main() {
   const keptAfterFailure = await evaluate("document.querySelector('#restoreBrowser').checked && document.querySelector('#migrationFile').files.length === 1");
   await evaluate("document.querySelector('#migrationStatus button').click()");
   await waitFor(previewReady, '保留原选择重新预览');
+  await evaluate(`(() => {
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (this === localStorage && key === 'tiara.home')
+        throw new DOMException('验收用浏览器储存写入失败', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    };
+    window.enablePreferenceWrites = () => { Storage.prototype.setItem = setItem; };
+  })()`);
   await evaluate("document.querySelector('#migrationApply').click()");
   await waitFor(() => evaluate("document.querySelector('#migrationStatus').textContent.includes('导入成功')"), '确认恢复迁移文件');
+  const canRetryBrowserOnly = await evaluate(`(async () => {
+    const exported = await fetch('/api/migration').then(response => response.json());
+    return exported.migration.library.watching[0]?.id === 'local-migration-ui' &&
+      localStorage.getItem('kx.theme') === 'light' &&
+      document.querySelector('#migrationStatus button')?.textContent === '重试恢复网页偏好';
+  })()`);
+  await evaluate(`(() => {
+    window.enablePreferenceWrites();
+    const original = window.fetch;
+    window.fetch = (...args) => {
+      if (String(args[0]).endsWith('/api/migration') && args[1]?.method === 'POST') {
+        window.replayedMigration = true;
+        throw new Error('恢复浏览器偏好不应再次替换番库');
+      }
+      return original(...args);
+    };
+    document.querySelector('#migrationStatus button').click();
+    window.fetch = original;
+  })()`);
   const restoredMigration = await evaluate(`(async () => {
     const result = await fetch('/api/migration').then(response => response.json());
     const { library, settings } = result.migration;
@@ -751,8 +811,9 @@ async function main() {
         document.querySelector('#migrationStatus').textContent.includes('已重读番库和设置'),
     };
   })()`);
-  const okMigration = expectedSelection && keptAfterFailure && Object.values(restoredMigration).every(Boolean);
-  if (!okMigration) console.log('迁移检查：' + JSON.stringify({ expectedSelection, ...restoredMigration }));
+  const browserOnly = canRetryBrowserOnly && await evaluate('!window.replayedMigration');
+  const okMigration = expectedSelection && keptAfterFailure && browserOnly && Object.values(restoredMigration).every(Boolean);
+  if (!okMigration) console.log('迁移检查：' + JSON.stringify({ expectedSelection, keptAfterFailure, browserOnly, ...restoredMigration }));
 
   const tomorrow = cstParts(new Date(Date.now() + 86400000));
   await evaluate(`fetch('/api/season/time', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -914,6 +975,71 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('.watch-summary-facts')?.textContent.includes('单番覆盖 · 提前 15 分钟')"),
     '保存单番覆盖返回详情并应用相同预览');
   console.log('PASS 全局草稿预览、单番静音原因与提前量覆盖');
+
+  const continuing = [];
+  for (let index = 0; index < 9; index++) {
+    const extra = await writeApi('/api/watch/detail', {
+      name: '接着看验收 ' + index, eps: 2, ep_status: 1, watch_mode: 'catchup',
+    });
+    if (!extra.detail?.id) throw new Error('未能添加接着看验收番剧');
+    continuing.push(String(extra.detail.id));
+  }
+  const stored = path.join(fixture, 'data/library.json');
+  const library = JSON.parse(fs.readFileSync(stored, 'utf8'));
+  const backupLink = 'https://example.invalid/continue-backup';
+  const example = library.watching.find(row => String(row.id) === continuing[0]);
+  example.user_details = { pinned_at: new Date().toISOString(), links: [{ url: backupLink }] };
+  const stage = stored + '.acceptance';
+  fs.writeFileSync(stage, JSON.stringify(library));
+  fs.renameSync(stage, stored);
+  await send('Page.navigate', { url: origin + '/?tab=today' });
+  await waitFor(() => evaluate("!!document.querySelector('#scheduleContinue') && !!document.querySelector('[data-goto=continue].schedule-link')"), '首页可进入全部接着看');
+  await evaluate("document.querySelector('[data-goto=continue].schedule-link').click()");
+  const cardSelector = '#schedule-continue-' + continuing[0];
+  await waitFor(() => evaluate(`document.querySelector('#schedule-view-continue')?.getAttribute('aria-pressed') === 'true' &&
+    document.querySelectorAll('.schedule-main [data-card]').length >= 9 &&
+    document.querySelector(${JSON.stringify(cardSelector + ' a.watch-link')})?.href === ${JSON.stringify(backupLink)} &&
+    document.querySelector(${JSON.stringify(cardSelector + ' a.watch-link')}).textContent.includes('备用')`), '全量列表与备用入口');
+  await evaluate(`document.querySelector(${JSON.stringify(cardSelector + ' [data-op="1"]')}).click()`);
+  await waitFor(() => evaluate(`!document.querySelector(${JSON.stringify(cardSelector)}) &&
+    document.querySelector('#toast')?.textContent.includes('已看完')`), '看完从接着看移除');
+  await evaluate(`[...document.querySelectorAll('#toast button')].find(button => button.textContent === '撤销').click()`);
+  await waitFor(() => evaluate(`!!document.querySelector(${JSON.stringify(cardSelector)})`), '撤销后接着看恢复');
+  console.log('PASS 接着看全量列表、仅备用播放入口、最后一话和撤销');
+
+  const batchQuarter = '2019Q2';
+  fs.writeFileSync(path.join(fixture, 'data/season', batchQuarter + '.json'), JSON.stringify({
+    q: batchQuarter, total: 2, fetched_at: new Date().toISOString(),
+    items: [
+      { id: 'batch-tv', name: '批量验收电视', platform: 'TV', eps: 12, date: '2019-04-01', broadcast_end: '2019-06-28' },
+      { id: 'batch-film', name: '批量验收电影', platform: '剧场版', date: '2019-06-01' },
+    ],
+  }));
+  await send('Page.navigate', { url: origin + '/?tab=season&q=' + batchQuarter });
+  await waitFor(() => evaluate("document.querySelectorAll('#seasonBody [data-mark]:not(:disabled)').length === 2"), '批量入库的离线季度');
+  await evaluate("document.querySelector('#markAll').click(); document.querySelector('#onlyTv').click()");
+  await waitFor(() => evaluate("document.querySelector('#seasonSelection').textContent.includes('可见已选 1 部，隐藏已选 1 部')"),
+    '计数区分可见和隐藏勾选');
+  await evaluate("document.querySelector('#applyBtn').click()");
+  await waitFor(() => evaluate("document.querySelector('#seasonBatchRows select')?.dataset.batchMode === 'batch-tv' && !document.querySelector('[data-batch-mode=batch-film]')"),
+    '默认只确认当前可见勾选');
+  await closeDialog();
+  await evaluate("document.querySelector('#applyAllBtn').click()");
+  await waitFor(() => evaluate("document.querySelector('[data-batch-mode=batch-tv]')?.value === 'catchup' && document.querySelector('[data-batch-mode=batch-film]')?.value === 'planned'"),
+    '显式包含隐藏勾选并按作品建议不同状态');
+  await evaluate("document.querySelector('#seasonBatchApply').click()");
+  await waitFor(() => evaluate("document.querySelector('#seasonBatchResult')?.textContent.includes('已入库 2 部')"), '混合状态写入');
+  await closeDialog();
+  await evaluate("document.querySelector('#settingsNav').click(); document.querySelector('[data-settings-open=seasonSource]').click()");
+  if (await evaluate("document.querySelector('#seasonBackupSource').checked")) throw new Error('备用源默认关闭');
+  await evaluate("document.querySelector('#seasonBackupSource').click(); document.querySelector('#saveSeasonSource').click()");
+  await waitFor(() => evaluate("document.querySelector('#seasonSourceStatus')?.textContent.includes('设置已保存')"), '设置可以明确启用公开季度备用源');
+  const configured = await fetch(origin + '/api/settings').then(response => response.json());
+  if (configured.season_backup !== 'anibt') throw new Error('备用源启用状态未保存');
+  await evaluate("document.querySelector('#seasonBackupSource').click(); document.querySelector('#saveSeasonSource').click()");
+  await waitFor(async () => (await fetch(origin + '/api/settings').then(response => response.json())).season_backup === '',
+    '可以关闭公开季度备用源');
+  console.log('PASS 季度勾选、逐部确认、混合状态入库和备用源设置');
 
   const emptied = await evaluate(`(async () => {
     const transfer = { format: 'tiara-migration', schema: 1, library: { watching: [], weekday: {} } };

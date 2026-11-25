@@ -12,7 +12,7 @@ async function panel() {
     document: { addEventListener() {}, querySelector() { return element; }, querySelectorAll() { return []; } },
     fetch: async (url, options) => {
       const body = JSON.parse(options.body);
-      requests.push({ url, body });
+      requests.push({ url, body, keepalive: options.keepalive });
       await new Promise(r => setTimeout(r, 20));
       let result;
       if (url === '/api/progress') {
@@ -30,7 +30,7 @@ async function panel() {
     STATE = { watching: [{id: 1, eps: 12, ep_status: 3}] };
     toast = function() {}; paintWatch = function() {};
     refresh = function() { return Promise.resolve(); };
-    globalThis.panelTest = { bump: bump, undo: undo, flush: flushAllBumps,
+    globalThis.panelTest = { bump: bump, undo: undo, flush: flushAllBumps, leave: prepareToLeave,
       settled: function() { return POST_CHAIN; }, seen: function() { return STATE.watching[0].ep_status; } };
   `);
   vm.runInContext(source, context);
@@ -62,4 +62,21 @@ test('先加后减相互抵消，再撤销不会误撤销更早的记录', async
   await p.api.settled();
   assert.equal(p.disk(),3);
   assert.equal(p.requests.some(x=>x.url==='/api/undo'),false);
+});
+
+test('离开时立即发送待写进度，前一笔未完成时允许用户等待并按原顺序保存', async () => {
+  const p = await panel();
+  p.api.bump(1, 1);
+  const leaving = { preventDefault() { this.prompt = true; } };
+  p.api.leave(leaving);
+  assert.equal(p.requests.length, 1);
+  assert.equal(p.requests[0].keepalive, true);
+  assert.equal(leaving.prompt, undefined);
+  p.api.bump(1, 1);
+  p.api.leave(leaving);
+  assert.equal(leaving.prompt, true);
+  assert.equal(p.requests.length, 1);
+  await p.api.settled();
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.disk(), 5);
 });

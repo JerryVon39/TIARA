@@ -596,6 +596,7 @@
   .schedule-progress { margin-top: 4px; font-variant-numeric: tabular-nums; }
   .schedule-progress strong { font-size: 12px; font-weight: 650; color: var(--ink-soft); }
   .schedule-progress .schedule-fresh { color: var(--pink-ink); }
+  .schedule-reminder-note { margin: 4px 0 0; color: var(--mute); font-size: 11px; line-height: 1.45; }
   .schedule-actions { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin: 0; }
   .schedule-actions .watch-link { font-size: 12px; padding-inline: 5px; display: inline-flex; align-items: center; min-height: 42px; margin: 0; white-space: nowrap; }
   .schedule-actions button.schedule-mark, .schedule-actions > button[data-add] {

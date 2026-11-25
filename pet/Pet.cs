@@ -44,14 +44,55 @@ namespace UkagakaBangumi
 
     public class PetApp
     {
+        static bool DesktopExited(Mutex owner, int timeout)
+        {
+            try { if (!owner.WaitOne(timeout)) return false; }
+            catch (AbandonedMutexException) { }
+            owner.ReleaseMutex();
+            return true;
+        }
+
+        static int StopInstance(string instance)
+        {
+            var wait = Stopwatch.StartNew();
+            try
+            {
+                using (var owner = Mutex.OpenExisting(instance))
+                {
+                    while (wait.ElapsedMilliseconds < 12000)
+                    {
+                        if (DesktopExited(owner, 0)) return 0;
+                        try { using (var signal = EventWaitHandle.OpenExisting(instance + ".quit")) signal.Set(); }
+                        catch (WaitHandleCannotBeOpenedException)
+                        {
+                            Thread.Sleep(25);
+                            continue;
+                        }
+                        int remaining = Math.Max(0, 12000 - (int)wait.ElapsedMilliseconds);
+                        if (DesktopExited(owner, remaining)) return 0;
+                        break;
+                    }
+                }
+            }
+            catch (WaitHandleCannotBeOpenedException) { return 0; }
+            PetWindow.Log("timed out waiting for desktop shutdown");
+            return 1;
+        }
+
+        internal static void EnablePerMonitorDpi()
+        {
+            // WPF compiled by the system csc defaults to system DPI without this switch.
+            AppContext.SetSwitch("Switch.System.Windows.DoNotScaleForDpiChanges", false);
+        }
+
         [STAThread]
         public static void Main(string[] args)
         {
+            EnablePerMonitorDpi();
             string instance = @"Local\TiaraPet." + PanelHost.Id(PetWindow.FindRoot());
             if (Array.IndexOf(args, "--quit") >= 0)
             {
-                try { using (var signal = EventWaitHandle.OpenExisting(instance + ".quit")) signal.Set(); }
-                catch (WaitHandleCannotBeOpenedException) { }
+                Environment.ExitCode = StopInstance(instance);
                 return;
             }
             // 单实例：两个桌宠会各养一个托盘图标、各发一遍开播提醒，还会互相覆盖 data/state.json
@@ -166,8 +207,11 @@ namespace UkagakaBangumi
         Popup _popup;
         Border _popupCard;
         DesktopSchedule _desktopSchedule;
-        bool _desktopSchedulePending;
-        string _desktopScheduleError = "";
+        bool _desktopSchedulePending, _desktopOriginalPending;
+        DateTime _desktopOriginalRetry;
+        string _desktopScheduleError = "", _desktopOriginalError = "";
+        readonly string[] _scheduleDataFiles = { "library.json", "settings.json", "state.json", "reminder-snoozes.json" };
+        readonly DateTime[] _scheduleDataStamps = new DateTime[4];
 
         DispatcherTimer _ticker;     // 呼吸 / 跳（只管画面）
         DispatcherTimer _beat;       // 1 s：OnSecondChange / OnMinuteChange / OnHourChange
@@ -1023,7 +1067,7 @@ namespace UkagakaBangumi
         sealed class MenuShow
         {
             public string Id, Name, Progress, WatchUrl;
-            public bool Today;
+            public bool Today, BackupLink;
             public DateTimeOffset PinnedAt, WatchedAt;
         }
 
@@ -1032,6 +1076,27 @@ namespace UkagakaBangumi
             DateTimeOffset date;
             return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out date)
                 ? date : DateTimeOffset.MinValue;
+        }
+
+        static string PlaybackFromEntry(Dictionary<string, object> entry, out bool backup)
+        {
+            backup = false;
+            if (entry == null) return null;
+            object link, details, links;
+            if (entry.TryGetValue("watch_url", out link) && ViewingUri(Str(link)) != null) return Str(link);
+            if (!entry.TryGetValue("user_details", out details)) return null;
+            var info = details as Dictionary<string, object>;
+            if (info == null || !info.TryGetValue("links", out links)) return null;
+            var backups = AsList(links);
+            if (backups == null) return null;
+            foreach (object value in backups)
+            {
+                var option = value as Dictionary<string, object>;
+                if (option == null || !option.TryGetValue("url", out link) || ViewingUri(Str(link)) == null) continue;
+                backup = true;
+                return Str(link);
+            }
+            return null;
         }
 
         List<MenuShow> ReadMenuShows(bool includeInactive = false)
@@ -1055,13 +1120,14 @@ namespace UkagakaBangumi
                 foreach (object entry in entries)
                 {
                     var row = entry as Dictionary<string, object>;
-                    object id, name, seen, total, url;
+                    object id, name, seen, total;
                     if (row == null || !row.TryGetValue("id", out id) || string.IsNullOrEmpty(Str(id))) continue;
                     if (!includeInactive && FinishedWatch(row)) continue;
                     if (!row.TryGetValue("name_cn", out name) || string.IsNullOrEmpty(Str(name))) row.TryGetValue("name", out name);
                     row.TryGetValue("ep_status", out seen);
                     row.TryGetValue("eps", out total);
-                    row.TryGetValue("watch_url", out url);
+                    bool backup;
+                    string url = PlaybackFromEntry(row, out backup);
                     object details;
                     row.TryGetValue("user_details", out details);
                     var userDetails = details as Dictionary<string, object>;
@@ -1074,7 +1140,7 @@ namespace UkagakaBangumi
                     {
                         Id = Str(id), Name = string.IsNullOrEmpty(Str(name)) ? Str(id) : Str(name),
                         Progress = (seen == null ? "0" : Str(seen)) + "/" + (total == null || Str(total) == "0" ? "?" : Str(total)),
-                        Today = today.Contains(Str(id)), WatchUrl = Str(url),
+                        Today = today.Contains(Str(id)), WatchUrl = url, BackupLink = backup,
                         PinnedAt = MenuDate(Str(pinned)),
                         WatchedAt = watched == DateTimeOffset.MinValue ? MenuDate(Str(watchedOn)) : watched
                     });
@@ -1134,8 +1200,7 @@ namespace UkagakaBangumi
                 SystemParameters.HighContrast ? SystemColors.MenuTextBrush : new SolidColorBrush(Color.FromRgb(0x16, 0x73, 0x9D)), 12, true));
             menu.Items.Add(new Separator());
             menu.Items.Add(PetMenuAction("pet-schedule", ScheduleMenuLabel, () => RunQuickAction("schedule")));
-            if (!_petPins.Contains("snoozes"))
-                menu.Items.Add(PetMenuAction("pet-reminder-center", ReminderCenterMenuLabel, OpenReminderCenter));
+            menu.Items.Add(PetMenuAction("pet-reminder-center", ReminderCenterMenuLabel, OpenReminderCenter));
             var quick = new MenuItem { Header = MarkMenuLabel };
             AutomationProperties.SetAutomationId(quick, "pet-mark");
             var shows = ReadMenuShows();
@@ -1147,7 +1212,7 @@ namespace UkagakaBangumi
                 quick.Items.Add(item);
             }
             if (shows.Count == 0) quick.Items.Add(new MenuItem { Header = "还没有在追番剧", IsEnabled = false });
-            if (shows.Count > QuickShowLimit) quick.Items.Add(Item(AllWatchingLabel, (s, e) => OpenWebPanel("?tab=library")));
+            if (shows.Count > QuickShowLimit) quick.Items.Add(Item(AllWatchingLabel, (s, e) => OpenWebPanel("?tab=continue")));
             menu.Items.Add(quick);
             var undo = PetMenuAction("pet-undo-progress", UndoMenuLabel, () => UndoLast());
             undo.IsEnabled = CanUndoProgress;
@@ -1182,6 +1247,7 @@ namespace UkagakaBangumi
             };
             var auto = Item("开机自启路径", (s, e) => OpenAutostartSettings());
             menu.Items.Add(Sub("桌宠设置", Item("常用菜单", (s, e) => OpenQuickMenuSettings()),
+                PetMenuAction("pet-reset-position", "重置桌宠位置", ResetPositionFromMenu),
                 promoted.Contains("focus") ? null : Item(QuickName("focus"), (s, e) => RunQuickAction("focus")),
                 promoted.Contains("notes") ? null : Item(QuickName("notes"), (s, e) => RunQuickAction("notes")),
                 new Separator(), power, auto));
@@ -1281,7 +1347,7 @@ namespace UkagakaBangumi
             _popup.Opened += delegate
             {
                 Button first;
-                if (_scheduleControls.TryGetValue("schedule-week", out first)) first.Focus();
+                if (_scheduleControls.TryGetValue("schedule-today", out first)) first.Focus();
             };
         }
 
@@ -2588,7 +2654,7 @@ namespace UkagakaBangumi
         {
             if (_popup.IsOpen) { _popup.IsOpen = false; return; }
             RecordQuickUse("schedule");
-            _showReminderList = false;
+            _scheduleView = ScheduleView.Today;
             _scheduleDay = -1;
             _scheduleFeedback = "";
             RefreshDesktopSchedule();
@@ -2607,7 +2673,8 @@ namespace UkagakaBangumi
         static readonly Brush ScheduleLine = (Brush)new BrushConverter().ConvertFromString("#D7E2EA");
         static readonly string[] ScheduleDays = { "待定", "周一", "周二", "周三", "周四", "周五", "周六", "周日" };
 
-        bool _showReminderList;
+        enum ScheduleView { Today, Week, Reminders }
+        ScheduleView _scheduleView = ScheduleView.Today;
         int _scheduleDay = -1;
         ScrollViewer _scheduleScroll;
         ControlTemplate _scheduleButtonTemplate;
@@ -2642,15 +2709,16 @@ namespace UkagakaBangumi
             var title = new StackPanel();
             title.Children.Add(ScheduleText("我的排片", 20, ScheduleInk, true));
             var clock = _desktopSchedule == null ? V("clock", "30h") : _desktopSchedule.clock;
-            title.Children.Add(ScheduleText("原播周档   ·   北京时间   ·   " + (clock == "24h" ? "24 小时制" : "30 小时制"), 11, ScheduleMuted));
+            title.Children.Add(ScheduleText("北京时间   ·   " + (clock == "24h" ? "24 小时制" : "30 小时制"), 11, ScheduleMuted));
             titleBar.Children.Add(title);
             toolbar.Children.Add(titleBar);
 
             var tabs = new UniformGrid { Rows = 1, Margin = new Thickness(10, 0, 10, 7) };
-            tabs.Children.Add(ScheduleButton("每周排片", "每周排片", "schedule-week", !_showReminderList, () => SelectSchedule(false, -1)));
-            tabs.Children.Add(ScheduleButton("提醒与待补", "提醒与待补", "schedule-reminders", _showReminderList, () => SelectSchedule(true, -1)));
+            tabs.Children.Add(ScheduleButton("今天", "今日排片及接着看", "schedule-today", _scheduleView == ScheduleView.Today, () => SelectSchedule(ScheduleView.Today, -1)));
+            tabs.Children.Add(ScheduleButton("本周", "本周排片", "schedule-week", _scheduleView == ScheduleView.Week, () => SelectSchedule(ScheduleView.Week, -1)));
+            tabs.Children.Add(ScheduleButton("提醒与待补", "提醒与待补", "schedule-reminders", _scheduleView == ScheduleView.Reminders, () => SelectSchedule(ScheduleView.Reminders, -1)));
             toolbar.Children.Add(tabs);
-            if (!_showReminderList)
+            if (_scheduleView == ScheduleView.Week)
             {
                 var days = new UniformGrid { Columns = _popupCard.Width < 310 ? 4 : 8, Margin = new Thickness(10, 0, 10, 7) };
                 for (int d = -1; d <= 7; d++)
@@ -2659,7 +2727,7 @@ namespace UkagakaBangumi
                     int day = d;
                     string label = d < 0 ? "全周" : ScheduleDays[d];
                     var button = ScheduleButton(label, label + (d == I("weekday") ? "，今天" : ""), "schedule-day-" + d,
-                        _scheduleDay == d, () => SelectSchedule(false, day));
+                        _scheduleDay == d, () => SelectSchedule(ScheduleView.Week, day));
                     if (d == I("weekday") && _scheduleDay != d) button.Background = SchedulePinkWash;
                     days.Children.Add(button);
                 }
@@ -2691,8 +2759,9 @@ namespace UkagakaBangumi
             }
 
             var list = new StackPanel { Margin = new Thickness(11, 4, 11, 9) };
-            if (_showReminderList) BuildReminderList(list);
-            else BuildWeeklyList(list);
+            if (_scheduleView == ScheduleView.Reminders) BuildReminderList(list);
+            else if (_scheduleView == ScheduleView.Week) BuildWeeklyList(list);
+            else BuildTodayList(list);
             _scheduleScroll = new ScrollViewer
             {
                 Content = list, Focusable = false,
@@ -2703,12 +2772,64 @@ namespace UkagakaBangumi
             return root;
         }
 
-        void SelectSchedule(bool reminders, int day)
+        void SelectSchedule(ScheduleView view, int day)
         {
-            if (_showReminderList == reminders && _scheduleDay == day) return;
-            _showReminderList = reminders;
+            if (_scheduleView == view && _scheduleDay == day) return;
+            _scheduleView = view;
             _scheduleDay = day;
             RefreshPopup(false);
+            Button target;
+            string control = day >= 0 ? "schedule-day-" + day :
+                view == ScheduleView.Week ? "schedule-week" : view == ScheduleView.Reminders ? "schedule-reminders" : "schedule-today";
+            if (_scheduleControls.TryGetValue(control, out target)) target.Focus();
+        }
+
+        void BuildTodayList(Panel list)
+        {
+            var schedule = _desktopSchedule;
+            if (_desktopScheduleError.Length > 0) list.Children.Add(ScheduleNote(_desktopScheduleError));
+            list.Children.Add(ScheduleHeading("今日排片", true));
+            if (schedule == null)
+            {
+                var watches = ReadMenuShows();
+                if (I("count") == 0) list.Children.Add(ScheduleNote("今天没有本地开播安排。"));
+                for (int i = 1; i <= I("count"); i++)
+                {
+                    string key = "show" + i, id = V(key + "_id", "");
+                    var watch = watches.Find(item => item.Id == id);
+                    if (watch == null) continue;
+                    list.Children.Add(ScheduleRowFromProgress(V(key + "_eps", ""), TimeCell(V(key + "_time_disp", V(key + "_time", ""))),
+                        "本机排片", watch.Name, id, watch.WatchUrl, "today", watch.BackupLink));
+                }
+                list.Children.Add(ScheduleHeading("接着看", false));
+                if (watches.Count == 0) list.Children.Add(ScheduleNote("目前没有在追或补番。"));
+                foreach (var watch in watches.OrderByDescending(row => row.PinnedAt).ThenByDescending(row => row.WatchedAt).Take(5))
+                    list.Children.Add(ScheduleRowFromProgress(watch.Progress, "—", "在看", watch.Name, watch.Id, watch.WatchUrl,
+                        "continue", watch.BackupLink));
+                if (watches.Count > 5) AddContinueLink(list, watches.Count);
+                return;
+            }
+            if (schedule.today.Count == 0) list.Children.Add(ScheduleNote("今天没有本机排片。"));
+            foreach (var row in schedule.today) list.Children.Add(DesktopScheduleCard(row, "today"));
+            list.Children.Add(ScheduleHeading("接着看", false));
+            if (schedule.continuing.Count == 0) list.Children.Add(ScheduleNote("目前没有在追或补番。"));
+            foreach (var row in schedule.continuing.Take(5)) list.Children.Add(DesktopScheduleCard(row, "continue"));
+            if (schedule.continuing.Count > 5) AddContinueLink(list, schedule.continuing.Count);
+        }
+
+        void AddContinueLink(Panel list, int count)
+        {
+            list.Children.Add(ScheduleButton("在网页查看全部（" + count + "）", "在网页查看全部接着看", "schedule-all-continuing", false,
+                () => OpenWebPanel("?tab=continue")));
+        }
+
+        UIElement DesktopScheduleCard(DesktopScheduleRow row, string section)
+        {
+            string source = row.source == "original" ? "原播更新" : row.source == "custom" ? "本机排片" :
+                row.source == "catchup" ? "补番安排" : row.source == "continue" ? "连载" : "时刻待定";
+            if (section == "continue" && row.source == "catchup") source = "补番";
+            return ScheduleRow(TimeCell(row.time), source, row.name, row.seen, row.total, row.id, row.watch_url,
+                row.schedule_note, section, row.playback != null && row.playback.backup);
         }
 
         void BuildWeeklyList(Panel list)
@@ -2718,12 +2839,15 @@ namespace UkagakaBangumi
             if (schedule == null)
             {
                 if (_desktopSchedulePending && _desktopScheduleError.Length == 0)
-                    list.Children.Add(ScheduleNote("正在读取原播周档…"));
+                    list.Children.Add(ScheduleNote("正在读取本机排片…"));
                 return;
             }
-            if (!string.IsNullOrEmpty(schedule.warning)) list.Children.Add(ScheduleNote(schedule.warning));
+            if (!string.IsNullOrEmpty(_desktopOriginalError)) list.Children.Add(ScheduleNote(_desktopOriginalError));
             int last = -1;
-            foreach (var show in schedule.rows)
+            var rows = schedule.rows.Concat(schedule.personal_rows)
+                .OrderBy(row => row.weekday == 0 ? 8 : row.weekday)
+                .ThenBy(row => string.IsNullOrEmpty(row.time) ? "99:99" : row.time, StringComparer.Ordinal);
+            foreach (var show in rows)
             {
                 if (_scheduleDay >= 0 && show.weekday != _scheduleDay) continue;
                 if (show.weekday != last)
@@ -2731,9 +2855,7 @@ namespace UkagakaBangumi
                     last = show.weekday;
                     list.Children.Add(ScheduleHeading(last == 0 ? "时段待定" : ScheduleDays[last], last == I("weekday")));
                 }
-                string source = show.source == "original" ? "原播更新" : show.source == "custom" ? "自订排片" : "时刻待定";
-                list.Children.Add(ScheduleRow(TimeCell(show.time), source, show.name, show.seen, show.total, show.id, show.watch_url,
-                    ReminderCaption(show.reminder)));
+                list.Children.Add(DesktopScheduleCard(show, "weekly"));
             }
             if (last != -1) return;
             list.Children.Add(ScheduleNote(_scheduleDay < 0 ? "还没有可展示的排片。可以到网页添加番剧或编辑排期。" : "这一天没有排片。"));
@@ -2755,7 +2877,8 @@ namespace UkagakaBangumi
                 if (name.Length == 0) continue;
                 shown.Add(id);
                 var watch = watches.Find(item => item.Id == id);
-                list.Children.Add(SnapshotScheduleRow(key, TimeCell(V(key + "_time_disp", V(key + "_time", ""))), "提醒", name, id, watch == null ? null : watch.WatchUrl));
+                list.Children.Add(ScheduleRowFromProgress(V(key + "_eps", ""), TimeCell(V(key + "_time_disp", V(key + "_time", ""))),
+                    "本机排片", name, id, watch == null ? null : watch.WatchUrl, backup: watch != null && watch.BackupLink));
             }
 
             list.Children.Add(ScheduleHeading("补番提醒", false));
@@ -2807,13 +2930,14 @@ namespace UkagakaBangumi
             }
         }
 
-        UIElement SnapshotScheduleRow(string key, string time, string source, string name, string id, string watchUrl)
+        UIElement ScheduleRowFromProgress(string progressText, string time, string source, string name, string id, string watchUrl,
+            string section = null, bool backup = false)
         {
-            string[] progress = V(key + "_eps", "").Split('/');
+            string[] progress = progressText.Split('/');
             int seen, total = 0;
             int.TryParse(progress[0], out seen);
             if (progress.Length > 1) int.TryParse(progress[1], out total);
-            return ScheduleRow(time, source, name, seen, total, id, watchUrl);
+            return ScheduleRow(time, source, name, seen, total, id, watchUrl, section: section, backup: backup);
         }
 
         static TextBlock ScheduleText(string text, double size, Brush ink, bool bold = false)
@@ -2873,8 +2997,9 @@ namespace UkagakaBangumi
         }
 
         UIElement ScheduleRow(string time, string source, string name, int seen, int total, string id, string watchUrl,
-            string reminder = null)
+            string reminder = null, string section = null, bool backup = false)
         {
+            string prefix = section ?? (_scheduleView == ScheduleView.Reminders ? "reminder" : "weekly");
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(61) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -2893,11 +3018,17 @@ namespace UkagakaBangumi
             title.ToolTip = name;
             details.Children.Add(title);
             details.Children.Add(ScheduleText(total > 0 ? "已看 " + seen + " / " + total + " 话" : "已看 " + seen + " 话", 11, ScheduleMuted));
-            if (!string.IsNullOrEmpty(reminder)) details.Children.Add(ScheduleText(reminder, 10, ScheduleMuted));
+            if (!string.IsNullOrEmpty(reminder))
+            {
+                var note = ScheduleText(reminder, 10, ScheduleMuted);
+                note.TextWrapping = TextWrapping.Wrap;
+                details.Children.Add(note);
+            }
             if (ViewingUri(watchUrl) != null)
             {
-                string key = (_showReminderList ? "reminder-" : "weekly-") + "watch-" + id;
-                var watch = ScheduleButton("去观看 ↗", "去观看 · " + name, key, false, () => OpenViewingLink(watchUrl));
+                string key = prefix + "-watch-" + id;
+                string label = backup ? "去观看（备用）" : "去观看";
+                var watch = ScheduleButton(label + " ↗", label + " · " + name, key, false, () => OpenViewingLink(watchUrl));
                 watch.HorizontalAlignment = HorizontalAlignment.Left;
                 watch.Margin = new Thickness(0, 3, 0, 3);
                 details.Children.Add(watch);
@@ -2921,15 +3052,15 @@ namespace UkagakaBangumi
                 {
                     int change = delta;
                     string verb = delta < 0 ? "减一话" : "记一话";
-                    string key = (_showReminderList ? "reminder-" : "weekly-") + delta + "-" + id;
+                    string key = prefix + "-" + delta + "-" + id;
                     var button = ScheduleButton(delta < 0 ? "−1" : "+1", verb + " · " + name, key, delta > 0,
                         () => BumpShow(id, name, change));
                     button.Width = 32;
                     button.ToolTip = verb;
-                    button.IsEnabled = delta < 0 ? seen > 0 : total <= 0 || seen < total;
+                    button.IsEnabled = !_progressPending.Contains(id) && (delta < 0 ? seen > 0 : total <= 0 || seen < total);
                     actions.Children.Add(button);
                 }
-                actions.Children.Add(ScheduleButton("详情", "番剧详情 · " + name, "schedule-detail-" + id, false,
+                actions.Children.Add(ScheduleButton("详情", "番剧详情 · " + name, prefix + "-detail-" + id, false,
                     () => OpenWebPanel("?watch=" + Uri.EscapeDataString(id))));
                 Grid.SetColumn(actions, 2);
                 grid.Children.Add(actions);
@@ -3081,6 +3212,7 @@ namespace UkagakaBangumi
         {
             e.Handled = true;
             Touch();
+            if (_appearanceSavePending) return;
             double next = ClampScale(_scale + (e.Delta > 0 ? 0.05 : -0.05));
             if (Math.Abs(next - _scale) < 0.001)
             {
@@ -3194,6 +3326,7 @@ namespace UkagakaBangumi
                 case "OnSecondChange":
                     CheckCompanionImport();
                     TickFocus();
+                    if (PanelOpen) CheckScheduleDataFiles();
                     CheckTestReminder();
                     TickDesktopVisibility();
                     TryPresentReminders(UnixNow());
@@ -3339,7 +3472,7 @@ namespace UkagakaBangumi
         // ================= 状态：位置 / 跨日 / 开播提醒 =================
         readonly DateTime _born = DateTime.Now;
 
-        void LoadState()
+        void LoadLegacyState()
         {
             try
             {
@@ -3391,7 +3524,12 @@ namespace UkagakaBangumi
                 Log("state left=" + _savedLeft + " top=" + _savedTop + " lastBoot=" + _lastBootDate + " layer=" + _layer);
             }
             catch (Exception ex) { Log("state load failed " + ex.Message); }
-            // settings.json 是"用户偏好"的唯一入口（面板改的就是它），状态文件只兜底
+        }
+
+        void LoadState()
+        {
+            LoadLegacyState();
+            // settings.json is authoritative for appearance once saved. Older files keep their state.json fallback.
             try
             {
                 string sp = Path.Combine(_root, "data", "settings.json");
@@ -3399,15 +3537,17 @@ namespace UkagakaBangumi
                 {
                     var ser2 = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
                     var sd = ser2.Deserialize<Dictionary<string, object>>(File.ReadAllText(sp, Encoding.UTF8));
+                    if (sd == null) return;
+                    LoadSavedAppearance(ser2, sd);
                     object v2; double sc2;
-                    if (sd != null && sd.TryGetValue("pet_scale", out v2) &&
+                    if (sd.TryGetValue("pet_scale", out v2) &&
                         double.TryParse(Str(v2), NumberStyles.Float, CultureInfo.InvariantCulture, out sc2))
                     {
                         _scale = Math.Max(0.5, Math.Min(2.0, sc2));
                         Log("scale from settings=" + _scale.ToString("0.##", CultureInfo.InvariantCulture));
                     }
                     object ps;
-                    if (sd != null && sd.TryGetValue("power_save", out ps))
+                    if (sd.TryGetValue("power_save", out ps))
                     {
                         _powerSave = Str(ps) == "1" || Str(ps).ToLowerInvariant() == "true";
                         Log("power_save=" + _powerSave);
@@ -3514,7 +3654,7 @@ namespace UkagakaBangumi
         void CheckSettingsFile()
         {
             CheckTodayFile();
-            if (_settingsWritePending) return;
+            if (_settingsWritePending || _appearanceSavePending || File.Exists(Path.Combine(_root, "data", ".migration-pending.json"))) return;
             try
             {
                 string sp = Path.Combine(_root, "data", "settings.json");
@@ -3533,6 +3673,7 @@ namespace UkagakaBangumi
                     bool want = Str(ps) == "1" || Str(ps).ToLowerInvariant() == "true";
                     if (want != _powerSave) { _powerSave = want; Log("power_save from settings=" + want); }
                 }
+                if (ApplySavedAppearance(ser, d)) return;
                 if (!d.TryGetValue("pet_scale", out v)) return;
                 if (!double.TryParse(Str(v), NumberStyles.Float, CultureInfo.InvariantCulture, out sc)) return;
                 sc = ValidScale(sc);
@@ -3554,7 +3695,7 @@ namespace UkagakaBangumi
 
         void SendSettingsPatch()
         {
-            if (_settingsWritePending || _closing) return;
+            if (_settingsWritePending || _appearanceSavePending || _closing) return;
             _settingsWritePending = true;
             string body = new JavaScriptSerializer().Serialize(_settingsPatch);
             _settingsPatch.Clear();
@@ -3822,6 +3963,12 @@ namespace UkagakaBangumi
             ReadReminderSlots(due, "next", I("next_count"), from, now, lead);
             if (!_selfTest && HasDueSnoozes(now))
             {
+                // The bundled snapshot can predate the library copied during an upgrade.
+                if (ReadReminderTargets() == null)
+                {
+                    RefreshReminderSnapshot();
+                    return;
+                }
                 _snoozeClaimPending = true;
                 CallSnoozes(new { action = "claim" }, result =>
                 {
@@ -4240,6 +4387,19 @@ namespace UkagakaBangumi
             public string warning { get; set; }
             public List<DesktopScheduleRow> rows { get; set; }
             public List<PersonalReminderRow> personal { get; set; }
+            public List<DesktopScheduleRow> personal_rows { get; set; }
+            public List<DesktopScheduleRow> today { get; set; }
+            public List<DesktopScheduleRow> continuing { get; set; }
+
+            public IEnumerable<List<DesktopScheduleRow>> WatchLists()
+            {
+                return new[] { rows, personal_rows, today, continuing };
+            }
+        }
+
+        public sealed class PlaybackLink
+        {
+            public bool backup { get; set; }
         }
 
         public sealed class PersonalReminderRow
@@ -4260,6 +4420,8 @@ namespace UkagakaBangumi
             public int seen { get; set; }
             public int total { get; set; }
             public string watch_url { get; set; }
+            public string schedule_note { get; set; }
+            public PlaybackLink playback { get; set; }
             public DesktopReminder reminder { get; set; }
         }
 
@@ -4302,6 +4464,40 @@ namespace UkagakaBangumi
                 return new JavaScriptSerializer().Deserialize<T>(reader.ReadToEnd());
         }
 
+        void CheckScheduleDataFiles()
+        {
+            bool changed = false;
+            for (int i = 0; i < _scheduleDataFiles.Length; i++)
+            {
+                DateTime stamp = File.GetLastWriteTimeUtc(Path.Combine(_root, "data", _scheduleDataFiles[i]));
+                if (_scheduleDataStamps[i] == stamp) continue;
+                _scheduleDataStamps[i] = stamp;
+                changed = true;
+            }
+            if (!changed) return;
+            _scheduleRevision++;
+            RefreshDesktopSchedule();
+        }
+
+        void RefreshDesktopOriginal()
+        {
+            if (_desktopOriginalPending || _closing || DateTime.UtcNow < _desktopOriginalRetry) return;
+            _desktopOriginalPending = true;
+            _panelHost.EnsureStarted().ContinueWith(task =>
+            {
+                string error = "";
+                try { ReadPanelJson<Dictionary<string, object>>(task.Result, "/api/schedule/original", 23000); }
+                catch { error = "原播资料暂时无法更新，已显示本机排片和已有资料。"; }
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    _desktopOriginalPending = false;
+                    _desktopOriginalRetry = DateTime.UtcNow.AddMinutes(error.Length == 0 ? 5 : 1);
+                    _desktopOriginalError = error;
+                    if (PanelOpen && !_closing) RefreshDesktopSchedule();
+                }));
+            });
+        }
+
         void RefreshDesktopSchedule()
         {
             if (_desktopSchedulePending || _closing || _panelHost == null || _selfTest) return;
@@ -4313,8 +4509,9 @@ namespace UkagakaBangumi
                 string error = "";
                 try
                 {
-                    schedule = ReadPanelJson<DesktopSchedule>(task.Result,"/api/schedule/desktop",23000);
-                    if (schedule == null || schedule.rows == null || schedule.rows.Exists(row => row.weekday < 0 || row.weekday > 7))
+                    schedule = ReadPanelJson<DesktopSchedule>(task.Result, "/api/schedule/desktop?local=1", 5000);
+                    if (schedule == null || schedule.WatchLists().Any(rows => rows == null) ||
+                        schedule.rows.Exists(row => row.weekday < 0 || row.weekday > 7))
                         throw new InvalidDataException("Invalid weekly schedule");
                 }
                 catch (Exception ex)
@@ -4334,7 +4531,11 @@ namespace UkagakaBangumi
                     }
                     if (schedule != null) _desktopSchedule = schedule;
                     _desktopScheduleError = error;
-                    if (PanelOpen) RefreshPopup();
+                    if (PanelOpen)
+                    {
+                        RefreshPopup();
+                        if (schedule != null) RefreshDesktopOriginal();
+                    }
                 }));
             });
         }
@@ -4455,13 +4656,11 @@ namespace UkagakaBangumi
                 int total = StateValue<int>(serializer, result, "eps");
                 _progressPending.Remove(id);
                 _scheduleRevision++;
-                var row = _desktopSchedule == null ? null : _desktopSchedule.rows.Find(item => item.id == id);
-                bool finished = total > 0 && seen >= total;
-                if (row != null)
-                {
-                    if (finished) _desktopSchedule.rows.Remove(row);
-                    else { row.seen = seen; row.total = total; }
-                }
+                bool finished = StateValue<bool>(serializer, result, "finished");
+                if (_desktopSchedule != null)
+                    foreach (var rows in _desktopSchedule.WatchLists())
+                        if (finished) rows.RemoveAll(row => row.id == id);
+                        else foreach (var row in rows.Where(item => item.id == id)) { row.seen = seen; row.total = total; }
                 string who = string.IsNullOrEmpty(name) ? "这" : name;
                 string revision = StateValue<string>(serializer, result, "revision");
                 string count = seen + (total > 0 ? " / " + total : "") + " 话";
@@ -4658,8 +4857,7 @@ namespace UkagakaBangumi
             }
 
             menu.Items.Add(TrayMenuAction("tray-schedule", ScheduleMenuLabel, () => RunQuickAction("schedule")));
-            if (!_trayPins.Contains("snoozes"))
-                menu.Items.Add(TrayMenuAction("tray-reminder-center", ReminderCenterMenuLabel, OpenReminderCenter));
+            menu.Items.Add(TrayMenuAction("tray-reminder-center", ReminderCenterMenuLabel, OpenReminderCenter));
             var quick = new System.Windows.Forms.ToolStripMenuItem(MarkMenuLabel) { Name = "tray-mark" };
             var shows = ReadMenuShows();
             foreach (var show in QuickMenuShows(shows))
@@ -4671,7 +4869,7 @@ namespace UkagakaBangumi
             }
             if (shows.Count == 0) quick.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("还没有在追番剧") { Enabled = false });
             if (shows.Count > QuickShowLimit)
-                quick.DropDownItems.Add(TrayMenuAction("tray-all-watching", AllWatchingLabel, () => OpenWebPanel("?tab=library")));
+                quick.DropDownItems.Add(TrayMenuAction("tray-all-watching", AllWatchingLabel, () => OpenWebPanel("?tab=continue")));
             menu.Items.Add(quick);
             var undo = TrayMenuAction("tray-undo-progress", UndoMenuLabel, () => UndoLast());
             undo.Enabled = CanUndoProgress;
@@ -4690,6 +4888,7 @@ namespace UkagakaBangumi
 
             var desktop = new System.Windows.Forms.ToolStripMenuItem("桌宠设置");
             desktop.DropDownItems.Add("常用菜单", null, delegate { OpenQuickMenuSettings(); });
+            desktop.DropDownItems.Add(TrayMenuAction("tray-reset-position", "重置桌宠位置", ResetPositionFromMenu));
             foreach (string key in new[] { "notes", "companion", "focus" })
                 if (!promoted.Contains(key)) desktop.DropDownItems.Add(TrayAction(key));
             menu.Items.Add(desktop);
@@ -4764,6 +4963,12 @@ namespace UkagakaBangumi
         void RecallFromTray()
         {
             RecallDesktop(false);
+        }
+
+        void ResetPositionFromMenu()
+        {
+            bool saved = RecallDesktop(true);
+            Say(new Line(saved ? "已重置到鼠标所在屏幕。" : "已移动，暂时无法保存位置。", saved ? 0 : 2), true);
         }
 
         bool RecallDesktop(bool resetPosition)
