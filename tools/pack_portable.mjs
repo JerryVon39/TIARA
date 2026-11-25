@@ -55,6 +55,7 @@ const DIRS = [
 const FILES = [
   'server.mjs', 'package.json', 'README.md', '启动TIARA.bat', '打开番组表.bat', '停止TIARA.bat',
   'ghost/master/descript.txt', 'docs/DEVELOPMENT.md', 'docs/CHANGELOG.md', 'docs/PERSONA-TRIAL.md',
+  'docs/VALIDATION-v0.78.3.md',
   'docs/images/panel.png', 'docs/images/pet-menu.png',
 ];
 /** 永不打包 */

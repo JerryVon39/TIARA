@@ -425,7 +425,8 @@ node server.mjs --port 7860 --no-portfile  :: 临时实例：只服务，不改�
 | GET | `/api/settings` | `{ok, clock, pet_scale}`：时间制式与桌宠大小 |
 | GET | `/api/history` | `{ok, total, gained, recent[], byShow[]}`，来自 `data/history.jsonl` |
 | GET | `/api/backups` | `{ok, backups:[{name,size,mtime,fixed}]}`：`library.json.bak` + `data/backups/*`（滚动 5 份，文件名是 CST） |
-| GET | `/api/season` | 本季番剧表：`?q=2026Q4&net=1`（`net=1` 强制走网络），返回 `{ok,q,total,items[],source,cache_at}` |
+| GET | `/api/season` | 季度资料。默认本地读取，`?q=2026Q4&refresh=auto` 按需联网，`refresh=1` 手动刷新。返回 `items`、`catalog_sources`、`relocations`、`last_refresh`。 |
+| POST | `/api/season/apply` | 用 `{q,add,preview:true}` 预览逐部建议，再用 `{q,add,modes}` 提交每部的观看方式。已入库、改季和起点无法确认的条目会返回具体原因。 |
 | GET | `/api/token` | 读 `data/bgm.json`（token 打码后返回） |
 | GET | `/api/export` | `?fmt=ics` 导出日历、`?fmt=md` 导出周表 Markdown |
 | GET | `/api/stats` | 追番统计：`{ok, streak, week, total, days, finished, byDay[], byShow[]}` |
@@ -438,7 +439,8 @@ node server.mjs --port 7860 --no-portfile  :: 临时实例：只服务，不改�
 | POST | `/api/watch` | `{"id":975,"action":"add"}` / `{"id":975,"action":"remove"}`：名字/星期/话数从星期表或本季缓存继承（`eps` 不再写 null） |
 | POST | `/api/undo` | 退一步（`data/undo/` 最近 10 版）；没有快照时 409 |
 | POST | `/api/restore` | `{"name":"library.json.bak"}` → 校验后换回备份并重算；文件名走白名单（`../` 之类一律 404，并把可用备份列在 `backups` 里） |
-| POST | `/api/settings` | `{"clock":"24h"}` / `{"pet_scale":1.25}` → 存进 `data/settings.json` 并重算 |
+| POST | `/api/settings` | 可更新时制、桌宠大小和 `season_backup` 等偏好。后者只接受空字符串或 `"anibt"`。 |
+| POST | `/api/desktop/appearance` | 将已校验的外观与可选尺寸作为一次提交写入 `data/settings.json`。 |
 | POST | `/api/nickname` | `{"nickname":"YG"}` → 她怎么叫你（写进 `library.json` 的 `user`，桌宠/SSP 同步生效） |
 | GET | `/api/say` | `?pool=bump` 取一句台词（调试用：不启动桌宠也能看台词池现在说什么） |
 | POST | `/api/token` | `{"user":"…","token":"…","proxy":"http://127.0.0.1:7890"}` → 写 `data/bgm.json`（代理支持 `http://user:pass@host:port`） |

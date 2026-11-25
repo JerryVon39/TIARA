@@ -9,6 +9,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Web.Script.Serialization;
 
 namespace UkagakaBangumi
 {
@@ -16,6 +17,7 @@ namespace UkagakaBangumi
     {
         static readonly string[] WindowLayers = { "top", "normal", "bottom" };
         string _previousShellName;
+        bool _appearanceSavePending;
 
         sealed class AppearanceDraft
         {
@@ -23,6 +25,13 @@ namespace UkagakaBangumi
             public double Scale;
             public int Theme, TextSize, BubbleTime;
             public bool ReduceMotion, HideFullscreen, Recall;
+
+            public bool SameAppearance(AppearanceDraft other)
+            {
+                return Shell == other.Shell && Layer == other.Layer && Theme == other.Theme && TextSize == other.TextSize &&
+                    BubbleTime == other.BubbleTime && ReduceMotion == other.ReduceMotion &&
+                    HideFullscreen == other.HideFullscreen && Recall == other.Recall;
+            }
         }
 
         AppearanceDraft CurrentAppearance()
@@ -35,9 +44,20 @@ namespace UkagakaBangumi
             };
         }
 
-        void ShowAppearance(AppearanceDraft draft, ShellSkin skin, string previousShell)
+        void SetAppearanceOptions(AppearanceDraft draft, string previousShell)
         {
             _previousShellName = previousShell;
+            _bubbleThemeIndex = draft.Theme;
+            _bubbleSizeIndex = draft.TextSize;
+            _bubbleTimeIndex = draft.BubbleTime;
+            _reduceMotion = draft.ReduceMotion;
+            _hideFullscreen = draft.HideFullscreen;
+            _recallKeyEnabled = draft.Recall;
+        }
+
+        void ShowAppearance(AppearanceDraft draft, ShellSkin skin, string previousShell)
+        {
+            SetAppearanceOptions(draft, previousShell);
             if (_shellName != draft.Shell)
             {
                 _shellName = draft.Shell;
@@ -50,12 +70,6 @@ namespace UkagakaBangumi
                 ApplyLayer();
             }
             if (!_scaleFromEnv) ApplyScale(draft.Scale, false, false);
-            _bubbleThemeIndex = draft.Theme;
-            _bubbleSizeIndex = draft.TextSize;
-            _bubbleTimeIndex = draft.BubbleTime;
-            _reduceMotion = draft.ReduceMotion;
-            _hideFullscreen = draft.HideFullscreen;
-            _recallKeyEnabled = draft.Recall;
             ApplyRecallHotkey(new WindowInteropHelper(this).Handle);
             ApplyBubbleTheme();
             UpdateLayout();
@@ -63,21 +77,115 @@ namespace UkagakaBangumi
             SnapIntoWorkArea();
         }
 
-        bool SaveAppearance(AppearanceDraft draft, ShellSkin skin, string previousShell)
+        AppearanceDraft ReadSavedAppearance(JavaScriptSerializer serializer, Dictionary<string, object> settings, out string previousShell)
         {
-            var before = CurrentAppearance();
-            var previous = _previousShellName;
-            var active = _activeSkin;
-            ShowAppearance(draft, skin, previousShell);
-            if (!SaveState())
+            previousShell = null;
+            var value = settings == null ? null : StateValue<Dictionary<string, object>>(serializer, settings, "desktop_appearance");
+            if (value == null) return null;
+            string layer = StateValue<string>(serializer, value, "layer");
+            string shell = StateValue<string>(serializer, value, "shell");
+            if (!WindowLayers.Contains(layer) || string.IsNullOrEmpty(shell)) return null;
+            var options = ShellOptions();
+            string previous = StateValue<string>(serializer, value, "previous_shell");
+            previousShell = options.Contains(previous) && previous != shell ? previous : null;
+            return new AppearanceDraft
             {
-                ShowAppearance(before, active, previous);
-                return false;
+                Shell = options.Contains(shell) ? shell : "master",
+                Layer = layer,
+                Scale = ValidScale(StateValue<double>(serializer, settings, "pet_scale")),
+                Theme = Math.Max(0, Math.Min(BubbleThemes.Length - 1, StateValue<int>(serializer, value, "theme"))),
+                TextSize = Math.Max(0, Math.Min(BubbleFontFactors.Length - 1, StateValue<int>(serializer, value, "size"))),
+                BubbleTime = Math.Max(0, Math.Min(3, StateValue<int>(serializer, value, "bubble_time"))),
+                ReduceMotion = StateValue<bool>(serializer, value, "reduce_motion"),
+                HideFullscreen = StateValue<bool>(serializer, value, "hide_fullscreen"),
+                Recall = StateValue<bool>(serializer, value, "recall_hotkey")
+            };
+        }
+
+        void LoadSavedAppearance(JavaScriptSerializer serializer, Dictionary<string, object> settings)
+        {
+            string previous;
+            var saved = ReadSavedAppearance(serializer, settings, out previous);
+            if (saved == null) return;
+            _shellName = saved.Shell;
+            _layer = saved.Layer;
+            SetAppearanceOptions(saved, previous);
+        }
+
+        bool ApplySavedAppearance(JavaScriptSerializer serializer, Dictionary<string, object> settings)
+        {
+            string previous;
+            var saved = ReadSavedAppearance(serializer, settings, out previous);
+            if (saved == null || (saved.SameAppearance(CurrentAppearance()) && previous == _previousShellName)) return false;
+            var skin = OpenShellSkin(saved.Shell);
+            if (skin.Resolve(0) == null)
+            {
+                saved.Shell = "master";
+                skin = OpenShellSkin(saved.Shell);
             }
-            if (!_scaleFromEnv && Math.Abs(before.Scale - _requestedScale) > 0.001)
-                QueueSettingsPatch("pet_scale", Math.Round(_requestedScale, 2));
+            ShowAppearance(saved, skin, previous);
+            SaveState();
             TickDesktopVisibility();
             return true;
+        }
+
+        void SaveAppearance(AppearanceDraft draft, ShellSkin skin, string previousShell, bool saveScale, Action<string> done)
+        {
+            if (_selfTest || _closing) { done("本机设置暂时无法保存。"); return; }
+            if (_settingsWritePending || _settingsPatch.Count > 0)
+            {
+                done("还有设置正在保存，请稍后重试。");
+                return;
+            }
+            var serializer = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
+            var payload = new Dictionary<string, object> {
+                { "appearance", new {
+                    shell = draft.Shell, previous_shell = previousShell, layer = draft.Layer,
+                    theme = draft.Theme, size = draft.TextSize, bubble_time = draft.BubbleTime,
+                    reduce_motion = draft.ReduceMotion, hide_fullscreen = draft.HideFullscreen, recall_hotkey = draft.Recall
+                } }
+            };
+            if (!_scaleFromEnv) payload["fallback_scale"] = Math.Round(_requestedScale, 2);
+            saveScale = saveScale && !_scaleFromEnv;
+            if (saveScale) payload["pet_scale"] = Math.Round(draft.Scale, 2);
+            _appearanceSavePending = true;
+            string body = serializer.Serialize(payload);
+            Action<string> completed = raw =>
+            {
+                string error = "外观未能保存。当前外观未更改，草稿仍可重试。";
+                try
+                {
+                    var reply = ReadProgressResponse(serializer, raw);
+                    Dictionary<string, object> settings;
+                    if (reply != null && StateValue<bool>(serializer, reply, "ok"))
+                        settings = StateValue<Dictionary<string, object>>(serializer, reply, "settings");
+                    else
+                    {
+                        // A lost response can follow a successful disk write.
+                        string file = Path.Combine(_root, "data", "settings.json");
+                        settings = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    }
+                    string previous;
+                    var saved = ReadSavedAppearance(serializer, settings, out previous);
+                    if (!_closing && saved != null && saved.SameAppearance(draft) && previous == previousShell &&
+                        (!saveScale || Math.Abs(saved.Scale - draft.Scale) < 0.005))
+                    {
+                        ShowAppearance(saved, skin, previous);
+                        SaveState();
+                        TickDesktopVisibility();
+                        error = null;
+                    }
+                }
+                catch (Exception ex) { Log("appearance save: " + ex.Message); }
+                finally
+                {
+                    _appearanceSavePending = false;
+                    if (_settingsPatch.Count > 0) SendSettingsPatch();
+                    if (!_closing) done(error);
+                }
+            };
+            UsePanel(port => PostJsonAsync("http://127.0.0.1:" + port + "/api/desktop/appearance", body, completed),
+                false, () => completed(null));
         }
 
         string ShellDisplayName(string name)
@@ -126,6 +234,7 @@ namespace UkagakaBangumi
             win.Content = root;
 
             var draft = CurrentAppearance();
+            var savedAtOpen = CurrentAppearance();
             var tabs = new TabControl();
             panel.Children.Add(tabs);
             var wardrobe = AddAppearanceTab(tabs, "立绘", "appearance-tab-shell");
@@ -160,8 +269,16 @@ namespace UkagakaBangumi
             UtilityText(display, "窗口层级");
             var layer = AppearanceOptions("窗口层级", "appearance-layer", new[] { "置顶", "普通", "沉底" }, Array.IndexOf(WindowLayers, draft.Layer));
             display.Children.Add(layer);
-            CompanionOption(display, "本屏全屏时暂时隐藏桌宠", "window-hide-fullscreen", draft.HideFullscreen, value => draft.HideFullscreen = value);
-            CompanionOption(display, "启用找回快捷键 " + RecallKeys, "window-recall-hotkey", draft.Recall, value => draft.Recall = value);
+            var hide = CompanionOption(display, "本屏全屏时暂时隐藏桌宠", "window-hide-fullscreen", draft.HideFullscreen, value => draft.HideFullscreen = value);
+            var recall = CompanionOption(display, "启用找回快捷键 " + RecallKeys, "window-recall-hotkey", draft.Recall, value => draft.Recall = value);
+            UtilityButton(display, "恢复默认显示", "appearance-reset-display", () =>
+            {
+                if (!_scaleFromEnv) scale.SelectedIndex = Array.IndexOf(scales, 1d);
+                layer.SelectedIndex = 0;
+                hide.IsChecked = false;
+                recall.IsChecked = false;
+            });
+            UtilityText(display, "恢复默认显示会先改动草稿，点「应用」后保存。");
             var recallStatus = ScheduleText("", 12, ScheduleMuted);
             display.Children.Add(recallStatus);
             var position = new WrapPanel();
@@ -179,7 +296,7 @@ namespace UkagakaBangumi
             var delay = AppearanceOptions("气泡停留时间", "appearance-bubble-time",
                 new[] { "按台词长度", "至少 15 秒", "30 秒", "手动关闭" }, draft.BubbleTime);
             bubbles.Children.Add(delay);
-            CompanionOption(bubbles, "减弱动画（立即显示全文）", "appearance-reduce-motion", draft.ReduceMotion, value => draft.ReduceMotion = value);
+            var motion = CompanionOption(bubbles, "减弱动画（立即显示全文）", "appearance-reduce-motion", draft.ReduceMotion, value => draft.ReduceMotion = value);
             var sample = new TextBlock { Text = "会长，今天的记录也写好了。", TextWrapping = TextWrapping.Wrap, Foreground = Ink };
             var bubble = new Border { Child = sample, Padding = new Thickness(12), Margin = new Thickness(0, 6, 0, 0),
                 CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1) };
@@ -188,21 +305,58 @@ namespace UkagakaBangumi
             var status = ScheduleText("", 12, ScheduleMuted);
             status.TextWrapping = TextWrapping.Wrap;
             AutomationProperties.SetAutomationId(status, "appearance-status");
+            UtilityText(footer, "应用前只预览。关闭窗口会放弃未应用的修改。");
             footer.Children.Add(status);
             var actions = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             footer.Children.Add(actions);
-            Button apply = null, undo = null;
+            Button apply = null, undo = null, close = null;
             ShellSkin stagedSkin = null;
             string stagedName = null;
+            bool saving = false, canApply = false;
+            Action readDraft = delegate
+            {
+                draft.Shell = names[shell.SelectedIndex];
+                draft.Layer = WindowLayers[layer.SelectedIndex];
+                draft.Scale = scales[scale.SelectedIndex];
+                draft.Theme = theme.SelectedIndex;
+                draft.TextSize = size.SelectedIndex;
+                draft.BubbleTime = delay.SelectedIndex;
+            };
             Action refresh = delegate
             {
+                if (shell.SelectedIndex < 0 || scale.SelectedIndex < 0) return;
+                readDraft();
+                bool dirty = !draft.SameAppearance(savedAtOpen) || Math.Abs(draft.Scale - savedAtOpen.Scale) > 0.001;
                 current.Text = "正在使用 " + ShellDisplayName(_shellName);
-                undo.IsEnabled = !string.IsNullOrEmpty(_previousShellName);
+                tabs.IsEnabled = !saving;
+                apply.IsEnabled = !saving && canApply && dirty;
+                close.IsEnabled = !saving;
+                close.Content = dirty ? "放弃修改" : "关闭";
+                undo.IsEnabled = !saving && !string.IsNullOrEmpty(_previousShellName);
                 undo.ToolTip = undo.IsEnabled ? "切回 " + ShellDisplayName(_previousShellName) : null;
                 recallStatus.Text = !_recallKeyEnabled ? "也可从托盘找回桌宠。" : _recallKeyRegistered
                     ? "找回快捷键已启用。" : "快捷键当前不可用，可从托盘找回。";
                 scaleHint.Text = _scaleFromEnv ? "尺寸由当前启动参数指定。" :
-                    scales[scale.SelectedIndex] > MaxScale() ? "本屏放不下此尺寸，桌宠会暂时缩小。" : "";
+                    draft.Scale > MaxScale() ? "本屏放不下此尺寸，桌宠会暂时缩小。" : "";
+            };
+            Action<string> startSaving = message =>
+            {
+                saving = true;
+                status.Text = message;
+                refresh();
+            };
+            Action selectSavedScale = delegate
+            {
+                int index = Array.IndexOf(scales, savedAtOpen.Scale);
+                if (index < 0)
+                {
+                    scales = new SortedSet<double>(scales) { savedAtOpen.Scale }.ToArray();
+                    scale.Items.Clear();
+                    foreach (double value in scales)
+                        scale.Items.Add((value * 100).ToString("0", CultureInfo.InvariantCulture) + "%");
+                    index = Array.IndexOf(scales, savedAtOpen.Scale);
+                }
+                scale.SelectedIndex = index;
             };
             Action showPreview = delegate
             {
@@ -214,7 +368,8 @@ namespace UkagakaBangumi
                 }
                 preview.Children.Clear();
                 var normal = stagedSkin.Resolve(0);
-                apply.IsEnabled = normal != null;
+                canApply = normal != null;
+                refresh();
                 var art = normal == null ? null : stagedSkin.Resolve(expression.SelectedIndex);
                 hint.Text = art == null ? "这套立绘的首张图片无法读取，当前外观继续使用。" :
                     art.Slot == expression.SelectedIndex ? "" :
@@ -236,39 +391,60 @@ namespace UkagakaBangumi
             };
             apply = UtilityButton(actions, "应用", "appearance-apply", () =>
             {
-                draft.Shell = names[shell.SelectedIndex];
+                if (saving) return;
+                readDraft();
                 var skin = OpenShellSkin(draft.Shell);
-                if (skin.Resolve(0) == null) { status.Text = "立绘已无法读取，已保留当前外观。"; return; }
-                draft.Layer = WindowLayers[layer.SelectedIndex];
-                draft.Scale = scales[scale.SelectedIndex];
-                draft.Theme = theme.SelectedIndex;
-                draft.TextSize = size.SelectedIndex;
-                draft.BubbleTime = delay.SelectedIndex;
+                if (skin.Resolve(0) == null) { status.Text = "立绘已无法读取，草稿仍保留。"; return; }
                 string previous = _shellName == draft.Shell ? _previousShellName : _shellName;
-                status.Text = SaveAppearance(draft, skin, previous) ? "已应用。" : "外观保存失败，已恢复原设置。";
-                refresh();
+                bool scaleChanged = Math.Abs(draft.Scale - savedAtOpen.Scale) > 0.001;
+                startSaving("正在保存外观…");
+                SaveAppearance(draft, skin, previous, scaleChanged, error =>
+                {
+                    saving = false;
+                    if (error == null)
+                    {
+                        savedAtOpen = CurrentAppearance();
+                        selectSavedScale();
+                    }
+                    status.Text = error ?? "已应用。";
+                    refresh();
+                });
             });
             undo = UtilityButton(actions, "撤销换装", "appearance-undo", () =>
             {
+                if (saving || string.IsNullOrEmpty(_previousShellName)) return;
                 var original = CurrentAppearance();
+                var selectedShellMatches = draft.Shell == original.Shell;
                 original.Shell = _previousShellName;
                 var skin = OpenShellSkin(original.Shell);
-                if (skin.Resolve(0) == null) { status.Text = "上一套立绘已无法读取，已保留当前外观。"; return; }
-                if (SaveAppearance(original, skin, null))
+                if (skin.Resolve(0) == null) { status.Text = "上一套立绘已无法读取。"; return; }
+                startSaving("正在保存撤销…");
+                SaveAppearance(original, skin, null, false, error =>
                 {
-                    shell.SelectedIndex = names.IndexOf(_shellName);
-                    status.Text = "已切回上一套立绘。";
-                }
-                else status.Text = "撤销未能保存，已保留当前外观。";
-                refresh();
+                    saving = false;
+                    if (error == null)
+                    {
+                        savedAtOpen.Shell = _shellName;
+                        if (selectedShellMatches) shell.SelectedIndex = names.IndexOf(_shellName);
+                    }
+                    status.Text = error ?? "已切回上一套立绘。";
+                    refresh();
+                });
             });
-            UtilityButton(actions, "取消", "appearance-close", () => win.Close());
+            close = UtilityButton(actions, "关闭", "appearance-close", () => win.Close());
+            win.Closing += (sender, args) => { if (saving && !_closing) args.Cancel = true; };
             shell.SelectionChanged += delegate { showPreview(); };
             expression.SelectionChanged += delegate { showPreview(); };
-            theme.SelectionChanged += delegate { previewBubble(); };
-            size.SelectionChanged += delegate { previewBubble(); };
+            theme.SelectionChanged += delegate { previewBubble(); refresh(); };
+            size.SelectionChanged += delegate { previewBubble(); refresh(); };
             scale.SelectionChanged += delegate { refresh(); };
-            refresh();
+            layer.SelectionChanged += delegate { refresh(); };
+            delay.SelectionChanged += delegate { refresh(); };
+            foreach (var option in new[] { hide, recall, motion })
+            {
+                option.Checked += delegate { refresh(); };
+                option.Unchecked += delegate { refresh(); };
+            }
             showPreview();
             previewBubble();
             win.Show();

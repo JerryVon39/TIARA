@@ -137,13 +137,22 @@ namespace UkagakaBangumi
 
         public void Dispose()
         {
+            Process child;
             lock (_gate)
             {
                 _disposed = true;
-                if (_owned == null) return;
-                try { _owned.StandardInput.Close(); } catch { }
-                _owned.Dispose();
+                child = _owned;
                 _owned = null;
+            }
+            if (child == null) return;
+            using (child)
+            {
+                try
+                {
+                    child.StandardInput.Close();
+                    if (!child.WaitForExit(6500)) _log("panel did not drain before desktop exit");
+                }
+                catch (Exception error) { _log("panel shutdown failed: " + error.Message); }
             }
         }
     }

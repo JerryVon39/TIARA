@@ -30,6 +30,24 @@ test('isAllowedCoverUrl：只放 bgm 图床的 https 图片路径', () => {
   assert.equal(isAllowedCoverUrl(null), false);
 });
 
+test('备用封面需启用且来自季度备用源，拒绝跨域重定向', async () => {
+  const image = 'https://bgmimg.anibt.net/r/200/pic/cover/l/1/test.jpg';
+  const item = { id: 1, image, cover_source: 'anibt' };
+  assert.equal(isAllowedCoverUrl(image), false);
+  assert.equal(isAllowedCoverUrl(image, true), true);
+  assert.equal(isAllowedCoverUrl('https://bgmimg.anibt.net/r/200/other.jpg', true), false);
+  assert.equal(isAllowedCoverUrl('https://bgmimg.anibt.net.example/pic/cover/test.jpg', true), false);
+  assert.equal(pickCoverUrl([item], 1), null);
+  assert.equal(pickCoverUrl([{ id: 1, image }], 1, true), null);
+  assert.equal(pickCoverUrl([item], 1, true), image);
+  const visited = [];
+  assert.equal(await downloadCover(image, async url => {
+    visited.push(url);
+    return { status: 302, headers: { location: 'https://example.invalid/pic/cover/test.jpg' } };
+  }, true), null);
+  assert.deepEqual(visited, [image]);
+});
+
 test('pickCoverUrl：按 id 找封面，找不到或不合规返回 null', () => {
   const items = [
     { id: 1, image: 'https://lain.bgm.tv/r/100/pic/cover/l/a.jpg' },

@@ -88,7 +88,13 @@ test('Ghost 案件簿引用可用事件，并使用最新称呼、排期和补�
   const { events } = ghostDialogue(talks, lib, new Date('2026-11-09T16:00:00Z'), { clock: '24h' });
   const faces = new Set([0, 4, 5, 6]);
   const menu = ghostScript(events.OnMouseDoubleClick[0], faces);
-  for (const [, event] of menu.matchAll(/\\q\[[^,]+,(On\w+)\]/g)) assert.ok(events[event]?.length, event);
+  for (const [, event] of menu.matchAll(/\\q\[[^,]+,(On\w+)\]/g)) {
+    assert.ok(events[event]?.length, event);
+    for (const option of events[event]) {
+      assert.match(ghostScript(option, faces), /\\q\[返回案件簿,OnMouseDoubleClick\]/, event);
+    }
+  }
+  assert.match(menu, /\\q\[摸摸头,OnTiaraNade\]/);
   assert.match(ghostScript(events.OnBoot[0], faces), /欢迎，测试会长\\n.*01:30 夜间番/);
   assert.match(ghostScript(events.OnTiaraNext[0], faces), /\\s\[5\]夜间番，01:30/);
   const backlog = ghostScript(events.OnTiaraBacklog[0], faces);

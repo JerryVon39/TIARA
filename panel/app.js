@@ -12,7 +12,7 @@
   var LIBRARY_STATES = { watching: '在追', catchup_list: '补番中', planned: '待看', paused: '已暂停', finished: '已看完', archived: '已归档', dropped: '已弃番', removed: '已移除' };
   var libraryFilter = '', searchFilter = '', searchLimit = 8;
   var searchScroll = 0, searchViewDirty = false;
-  var libraryBatch = false;
+  var libraryBatch = false, libraryPicks = new Set();
   var libraryView = { year: '', tag: '', link: '' }, savedLibraryViews = {};
   var compactWeek = false, homeView = '';
 
@@ -90,13 +90,15 @@
   }
   var POST_CHAIN = Promise.resolve();
   var LAST_WRITE = null;
-  var panelRevision = null, revisionCheck = null;
+  var writesPending = 0, activeWriteUrl = null;
+  var panelRevision = null, reminderRevision = null, revisionCheck = null;
   var tabs = typeof BroadcastChannel === 'function' ? new BroadcastChannel('tiara-library') : null;
   if (tabs) tabs.onmessage = function () { if (!document.hidden) checkPanelRevision(); };
   function post(url, body) {
     // 所有页面写入按触发顺序提交，撤销不能越过尚在等待的记账。
     if (url !== '/api/progress') flushAllBumps();
-    var run = POST_CHAIN.then(function () {
+    async function send() {
+      activeWriteUrl = url;
       if (url === '/api/undo' && !body.expected_revision && LAST_WRITE && ['/api/progress', '/api/watch/detail', '/api/watch/lifecycle', '/api/watch/schedule'].indexOf(LAST_WRITE.url) >= 0) {
         if (!LAST_WRITE.result || !LAST_WRITE.result.changed) return { ok: false, error: '刚才没有写入新改动，无需撤销' };
         body = Object.assign({}, body, { expected_revision: LAST_WRITE.result.revision });
@@ -106,13 +108,18 @@
         if (tabs && j.ok && (j.changed || j.revision || j.undone)) tabs.postMessage('change');
         return j;
       }, function (e) { LAST_WRITE = { url: url, result: null }; throw e; });
+    }
+    var run = (writesPending++ === 0 ? send() : POST_CHAIN.then(send)).finally(function () {
+      writesPending--;
+      activeWriteUrl = null;
     });
     POST_CHAIN = run.catch(function () {});
     return run;
   }
   function sendPost(url, body) {
     return fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+      keepalive: url === '/api/progress'
     }).then(function (r) {
       return r.json().catch(function () { return { ok: r.ok }; }).then(function (j) {
         j = j || {};
@@ -298,10 +305,12 @@
       .catch(function () {});
   }
 
+  var refreshGeneration = 0;
   function refresh() {
+    var generation = ++refreshGeneration;
     return Promise.all([json('/api/state'), json('/api/stats').catch(function () { return null; })])
       .then(function (arr) {
-        if (Object.keys(OUTSTANDING).some(function (id) { return OUTSTANDING[id]; })) return;
+        if (generation !== refreshGeneration || Object.values(OUTSTANDING).some(Boolean)) return false;
         STATE = arr[0];
         STATS = arr[1];
         IMAGES = (STATE && STATE.images) || {};
@@ -309,11 +318,18 @@
         if (STATE.recovery?.read_only) showNetbar(STATE.recovery.message);
         else hideNetbar();
         $('#footHint').textContent = 'TIARA · 本地番库 · 在追 ' + num(STATE.watching_count) + ' 部';
-        render();
-        loadOriginal();
-      })
-      .catch(function (e) {
-        if (STATE) return offlineNote(e);   // 已经有内容：只提示，不拆页面
+        try {
+          render();
+          loadOriginal();
+          return true;
+        } catch (e) {
+          console.error(e);
+          showNetbar('网页显示更新失败。请点「重试」。');
+          return false;
+        }
+      }, function (e) {
+        if (generation !== refreshGeneration) return false;
+        if (STATE) return offlineNote(e).then(function () { return false; });
         showNetbar('连不上本地服务：' + (e.message || '网络错误'));
         json('/api/health').then(function (health) {
           if (health.recovery?.read_only) showNetbar(health.recovery.message);
@@ -321,6 +337,7 @@
         $('#view').innerHTML = '<div class="panel"><div class="empty">读不到本地服务：' + esc(e.message) +
           '<br /><br />先跑 <b>node server.mjs --port 7788</b>，或用「打开番组表.bat」。<br />' +
           '起好服务后点上面的「重试」。</div></div>';
+        return false;
       });
   }
 
@@ -328,9 +345,15 @@
     if (document.hidden || revisionCheck) return;
     revisionCheck = json('/api/panel-revision').then(function (result) {
       var key = result.version + ':' + result.revision;
-      if (key !== panelRevision) {
-        panelRevision = key;
-        return refresh();
+      var reminderKey = key + ':' + result.reminder_revision;
+      var reminderChanged = reminderKey !== reminderRevision;
+      if (reminderChanged) refreshOpenReminderCenter?.();
+      if (key !== panelRevision || reminderChanged && ['today', 'week', 'continue'].includes(TAB)) {
+        return refresh().then(function (applied) {
+          if (applied) { panelRevision = key; reminderRevision = reminderKey; }
+        });
+      } else {
+        reminderRevision = reminderKey;
       }
     }).catch(offlineNote).finally(function () { revisionCheck = null; });
   }
@@ -400,11 +423,9 @@
     // 整体重绘会把焦点丢到 body：记住当前焦点控件的 id，画完还回去
     var focusId = document.activeElement && document.activeElement.id;
     var control = viewDetailSelector(document.activeElement);
-    if (TAB === 'week' || TAB === 'today') v.innerHTML = viewSchedule(TAB === 'week');
+    if (['week', 'today', 'continue'].includes(TAB)) v.innerHTML = viewSchedule();
     else if (TAB === 'library') v.innerHTML = viewLibrary();
     else if (TAB === 'catchup') v.innerHTML = viewCatchup();
-    else if (TAB === 'continue') v.innerHTML = '<div class="schedule-view">' + viewContinueWatching() +
-      '<button data-goto="today">查看我的排片</button></div>';
     else v.innerHTML = viewSeason();
     bind();
     paintPending();
@@ -418,8 +439,15 @@
   }
 
   function viewDetailSelector(element) {
-    var id = element?.dataset.detail;
-    return id && $('#view').contains(element) ? '#view [data-detail="' + CSS.escape(id) + '"]' : '';
+    if ($('#globalSearch').contains(element)) {
+      var id = element.dataset.detail;
+      if (id) return '#globalSearch [data-detail="' + CSS.escape(id) + '"]';
+    }
+    if (!$('#view').contains(element)) return '';
+    if (element.hasAttribute('data-library-pick')) return '#view [data-library-pick][value="' + CSS.escape(element.value) + '"]';
+    if (element.dataset.detail) return '#view [data-detail="' + CSS.escape(element.dataset.detail) + '"]';
+    if (element.dataset.scheduleEpisodes) return '#view [data-schedule-episodes="' + CSS.escape(element.dataset.scheduleEpisodes) + '"]';
+    return '';
   }
 
   function watchProgress(w) {
@@ -450,7 +478,8 @@
     var controlId = 'schedule-' + group + '-' + enc(id);
     var bangumi = /^[1-9]\d{0,9}$/.test(id) ?
       '<a href="https://bgm.tv/subject/' + id + '" target="_blank" rel="noopener noreferrer">Bangumi 条目 ↗</a>' : '';
-    var ops = entry ? watchLink(entry.watch_url, x.name) +
+    var cardData = entry && STATE.schedule_cards?.[id];
+    var ops = entry ? playbackLink(entry, x.name, cardData) +
       '<button type="button" class="schedule-mark" id="' + controlId + '-mark" data-op="1" data-id="' + esc(id) + '"' +
       (progress.complete ? ' aria-disabled="true"' : '') + '>记一话</button>' +
       '<details class="schedule-more"><summary id="' + controlId + '-more" aria-label="《' + esc(x.name) + '》的更多操作">···</summary>' +
@@ -469,6 +498,7 @@
       '</h4>' + (progress ? '<div class="schedule-progress"><strong data-schedule-next>' + esc(progress.next) +
         '</strong><span data-schedule-seen="' + progress.seen + '">' + esc(progress.text) + '</span>' +
         (isFresh(entry) ? '<span class="schedule-fresh">总集数更新</span>' : '') + '</div>' : '') +
+      (cardData?.schedule_note ? '<p class="schedule-reminder-note">' + esc(cardData.schedule_note) + '</p>' : '') +
       '</div><div class="ops schedule-actions">' + ops + '</div></article>';
   }
 
@@ -494,6 +524,16 @@
     } catch (e) { return ''; }
   }
 
+  function playbackLink(entry, name, card) {
+    if (card) return card.playback ? watchLink(card.playback.url, name, card.playback.backup ? '去观看（备用）' : '') : '';
+    var primary = watchLink(entry.watch_url, name);
+    if (primary) return primary;
+    var links = entry.user_details?.links;
+    return Array.isArray(links) ? links.map(function (link) {
+      return watchLink(link?.url, name, '去观看（备用）');
+    }).find(Boolean) || '' : '';
+  }
+
   function viewLibrary() {
     var all = Object.keys(LIBRARY_STATES).flatMap(function (state) { return STATE[state] || []; });
     var yearOf = function (w) { return String(w.user_details?.year || (/^\d{4}/.exec(w.release_date || w.start_date || '') || [])[0] || ''); };
@@ -508,7 +548,7 @@
       var entries = (STATE[state] || []).filter(function (w) {
         return (!libraryView.year || yearOf(w) === libraryView.year) &&
           (!libraryView.tag || (w.user_details?.tags || []).includes(libraryView.tag)) &&
-          (!libraryView.link || Boolean(watchLink(w.watch_url, '')) === (libraryView.link === 'yes'));
+          (!libraryView.link || Boolean(playbackLink(w, '')) === (libraryView.link === 'yes'));
       });
       var rows = entries.map(function (w) {
         var name = w.name_cn || w.name || String(w.id);
@@ -516,12 +556,13 @@
           ' 集 · 连续至第 ' + num(w.ep_status) + ' 集' : num(w.ep_status) + '/' + (num(w.eps) || '?');
         return '<div class="trow library-row">' +
           '<div class="tn"><div class="nm">' +
-          (libraryBatch ? '<input type="checkbox" data-library-pick value="' + esc(w.id) + '" aria-label="选中 ' + esc(name) + '">' : '') +
+          (libraryBatch ? '<input type="checkbox" data-library-pick value="' + esc(w.id) + '"' +
+             (libraryPicks.has(String(w.id)) ? ' checked' : '') + ' aria-label="选中 ' + esc(name) + '">' : '') +
           watchTitle(w.id, name, true) + '</div>' +
           '<small>' + (state === 'planned' ? (w.eps ? '共 ' + esc(w.eps) + ' 集' : '集数待定') : '已看 ' + esc(progress)) + '</small>' +
           (w.user_details?.tags || []).map(function (tag) {
             return '<span class="tag mut">' + esc(tag) + '</span>';
-          }).join('') + watchLink(w.watch_url, name) + '</div>' +
+          }).join('') + playbackLink(w, name) + '</div>' +
           (state === 'finished' ? '<button type="button" data-archive="' + esc(w.id) + '">归档</button>' :
             state === 'paused' || state === 'archived' ? '<button type="button" data-resume="' + esc(w.id) + '">' +
             (state === 'archived' ? '取消归档' : '继续观看') + '</button>' : '') + '</div>';
@@ -539,7 +580,8 @@
       '<button type="button" id="libraryBatchToggle" aria-pressed="' +
       libraryBatch + '">' + (libraryBatch ? '退出批量整理' : '批量整理') + '</button></div>' +
       (libraryBatch ? '<div class="fbar"><button type="button" id="libraryBatchSelect">全选当前列表</button>' +
-        '<button type="button" id="libraryBatchClear">取消全选</button><button type="button" id="libraryBatchOpen" disabled>整理所选（0）</button></div>' : '') +
+        '<button type="button" id="libraryBatchClear">取消全选</button><button type="button" id="libraryBatchOpen" disabled>整理所选（0）</button>' +
+        '<span class="note" id="libraryBatchHidden"></span></div>' : '') +
       '<div class="fbar library-filters">' +
       libraryFilterHtml('libraryFilter', libraryFilter) +
       '<label>年份 <select id="libraryYear">' + options(years, libraryView.year) + '</select></label>' +
@@ -637,19 +679,39 @@
   function bindLibraryFilters() {
     if (!$('#libraryFilter')) return;
     $('#libraryCsv').onclick = openLibraryCsv;
-    $('#libraryBatchToggle').onclick = function () { libraryBatch = !libraryBatch; render(); (libraryBatch ? $('#libraryBatchSelect') : $('#libraryBatchToggle')).focus(); };
+    $('#libraryBatchToggle').onclick = function () {
+      libraryBatch = !libraryBatch;
+      if (!libraryBatch) libraryPicks.clear();
+      render();
+      (libraryBatch ? $('#libraryBatchSelect') : $('#libraryBatchToggle')).focus();
+    };
     if (libraryBatch) {
       var boxes = [...document.querySelectorAll('[data-library-pick]')], batchOpen = $('#libraryBatchOpen');
-      function selected() { return boxes.filter(function (box) { return box.checked; }).map(function (box) { return box.value; }); }
+      function selected() { return boxes.filter(function (box) { return libraryPicks.has(box.value); }).map(function (box) { return box.value; }); }
       function countSelected() {
-        var count = selected().length;
+        var count = selected().length, hidden = libraryPicks.size - count;
         batchOpen.textContent = '整理所选（' + count + '）';
         batchOpen.disabled = count === 0;
+        $('#libraryBatchHidden').textContent = hidden ? '另有 ' + hidden + ' 部已勾选，当前筛选隐藏' : '';
       }
-      boxes.forEach(function (box) { box.onchange = countSelected; });
-      $('#libraryBatchSelect').onclick = function () { boxes.forEach(function (box) { box.checked = true; }); countSelected(); };
-      $('#libraryBatchClear').onclick = function () { boxes.forEach(function (box) { box.checked = false; }); countSelected(); };
+      boxes.forEach(function (box) {
+        box.onchange = function () {
+          if (box.checked) libraryPicks.add(box.value);
+          else libraryPicks.delete(box.value);
+          countSelected();
+        };
+      });
+      $('#libraryBatchSelect').onclick = function () {
+        boxes.forEach(function (box) { box.checked = true; libraryPicks.add(box.value); });
+        countSelected();
+      };
+      $('#libraryBatchClear').onclick = function () {
+        libraryPicks.clear();
+        boxes.forEach(function (box) { box.checked = false; });
+        countSelected();
+      };
       batchOpen.onclick = function () { openLibraryBatch(selected()); };
+      countSelected();
     }
     [['#libraryFilter', 'state'], ['#libraryYear', 'year'], ['#libraryTag', 'tag'], ['#libraryLink', 'link']].forEach(function (field) {
       $(field[0]).addEventListener('change', function () {
@@ -844,7 +906,11 @@
       busy = true;
       action.disabled = tag.disabled = preview.disabled = apply.disabled = true;
       post('/api/library/batch', payload).then(function (reply) {
-        if (!form.isConnected) return;
+        if (reply.ok && done && !endedOnly) reply.plan.changed.forEach(function (row) { libraryPicks.delete(String(row.id)); });
+        if (!form.isConnected) {
+          if (reply.ok && done) refresh();
+          return;
+        }
         if (!reply.ok) throw new Error(reply.error);
         describe(reply.plan, done);
         if (!done) {
@@ -880,19 +946,20 @@
   }
 
 
-  function viewContinueWatching() {
-    var items = (STATE.watching || []).concat(STATE.catchup_list || []).filter(function (w) {
-      return w.user_details?.pinned_at || w.last_watched;
-    }).sort(function (a, b) {
-      var pinned = String(b.user_details?.pinned_at || '').localeCompare(String(a.user_details?.pinned_at || ''));
-      return pinned || recentWatchOrder(a, b);
-    }).slice(0, 5);
+  function viewContinueWatching(full) {
+    var entries = new Map((STATE.watching || []).concat(STATE.catchup_list || []).map(function (item) {
+      return [String(item.id), item];
+    }));
+    var items = (STATE.continue_ids || [...entries.keys()]).map(function (id) { return entries.get(id); }).filter(Boolean);
+    var controls = !full && items.length > 5 ?
+      '<button type="button" data-goto="continue" class="schedule-link">查看全部（' + items.length + '）</button>' :
+      '<small>' + items.length + ' 部</small>';
     return '<section class="schedule-section" aria-labelledby="scheduleContinue"><div class="schedule-section-head">' +
-      '<h3 id="scheduleContinue">接着看</h3><button type="button" data-goto="library" class="schedule-link">查看番库 ↗</button></div>' +
-      (items.length ? '<div class="schedule-list">' + items.map(function (w) {
+      '<h3 id="scheduleContinue">接着看</h3>' + controls + '</div>' +
+      (items.length ? '<div class="schedule-list">' + (full ? items : items.slice(0, 5)).map(function (w) {
         var label = [w.watch_mode === 'catchup' ? '补番' : '连载', w.user_details?.pinned_at ? '已置顶' : ''].filter(Boolean).join(' · ');
         return showCard({ id: w.id, name: w.name_cn || w.name || String(w.id), entry: w, label: label }, 'continue');
-      }).join('') + '</div>' : '<p class="schedule-empty">记过一话或置顶的番剧会出现在这里。</p>') + '</section>';
+      }).join('') + '</div>' : scheduleEmpty('目前没有在追或补番。', scheduleAddActions())) + '</section>';
   }
 
   function recentWatchOrder(a, b) {
@@ -931,7 +998,6 @@
     $('#view').hidden = !region.hidden;
     if (region.hidden) { region.replaceChildren(); return; }
     var focusId = region.contains(document.activeElement) ? document.activeElement.id : '';
-    var returnId = region.contains(dlgReturnFocus) ? dlgReturnFocus.id : '';
     var keys = searchFilter ? [searchFilter] : Object.keys(LIBRARY_STATES);
     var words = terms.split(/\s+/);
     var seen = new Set();
@@ -958,7 +1024,6 @@
       (rows ? '<ul>' + rows + '</ul>' : '<p class="library-search-empty">番库中没有匹配的条目。可以换个番名或到 Bangumi 查找。</p>') +
       (matches.length > searchLimit ? '<div class="library-search-more"><button type="button" id="globalSearchMore">显示更多</button></div>' : '') + '</div>';
     if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
-    if (returnId) dlgReturnFocus = document.getElementById(returnId) || $('#q');
     $('#globalLibraryFilter').addEventListener('change', function () {
       searchFilter = this.value; searchLimit = 8; renderLibrarySearch();
     });
@@ -985,7 +1050,7 @@
         '<div>' + watchTitle(w.id, name, true) + '<p>' + esc(current.next) + '</p><small>' + esc(progress) + '</small>' +
         (slot ? '<small class="catchup-slot">补番提醒 · 周' + CN[slot.day] + ' ' + esc(slot.time) +
           (slot.quiet ? ' · 免打扰' : '') + '</small>' : '') + '</div>' +
-        '<div class="catchup-actions">' + watchLink(w.watch_url, name) +
+        '<div class="catchup-actions">' + playbackLink(w, name) +
         '<button data-op="1" data-id="' + id + '">记一话</button></div></article>';
     }).join('');
     return '<section class="sec"><div class="sec-head"><h2>补番清单</h2><button type="button" data-new-watch>新增补番</button></div>' +
@@ -1128,16 +1193,19 @@
       '<p id="sayText">' + esc(STATE.summary || '') + '</p>' + (STATE.quote ? '<small>' + esc(STATE.quote) + '</small>' : '') + '</section></aside>';
   }
 
-  function viewSchedule(weekly) {
+  function viewSchedule() {
+    var weekly = TAB === 'week';
     var buckets = weekBuckets(weekly && WEEK_ALL);
+    var content = weekly ? viewScheduleWeek(buckets) : TAB === 'continue' ? viewContinueWatching(true) : viewScheduleToday();
     return '<section class="schedule-view" aria-labelledby="scheduleHeading"><header class="schedule-head"><div>' +
       '<h2 id="scheduleHeading">我的排片</h2><p><time datetime="' + esc(STATE.date) + '">' + esc(STATE.date) + '</time> · 星期' +
       CN[num(STATE.weekday)] + '</p></div><div class="schedule-head-actions">' +
       '<button type="button" id="pendingBtn" class="ghost" title="查看落后至少一话的番剧" hidden>待看</button>' +
       '<nav class="schedule-views" aria-label="排片范围">' +
-      '<button type="button" id="schedule-view-today" data-goto="today" aria-pressed="' + !weekly + '">今天</button>' +
-      '<button type="button" id="schedule-view-week" data-goto="week" aria-pressed="' + weekly + '">本周</button></nav></div></header>' +
-      '<div class="schedule-layout"><div class="schedule-main">' + (weekly ? viewScheduleWeek(buckets) : viewScheduleToday()) +
+      '<button type="button" id="schedule-view-today" data-goto="today" aria-pressed="' + (TAB === 'today') + '">今天</button>' +
+      '<button type="button" id="schedule-view-week" data-goto="week" aria-pressed="' + weekly + '">本周</button>' +
+      '<button type="button" id="schedule-view-continue" data-goto="continue" aria-pressed="' + (TAB === 'continue') + '">接着看</button></nav></div></header>' +
+      '<div class="schedule-layout"><div class="schedule-main">' + content +
       '</div>' + scheduleSidebar(buckets) + '</div></section>';
   }
 
@@ -1237,9 +1305,10 @@
       '<option value="name"' + (SEASON_FILTER.sortBy === 'name' ? ' selected' : '') + '>按名字</option>' +
       '</select>' +
       '<span class="grow"></span>' +
-      '<button id="markAll">全选</button><button id="markNone">清空</button>' +
+      '<button id="markAll">全选可见</button><button id="markNone">清空勾选</button>' +
       '<button id="batchTime" title="给勾选的番批量设开播时刻">批量时刻</button>' +
-      '<button class="primary" id="applyBtn">加入在追</button>' +
+      '<button class="primary" id="applyBtn" disabled>入库可见所选</button>' +
+      '<button id="applyAllBtn" hidden>含隐藏勾选入库</button><span class="note" id="seasonSelection" role="status"></span>' +
       '</div>';
     return '<div class="sec"><div class="sec-head season-page-heading"><h2>季度番剧</h2>' +
       '<span class="note">原播周档 · 北京时间</span><button type="button" data-anime-search>跨季度找番</button></div>' +
@@ -1311,11 +1380,13 @@
     // 按放送日分组（只有按放送日排序时才分组）
     var rows = '';
     var lastW = null;
+    var retained = new Set(j.catalog_sources?.retained_ids || []);
     list.forEach(function (x) {
       var id = String(x.id);
       var w = watchingById[id];
       var inactive = inactiveById.get(id);
       var tracked = w || (inactive && inactive.entry);
+      var moved = j.relocations?.[id];
       var mark = !!SEASON_MARK[id];
       var wd = broadcastDay(x);
       if (sortBy === 'weekday' && wd !== lastW) {
@@ -1343,16 +1414,19 @@
           '</div>';
       } else if (inactive) {
         opCell = '<span class="tag mut">' + WATCH_STATE_LABEL[inactive.state] + '</span>';
+      } else if (moved) {
+        opCell = '<span class="tag mut">改到 ' + esc(moved) + '</span>';
       } else {
         opCell = '<button class="mini add" data-seadd="' + esc(id) + '" title="直接加进在追">+ 追</button>';
       }
       rows += '<tr>' +
         '<td class="ck"><input type="checkbox" aria-label="选中 ' + esc(x.name_cn || x.name) + '" data-mark="' + esc(id) + '"' +
-        (tracked || mark ? ' checked' : '') + (tracked ? ' disabled' : '') + ' /></td>' +
+        (tracked || mark ? ' checked' : '') + (tracked || moved ? ' disabled' : '') + ' /></td>' +
         '<td class="pc">' + cover(id, x.name_cn || x.name, true, x.image && j.q) + '</td>' +
         '<td class="nm-cell">' +
         '<div class="nm" title="' + esc(x.name_cn || x.name) + '">' + watchTitle(id, tracked ? tracked.name_cn || tracked.name : x.name_cn || x.name, !!tracked) + '</div>' +
         '<div class="meta">' + esc(meta) + '</div>' +
+        (retained.has(id) ? '<div class="meta">内置保留 · ' + (moved ? '新季度 ' + esc(moved) : '联网目录未收录') + '</div>' : '') +
         '<div class="meta season-airing">' + esc(formatAiring(airing) || (j.airings ? '暂无原播周档' : '—')) + '</div>' +
         '<div class="meta season-mobile-meta">' +
         (x.eps ? esc(x.eps) + ' 话' : '话数未定') + (x.rating ? ' · 评分 ' + num(x.rating).toFixed(1) : '') + '</div></td>' +
@@ -1453,18 +1527,29 @@
   function seasonCatalogStatus(season) {
     if (season.updating) return '正在检查更新…';
     var parts = [];
+    var sources = season.catalog_sources, downloaded = sources?.downloaded, builtin = sources?.builtin;
+    var dates = new Intl.DateTimeFormat('sv', { timeZone: 'Asia/Shanghai' });
+    function date(value) {
+      var stamp = value ? new Date(value) : null;
+      return stamp && Number.isFinite(+stamp) ? dates.format(stamp) : '';
+    }
+    if (downloaded) {
+      var lastSuccess = date(downloaded.fetched_at);
+      parts.push(downloaded.source + ' ' + downloaded.count + ' 部' + (lastSuccess ? ' · 上次在线读取 ' + lastSuccess : ''));
+    }
+    if (builtin && (downloaded || builtin.source !== '内置目录')) parts.push('内置来源 ' + builtin.source);
+    if (sources?.retained_ids?.length) parts.push('另保留 ' + sources.retained_ids.length + ' 部内置条目');
     if (season.catalog_status === 'verified') {
-      var verifiedDate = new Date(season.verified_at);
-      if (Number.isFinite(+verifiedDate)) {
-        var day = new Intl.DateTimeFormat('sv', { timeZone: 'Asia/Shanghai' }).format(verifiedDate);
-        parts.push('季末已核验 ' + day);
-      }
+      if (date(downloaded?.verified_at)) parts.push('联网目录季末核验 ' + date(downloaded.verified_at));
+      if (date(builtin?.verified_at)) parts.push('内置目录季末核验 ' + date(builtin.verified_at));
+      if (!sources && date(season.verified_at)) parts.push('季末已核验 ' + date(season.verified_at));
     } else if (season.catalog_status === 'pending') {
       parts.push('季末待核验');
     } else if (season.catalog_status === 'preview') {
       parts.push('预告可能变动');
     }
-    if (season.warning) parts.push(season.warning + (season.items.length ? '，继续使用本地目录' : ''));
+    if (season.warning) parts.push((date(season.last_refresh?.at) ? '最近更新失败 ' + date(season.last_refresh.at) + ' · ' : '') +
+      season.warning + (season.items.length ? '，继续使用本地目录' : ''));
     else if (season.source === 'net') parts.push('已联网更新');
     var undated = season.items.filter(function (item) { return !item.date; }).length;
     if (undated && season.source === 'net') parts.push(undated + ' 部首播日待定');
@@ -1602,6 +1687,14 @@
     Object.keys(PEND).sort(function (a, b) { return PORDER[a] - PORDER[b]; }).forEach(flushBump);
   }
 
+  function prepareToLeave(event) {
+    flushAllBumps();
+    if (writesPending > 1 || (writesPending === 1 && activeWriteUrl !== '/api/progress')) {
+      event.preventDefault();
+      event.returnValue = true;
+    }
+  }
+
   function bump(id, delta) {
     var w = findWatch(id);
     if (!w) return;
@@ -1633,7 +1726,7 @@
     PTIMER[id] = setTimeout(function () { flushBump(id); }, 260);
 
     toast(
-      (delta > 0 ? '记了一话' : '退回一话') + ' · ' + (seen + (next - seen)) + '/' + (total || '?'),
+      (delta > 0 ? '正在记一话' : '正在退回一话') + ' · ' + next + '/' + (total || '?'),
       { label: '撤销', fn: undo }
     );
   }
@@ -1788,34 +1881,20 @@
     return match ? match[1] + 'Q' + Math.ceil(Number(match[2]) / 3) : '';
   }
 
-  function openJoin(count, submit, selection) {
+  function openJoin(submit) {
     if (BUSY) return;
-    var review = selection ? '<p>' + esc(selection.q) + ' · ' + count + ' 部</p><ul class="duplicate-hits">' +
-      selection.items.map(function (item) { return '<li>' + esc(item.name_cn || item.name) + '</li>'; }).join('') + '</ul>' +
-      '<label class="row"><span>观看方式</span><select id="joinWatchMode">' +
-      watchModeOptions(selection.items.every(function (item) { return item.broadcast_end && item.broadcast_end < STATE.date; }) ? 'catchup' : 'airing', true) +
-      '</select></label>' : '';
     openDlg('确认加入番库',
-      '<form id="joinForm">' + review + '<p>最新一集按已有原播资料估算。</p>' +
+      '<form id="joinForm"><p>最新一集按已有原播资料估算。</p>' +
       '<label class="row" id="joinStartRow"><span>观看起点</span><select id="joinMode">' + startOptions() + '</select></label>' +
       '<label class="row" id="joinSeenRow" hidden><span>已看到第几话</span><input type="number" id="joinSeen" min="0" value="0" /></label>' +
       '<p id="joinResult" role="status"></p></form>',
       '<button data-close>取消</button><button class="primary" type="submit" form="joinForm" id="joinGo">加入</button>');
     var form = $('#joinForm'), mode = $('#joinMode'), go = $('#joinGo'), result = $('#joinResult');
-    var watchMode = $('#joinWatchMode');
-    function updateStart() {
-      var planned = watchMode?.value === 'planned';
-      $('#joinStartRow').hidden = planned;
-      $('#joinSeenRow').hidden = planned || mode.value !== 'seen';
-    }
-    mode.addEventListener('change', updateStart);
-    if (watchMode) watchMode.addEventListener('change', updateStart);
+    mode.addEventListener('change', function () { $('#joinSeenRow').hidden = mode.value !== 'seen'; });
     form.addEventListener('submit', function (event) {
       event.preventDefault();
       go.disabled = true;
-      var payload = watchMode ? { mode: watchMode.value } : {};
-      if (payload.mode !== 'planned') Object.assign(payload, { start_mode: mode.value, seen: Number($('#joinSeen').value) });
-      submit(payload).then(function (response) {
+      submit({ start_mode: mode.value, seen: Number($('#joinSeen').value) }).then(function (response) {
         if (!response.ok) { result.textContent = response.error || '没有加入番库'; return; }
         var count = response.added == null ? Number(!!response.changed) : response.added;
         var skipped = (response.skipped || []).length;
@@ -1830,26 +1909,120 @@
   }
 
   function addWatch(id, name) {
-    openJoin(1, function (start) { return post('/api/watch', Object.assign({ id: id, action: 'add', name: name }, start)); });
+    openJoin(function (start) { return post('/api/watch', Object.assign({ id: id, action: 'add', name: name }, start)); });
   }
 
   function addFromSeason(id) {
-    addSeasonSelection([id]);
+    var item = SEASON?.items.find(function (entry) { return String(entry.id) === id; });
+    if (!item) return;
+    openAddWatch({ id: item.id, name: item.name_cn || item.name, original_name: item.name,
+      eps: item.eps, date: item.date, platform: item.platform, season: SEASON_Q,
+      weekday: item.weekday, broadcast_end: item.broadcast_end });
+  }
+
+  function visibleSeasonPicks() {
+    return Array.from($('#seasonBody').querySelectorAll('[data-mark]:checked:not(:disabled)'),
+      function (input) { return input.dataset.mark; });
+  }
+
+  function updateSeasonSelection() {
+    var visible = visibleSeasonPicks().length, hidden = Object.keys(SEASON_MARK).length - visible;
+    $('#seasonSelection').textContent = '可见已选 ' + visible + ' 部' + (hidden > 0 ? '，隐藏已选 ' + hidden + ' 部' : '');
+    $('#applyBtn').disabled = !visible;
+    $('#applyAllBtn').hidden = hidden <= 0;
+  }
+
+  function seasonBatchReason(reason, quarter) {
+    if (reason === 'moved_quarter') return '已改到 ' + quarter + '，请到对应季度加入';
+    var reasons = { future: '尚未首播', ended: '有完播资料', airing: '有在播资料', unknown: '放送状态待确认',
+      not_in_catalog: '已从本季目录移出，请用跨季度找番核对',
+      start_unknown: '无法确定观看起点，换一个起点重试' };
+    if (reason?.startsWith('already_')) {
+      var state = reason.slice(8);
+      return '已在番库' + (WATCH_STATE_LABEL[state] ? ' · ' + WATCH_STATE_LABEL[state] : '');
+    }
+    return reasons[reason] || '';
   }
 
   function addSeasonSelection(ids) {
+    if (!ids.length) return;
+    if (ids.length > 200) return toast('一次最多入库 200 部，请缩小选择范围');
     var q = SEASON_Q;
-    var items = (SEASON?.items || []).filter(function (item) { return ids.includes(String(item.id)); });
-    if (!items.length) return;
-    if (items.length === 1) {
-      var item = items[0];
-      return openAddWatch({ id: item.id, name: item.name_cn || item.name, original_name: item.name,
-        eps: item.eps, date: item.date, platform: item.platform, season: q,
-        weekday: item.weekday, broadcast_end: item.broadcast_end });
+    openDlg('确认加入番库',
+      '<p>' + esc(q) + ' · 已选 ' + ids.length + ' 部</p><form id="seasonBatchForm"><div id="seasonBatchRows"></div>' +
+      '<label class="row" id="seasonBatchStart" hidden><span>开始观看的条目从</span><select id="seasonBatchMode">' +
+      startOptions() + '</select></label>' +
+      '<label class="row" id="seasonBatchSeenRow" hidden><span>已看到第几话</span><input type="number" id="seasonBatchSeen" min="0" value="0"></label>' +
+      '<p id="seasonBatchResult" role="status"></p></form>',
+      '<button data-close>关闭</button><button id="seasonBatchReload" hidden>重新预览</button>' +
+      '<button class="primary" id="seasonBatchApply" type="submit" form="seasonBatchForm" disabled>确认入库</button>');
+    var form = $('#seasonBatchForm'), rows = $('#seasonBatchRows'), result = $('#seasonBatchResult');
+    var apply = $('#seasonBatchApply'), reload = $('#seasonBatchReload'), start = $('#seasonBatchMode');
+    var startRow = $('#seasonBatchStart'), seenRow = $('#seasonBatchSeenRow'), busy = false;
+    function choices() { return Array.from(rows.querySelectorAll('[data-batch-mode]:not(:disabled)')); }
+    function updateChoices() {
+      var active = choices();
+      apply.disabled = busy || active.length === 0;
+      startRow.hidden = !active.some(function (choice) { return choice.value !== 'planned'; });
+      seenRow.hidden = startRow.hidden || start.value !== 'seen';
     }
-    openJoin(items.length, function (start) {
-      return post('/api/season/apply', Object.assign({ q: q, add: ids }, start));
-    }, { q: q, items: items });
+    function showPreview() {
+      reload.hidden = true;
+      result.textContent = '正在读取本机目录…';
+      sendPost('/api/season/apply', { q: q, add: ids, preview: true }).then(function (reply) {
+        if (!form.isConnected) return;
+        if (!reply.ok) throw new Error(reply.error || '无法预览入库');
+        rows.innerHTML = reply.rows.map(function (row) {
+          return '<div class="row"><strong>' + esc(row.name) + '</strong><small data-batch-reason="' + esc(row.id) + '">' +
+            esc(seasonBatchReason(row.reason, row.quarter)) + '</small>' + (row.blocked ? '' :
+              '<select data-batch-mode="' + esc(row.id) + '" aria-label="《' + esc(row.name) + '》观看方式">' +
+              watchModeOptions(row.mode, true) + '</select>') + '</div>';
+        }).join('');
+        result.textContent = '请逐部确认。已有条目保留原状态。';
+        updateChoices();
+      }).catch(function (error) {
+        if (!form.isConnected) return;
+        result.textContent = error.message || '无法读取预览，请重试。';
+        reload.hidden = false;
+      });
+    }
+    reload.onclick = showPreview;
+    form.addEventListener('change', updateChoices);
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (apply.disabled) return;
+      var active = choices();
+      var modes = Object.fromEntries(active.map(function (choice) { return [choice.dataset.batchMode, choice.value]; }));
+      var payload = { q: q, add: Object.keys(modes), modes: modes };
+      if (!startRow.hidden) Object.assign(payload, { start_mode: start.value, seen: Number($('#seasonBatchSeen').value) });
+      busy = apply.disabled = true;
+      result.textContent = '正在写入番库…';
+      post('/api/season/apply', payload).then(function (reply) {
+        if (!reply.ok) throw new Error(reply.error || '番库未写入，请重试。');
+        if (q === SEASON_Q) (reply.added_ids || []).forEach(function (id) { delete SEASON_MARK[id]; });
+        if (form.isConnected) {
+          for (var id of reply.added_ids || []) markResult(id, '已入库', true);
+          for (var skipped of reply.skipped_details || []) markResult(skipped.id,
+            seasonBatchReason(skipped.reason, skipped.quarter), skipped.reason !== 'start_unknown');
+          result.textContent = '已入库 ' + reply.added + ' 部' +
+            (reply.skipped_details?.length ? '，其余条目见各行原因。' : '。');
+        }
+        return refresh();
+      }).catch(function (error) {
+        if (form.isConnected) result.textContent = error.message || '未能确认是否写入，请重试。';
+      }).finally(function () {
+        busy = false;
+        if (form.isConnected) updateChoices();
+      });
+    });
+    function markResult(id, message, disable) {
+      var key = CSS.escape(id);
+      var label = $('[data-batch-reason="' + key + '"]', rows);
+      var choice = $('[data-batch-mode="' + key + '"]', rows);
+      if (label) label.textContent = message;
+      if (choice) choice.disabled = disable;
+    }
+    showPreview();
   }
 
   function bindSeason() {
@@ -1905,6 +2078,7 @@
       el.addEventListener('change', function () {
         var id = el.getAttribute('data-mark');
         if (el.checked) SEASON_MARK[id] = true; else delete SEASON_MARK[id];
+        updateSeasonSelection();
       });
     });
 
@@ -1990,28 +2164,37 @@
           boxes[i].checked = true;
           SEASON_MARK[boxes[i].getAttribute('data-mark')] = true;
         }
+        updateSeasonSelection();
       });
       $('#markNone').addEventListener('click', function () {
         SEASON_MARK = {};
-        var boxes = $('#seasonBody') ? $('#seasonBody').querySelectorAll('[data-mark]') : [];
+        var boxes = $('#seasonBody') ? $('#seasonBody').querySelectorAll('[data-mark]:not(:disabled)') : [];
         for (var i = 0; i < boxes.length; i++) boxes[i].checked = false;
+        updateSeasonSelection();
       });
-      $('#applyBtn').addEventListener('click', function () {
-        var ids = Object.keys(SEASON_MARK);
-        if (!ids.length) return toast('先勾几部');
-        addSeasonSelection(ids);
-      });
-
+      $('#applyBtn').addEventListener('click', function () { addSeasonSelection(visibleSeasonPicks()); });
+      $('#applyAllBtn').addEventListener('click', function () { addSeasonSelection(Object.keys(SEASON_MARK)); });
     }
+    updateSeasonSelection();
   }
 
   // ---------------- 弹层 ----------------
-  var dlgReturnFocus = null;
+  var dlgReturnFocus = null, dlgParents = [];
+  var refreshOpenReminderCenter = null;
+
+  function keepDialogForReturn(trigger = document.activeElement) {
+    var dlg = $('#dlg');
+    if (!$('#mask').classList.contains('show') || !dlg.contains(trigger)) return;
+    dlgParents.push({ nodes: [...dlg.childNodes], trigger: trigger, scroll: dlg.scrollTop,
+      watchDetail: dlg.classList.contains('watch-detail-dialog'), refresh: refreshOpenReminderCenter });
+  }
+
   function openDlg(title, bodyHtml, footHtml, options = {}) {
+    refreshOpenReminderCenter = null;
     if (!$('#mask').classList.contains('show')) {
       var active = document.activeElement;
       dlgReturnFocus = { element: active, id: active?.id, selector: viewDetailSelector(active),
-        scroll: TAB === 'library' ? window.scrollY : null, tab: TAB };
+        scroll: window.scrollY, tab: TAB, search: q() };
     }
     var dlg = $('#dlg');
     dlg.classList.toggle('watch-detail-dialog', Boolean(options.watchDetail));
@@ -2034,16 +2217,27 @@
   function closeDlg() {
     var mask = $('#mask');
     if (!mask.classList.contains('show')) return;
+    var dlg = $('#dlg'), parent = dlgParents.pop();
+    refreshOpenReminderCenter = parent?.refresh || null;
+    if (parent) {
+      dlg.classList.toggle('watch-detail-dialog', parent.watchDetail);
+      dlg.replaceChildren(...parent.nodes);
+      dlg.scrollTop = parent.scroll;
+      parent.trigger.focus({ preventScroll: true });
+      refreshOpenReminderCenter?.();
+      return;
+    }
+    dlg.replaceChildren();
     mask.classList.remove('show');
     mask.setAttribute('aria-hidden', 'true');
     mask.hidden = true;
     ['panelHeader', 'panelMain', 'panelFooter', 'toast'].forEach(function (id) { document.getElementById(id).inert = false; });
     var back = dlgReturnFocus;
     dlgReturnFocus = null;
-    if (back && back.tab === TAB) {
+    if (back && back.tab === TAB && back.search === q()) {
       var control = back.element?.isConnected ? back.element :
         (back.id && document.getElementById(back.id)) || (back.selector && $(back.selector)) ||
-        (TAB === 'library' && $('#libraryFilter'));
+        (back.search ? $('#q') : TAB === 'library' && $('#libraryFilter'));
       if (back.scroll != null && window.scrollY !== back.scroll) window.scrollTo(0, back.scroll);
       control?.focus({ preventScroll: true });
     }
@@ -2053,7 +2247,10 @@
     var tracked = subject && Object.keys(LIBRARY_STATES).some(function (state) {
       return (STATE[state] || []).some(function (row) { return String(row.id) === String(subject.id); });
     });
-    if (tracked) return openWatchDetail(subject.id);
+    if (tracked) {
+      keepDialogForReturn();
+      return openWatchDetail(subject.id);
+    }
     var ended = subject?.broadcast_end && subject.broadcast_end < STATE.date;
     showWatchForm({ ep_status: 0, watch_mode: TAB === 'catchup' || ended ? 'catchup' : 'airing',
       air_weekday: ended ? null : subject?.weekday, name: subject?.name, eps: subject?.eps, subject: subject });
@@ -2064,8 +2261,10 @@
     openDlg('番剧详情', '<p id="watchLoading" role="status">正在读取番剧资料…</p>');
     var marker = $('#watchLoading');
     flushAllBumps();
-    POST_CHAIN.then(function () { return json('/api/watch/detail?id=' + enc(id)); }).then(function (j) {
-      if (!marker.isConnected) return;
+    POST_CHAIN.then(function () {
+      return marker.isConnected ? json('/api/watch/detail?id=' + enc(id)) : null;
+    }).then(function (j) {
+      if (!j || !marker.isConnected) return;
       if (episodes) openEpisodeList(j.detail);
       else showWatchForm(j.detail, { ...j.reminder, preview: j.reminder_preview }, j.original);
     }).catch(function (e) {
@@ -2166,6 +2365,19 @@
     var buttons = Array.from($('#dlg').querySelectorAll('[data-reminder-tab]'));
     var feedbackActions = $('#reminderFeedbackActions');
     var receipts = new Map(), generation = 0;
+    var lastModel = '', loading = false, refreshRequested = false;
+
+    function refreshCenter() {
+      if (!pane.isConnected) return;
+      if (loading || pane.querySelector('[aria-busy="true"]')) {
+        refreshRequested = true;
+        return;
+      }
+      refreshRequested = false;
+      return show(active, true, true);
+    }
+
+    refreshOpenReminderCenter = refreshCenter;
 
     function feedback(message, label, handler) {
       status.textContent = message;
@@ -2181,6 +2393,7 @@
     function request(url, data) {
       return sendPost(url, data).then(function (reply) {
         if (!reply.ok) throw Object.assign(new Error(reply.error || '未能保存，请刷新后重试'), { status: reply.httpStatus });
+        tabs?.postMessage('change');
         return reply;
       });
     }
@@ -2219,6 +2432,7 @@
       }).finally(function () {
         if (row) row.removeAttribute('aria-busy');
         if (!button.dataset.reminderConflict) button.disabled = false;
+        if (refreshRequested) refreshCenter();
       });
     }
 
@@ -2228,12 +2442,15 @@
         ? '<button type="button" data-snooze-event="' + index + '">稍后 15 分钟</button>' : '';
     }
 
-    function openEvent(event, link) {
-      if (!link && event.can_open) openWatchDetail(event.watch_id);
+    function openEvent(event, link, trigger) {
+      if (!link && event.can_open) {
+        keepDialogForReturn(trigger);
+        openWatchDetail(event.watch_id);
+      }
       return request('/api/reminder/acknowledge', { key: event.key, action: link ? 'watch_clicked' : 'details_opened' });
     }
 
-    function renderEvents(model, history) {
+    function renderEvents(model, history, background) {
       var events = history ? model.events : model.pending;
       events = events || [];
       var pending = new Set((model.pending || []).map(function (event) { return event.key; }));
@@ -2279,7 +2496,8 @@
             durations + '<button type="button" data-reminder-event="' + index +
             '" data-reminder-action="mark_clicked">记一话</button></div></details>';
         }
-        return '<li data-reminder-row="' + index + '"' + (event.key === selectedEvent ? ' class="reminder-highlight"' : '') +
+        return '<li data-reminder-row="' + index + '" data-reminder-key="' + esc(event.key) + '"' +
+          (event.key === selectedEvent ? ' class="reminder-highlight"' : '') +
           '><span class="tag mut">' + esc(reminderTypes[event.kind] || '提醒') + '</span>' + title +
           '<small>' + esc(detail.filter(Boolean).join(' · ')) + '</small>' +
           (actions ? '<div class="reminder-actions">' + actions + '</div>' : '') + more + '</li>';
@@ -2300,7 +2518,7 @@
         var event = events[Number(button.dataset.reminderEvent)], action = button.dataset.reminderAction;
         button.onclick = function () {
           runButton(button, function () {
-            if (action === 'details_opened') return openEvent(event, false);
+            if (action === 'details_opened') return openEvent(event, false, button);
             if (action === 'mark_clicked') return post('/api/progress', {
               id: event.watch_id, delta: 1, client: 'panel', expected_watch_revision: event.watch_revision, reminder_event: event.key
             }).then(function (reply) {
@@ -2335,7 +2553,7 @@
         };
       });
       var selected = $('.reminder-highlight', pane);
-      if (selected) selected.scrollIntoView({ block: 'nearest' });
+      if (selected && !background) selected.scrollIntoView({ block: 'nearest' });
     }
 
     function statusLabel(key) {
@@ -2345,7 +2563,7 @@
     function renderSnoozes(items) {
       mode.textContent = '北京时间';
       pane.innerHTML = items.length ? '<ul id="snoozeRows" class="reminder-history">' + items.map(function (item, i) {
-        return '<li><span class="tag mut">' + esc(reminderTypes[item.kind] || '提醒') + '</span>' +
+        return '<li data-reminder-key="' + esc(item.key) + '"><span class="tag mut">' + esc(reminderTypes[item.kind] || '提醒') + '</span>' +
           '<strong>' + esc(item.name) + '</strong><small>提醒 ' + esc(reminderClock(item.due_at)) + '</small>' +
           '<div class="reminder-actions"><label>重新设置 <select data-snooze-minutes="' + i +
           '"><option>5</option><option selected>15</option><option>30</option><option>60</option></select> 分钟后</label>' +
@@ -2372,27 +2590,72 @@
       });
     }
 
-    function show(tab, keepFeedback) {
+    function show(tab, keepFeedback, background) {
       active = tab;
       var sequence = ++generation;
+      loading = true;
       buttons.forEach(function (button) { button.setAttribute('aria-pressed', String(button.dataset.reminderTab === active)); });
       if (!keepFeedback) feedback('');
-      mode.textContent = '';
-      pane.innerHTML = '<p role="status">正在读取本机提醒…</p>';
+      if (!background) {
+        lastModel = '';
+        mode.textContent = '';
+        pane.innerHTML = '<p role="status">正在读取本机提醒…</p>';
+      }
       var action = tab === 'snoozes' ? '/api/reminder/snoozes' : '/api/reminder/history';
       if (tab === 'history' && watch) action += '?watch=' + enc(watch);
       return json(action).then(function (reply) {
         if (!pane.isConnected || sequence !== generation) return;
+        var model = JSON.stringify(tab === 'snoozes' ? reply.pending || [] : reply);
+        if (model === lastModel) return;
+        if (background && pane.querySelector('[aria-busy="true"]')) { refreshRequested = true; return; }
+        var scroll = $('#dlg').scrollTop;
+        var focused = pane.contains(document.activeElement) ? document.activeElement : null;
+        var rowKey = focused?.closest('[data-reminder-key]')?.dataset.reminderKey;
+        function controlKey(element) {
+          return [element.tagName, element.id, element.dataset.reminderAction, element.dataset.snoozeAction,
+            element.dataset.minutes, element.hasAttribute('data-snooze-event')].join(':');
+        }
+        var drafts = new Map([...pane.querySelectorAll('[data-reminder-key]')].map(function (row) {
+          return [row.dataset.reminderKey, { expanded: $('details', row)?.open, minutes: $('select', row)?.value }];
+        }));
         if (tab === 'snoozes') renderSnoozes(reply.pending || []);
-        else renderEvents(reply, tab === 'history');
+        else renderEvents(reply, tab === 'history', background);
+        pane.querySelectorAll('[data-reminder-key]').forEach(function (row) {
+          var draft = drafts.get(row.dataset.reminderKey), more = $('details', row), minutes = $('select', row);
+          if (more && draft?.expanded != null) more.open = draft.expanded;
+          if (minutes && draft?.minutes) minutes.value = draft.minutes;
+        });
+        if (background) {
+          if (focused) {
+            var row = rowKey ? $('[data-reminder-key="' + CSS.escape(rowKey) + '"]', pane) : pane;
+            var next = row && [...row.querySelectorAll('button, a, summary, select')].find(function (element) {
+              return controlKey(element) === controlKey(focused);
+            });
+            (next || buttons.find(function (button) { return button.dataset.reminderTab === tab; })).focus({ preventScroll: true });
+          }
+          $('#dlg').scrollTop = scroll;
+        }
+        lastModel = model;
       }).catch(function (error) {
-        if (pane.isConnected && sequence === generation) pane.textContent = error.message || '无法读取本机提醒，请刷新';
+        if (pane.isConnected && sequence === generation) {
+          var message = error.message || '无法读取本机提醒，请刷新';
+          if (background && lastModel) mode.textContent = message;
+          else pane.textContent = message;
+          lastModel = '';
+        }
+      }).finally(function () {
+        if (sequence !== generation) return;
+        loading = false;
+        if (refreshRequested) refreshCenter();
       });
     }
 
     buttons.forEach(function (button) { button.onclick = function () { show(button.dataset.reminderTab); }; });
     $('#refreshReminderHistory').onclick = function () { show(active); };
-    $('#reminderCenterSettings').onclick = openReminderSettings;
+    $('#reminderCenterSettings').onclick = function () {
+      keepDialogForReturn(this);
+      openReminderSettings();
+    };
     show(active);
   }
 
@@ -2750,10 +3013,7 @@
     var state = detail.state === 'watching' ? (detail.finished ? 'finished' : detail.watch_mode === 'catchup' ? 'catchup' : 'watching') : detail.state;
     var progress = scheduleProgress(detail);
     var count = detail.watched_count ?? detail.ep_status;
-    var playback = watchLink(detail.watch_url, detail.name, info.primary_name || '去观看');
-    if (!playback) playback = (info.links || []).map(function (link) {
-      return watchLink(link.url, detail.name, link.name || '去观看');
-    }).find(Boolean);
+    var playback = watchLink(detail.watch_url, detail.name, info.primary_name) || playbackLink(detail, detail.name);
     var fact = watchReminderFact(reminder);
     return '<div class="watch-identity"><span id="watchCover">' + cover(detail.id, detail.name) +
       '</span><div><h4>' + esc(detail.name) + '</h4><span class="watch-subject-state">' + esc(WATCH_STATE_LABEL[state] || '番库条目') + '</span></div></div>' +
@@ -3139,7 +3399,8 @@
     });
     if (detail.id) $('#watchReminderHistory').addEventListener('click', function () {
       if ((!archived && edited()) || saving) return showError('请先保存当前详情，再查看提醒记录');
-      openReminderCenter("history", detail.id);
+      keepDialogForReturn(this);
+      openReminderCenter('history', detail.id);
     });
     var order = $('#watchOrder', form);
     if (order) order.addEventListener('click', function () {
@@ -3153,6 +3414,7 @@
     });
     if (detail.id) $('#watchEntryHistory').onclick = function () {
       if ((!archived && edited()) || saving) return showError('请先保存当前详情，再查看观看历史');
+      keepDialogForReturn(this);
       openWatchHistory(new URLSearchParams({ id: String(detail.id) }));
     };
     if ($('#watchDrop', form)) $('#watchDrop', form).onclick = function () {
@@ -3592,6 +3854,9 @@
         params.delete('record');
         var modeNames = { airing: '追连载', catchup: '补番', rewatch: '重看' };
         var sources = { backfill: '按观看日期补记', absolute: '旧版手动调整', progress: '进度记账', desktop: '桌宠记账', panel: '网页记账' };
+        var known = new Set(Object.keys(LIBRARY_STATES).flatMap(function (key) {
+          return (STATE?.[key] || []).map(function (item) { return String(item.id); });
+        }));
         output.innerHTML = '<p>共 ' + reply.total + ' 条 · 北京时间</p>' + (reply.total ? '<ul class="watch-history">' +
           reply.rows.map(function (r) {
             return '<li><details data-history-record="' + esc(r.history_id) + '"' + (record && r.history_id === record ? ' open' : '') +
@@ -3601,6 +3866,7 @@
               ' · 记账时进度 ' + esc(r.from ?? '—') + ' → ' + esc(r.to ?? '—') + '</p>' +
               (r.episodes_added?.length ? '<p>记入第 ' + esc(r.episodes_added.join('、')) + ' 集</p>' : '') +
               (r.episodes_removed?.length ? '<p>退回第 ' + esc(r.episodes_removed.join('、')) + ' 集</p>' : '') +
+              (known.has(String(r.id)) ? '<button type="button" data-detail="' + esc(r.id) + '">查看番剧</button> ' : '') +
               (r.delta > 0 && r.source !== 'absolute' && (r.watch_mode !== 'rewatch' || r.rewatch_id) && /^[a-f\d]{32}$/.test(r.history_id || '') ?
                 '<button type="button" data-retract-history="' + esc(r.history_id) + '">撤销这笔记录</button>' : '') + '</details></li>';
           }).join('') + '</ul>' : '<p>没有匹配的观看记录。</p>') +
@@ -3708,7 +3974,10 @@
             return '<li>' + esc(entry.title) + ' · ' + entry.count + ' 集</li>';
           }).join('') + '</ul>' : '<p>这一周没有需要合计的记录。</p>');
         history.disabled = false;
-        history.onclick = function () { openWatchHistory(new URLSearchParams({ from: r.from, to: r.to })); };
+        history.onclick = function () {
+          keepDialogForReturn(this);
+          openWatchHistory(new URLSearchParams({ from: r.from, to: r.to }));
+        };
       }).catch(function (error) { if (box.isConnected && request === seq) box.textContent = error.message || '未能读到本地周报。'; });
     }
     form.onsubmit = function (event) { event.preventDefault(); load(); };
@@ -3834,7 +4103,11 @@
         }).catch(function (error) { status.textContent = error.message; })
           .finally(function () { button.disabled = false; });
       };
-      $('#reminderSnoozes').onclick = function () { if (canNavigate()) openReminderCenter(); };
+      $('#reminderSnoozes').onclick = function () {
+        if (!canNavigate()) return;
+        keepDialogForReturn(this);
+        openReminderCenter();
+      };
       $('#reminderTest').onclick = function () { sendTestReminder(this, $('#reminderTestStatus')); };
       form.onsubmit = function (event) {
         event.preventDefault();
@@ -3957,7 +4230,7 @@
       BUSY = true;
       flushAllBumps();
       POST_CHAIN.then(function () {
-        if (request !== id) return null;
+        if (request !== id || !marker.isConnected) return null;
         return sendPost('/api/sync', { dry_run: true, mode: mode, request_id: id, use_cache: useCache });
       }).then(function (result) {
         if (request !== id || !result || !marker.isConnected || !$('#mask').classList.contains('show')) return;
@@ -4008,16 +4281,16 @@
       var hasCache = !useCache && Object.values(result.sources || {}).some(function (source) { return source.cache_available; });
       openDlg(result.partial ? '同步预览 · 部分来源未在线读到' : '同步预览',
         syncSources(result) + '<p class="note">' + (mode === 'progress' ? '只会写入勾选的观看进度。' : '本机观看进度会保留。') +
-        '写入前会留下本机番库恢复点 <code>data/library.json.bak</code>。</p>' +
+        '只提交下方勾选的项目。观看历史、本机设置和网页偏好继续保留。写入前会保存番库恢复点。</p>' +
         '<p id="syncSelection" role="status"></p><div id="syncRows"></div>' +
         '<p><button id="syncPrev">上一页</button> <span id="syncPage"></span> <button id="syncNext">下一页</button></p>',
         '<button data-close>关闭</button><button id="syncRetry">重新读取</button>' +
         (hasCache ? '<button id="syncUseCache">预览完整缓存</button>' : '') +
         '<button class="primary" id="syncGo">写入选中项</button>');
-      var go = $('#syncGo'), view = $('#syncRows');
+      var go = $('#syncGo'), view = $('#syncRows'), saving = false;
       function count() {
         $('#syncSelection').textContent = '选中 ' + selected.size + ' / ' + changes.length + ' 项 · 核对 ' + rows.length + ' 部';
-        go.disabled = !selected.size;
+        go.disabled = saving || !selected.size;
       }
       function value(v) { return esc(v == null ? '空' : v); }
       function draw() {
@@ -4069,32 +4342,64 @@
       }
       $('#syncPrev').onclick = function () { page--; draw(); };
       $('#syncNext').onclick = function () { page++; draw(); };
-      $('#syncRetry').onclick = options;
-      if (hasCache) $('#syncUseCache').onclick = function () { useCache = true; start(); };
+      $('#syncRetry').onclick = function () { if (!saving) start(); };
+      if (hasCache) $('#syncUseCache').onclick = function () {
+        if (!saving) { useCache = true; start(); }
+      };
       go.onclick = function () {
-        go.disabled = true;
-        BUSY = true;
+        if (saving || !selected.size) return;
+        saving = go.disabled = BUSY = true;
         post('/api/sync', { preview_id: result.preview_id, selected: Array.from(selected) }).then(function (applied) {
           if (!applied.ok) {
+            if (!view.isConnected) return toast(applied.error || 'Bangumi 同步未写入，请重新预览');
             openDlg('未写入同步结果', '<p>' + esc(applied.error || '请重新预览') + '</p>',
-              '<button data-close>关闭</button><button class="primary" id="syncRetry">重新预览</button>');
-            $('#syncRetry').onclick = options;
+              '<button data-close>关闭</button><button class="primary" id="syncRetry">保留选择并重新预览</button>');
+            $('#syncRetry').onclick = start;
             return;
           }
           if (view.isConnected) closeDlg();
           toast('已写入 ' + applied.changes.length + ' 项变更');
           return refresh().then(function () { if (TAB === 'season') return loadSeason(false); });
         }).catch(function () {
-          if (view.isConnected) $('#syncSelection').textContent = '本机后台未响应。请刷新番库核对后重试。';
-        }).finally(function () { BUSY = false; });
+          if (view.isConnected) $('#syncSelection').textContent = '未收到写入结果，已保留勾选。可重新读取预览并核对后重试。';
+        }).finally(function () {
+          BUSY = saving = false;
+          if (view.isConnected) go.disabled = !selected.size;
+        });
       };
       draw();
     }
     options();
   }
 
+  function openSeasonSourceSettings() {
+    openDlg('季度资料来源',
+      '<form id="seasonSourceSettings"><p>默认使用 Bangumi 官方 API。开启后，季度更新失败时可尝试 AniBT 备用源。</p>' +
+      '<label><input type="checkbox" id="seasonBackupSource"> 启用 AniBT 备用源</label>' +
+      '<p>仅查询公开季度列表和封面。账号验证、收藏同步和进度回写继续使用官方 API。</p>' +
+      '<p id="seasonSourceStatus" role="status"></p></form>',
+      '<button data-close>关闭</button><button type="submit" class="primary" form="seasonSourceSettings" id="saveSeasonSource">保存</button>');
+    var form = $('#seasonSourceSettings'), choice = $('#seasonBackupSource'), submit = $('#saveSeasonSource'), status = $('#seasonSourceStatus');
+    choice.checked = STATE?.settings?.season_backup === 'anibt';
+    form.onsubmit = function (event) {
+      event.preventDefault();
+      if (submit.disabled) return;
+      choice.disabled = submit.disabled = true;
+      post('/api/settings', { season_backup: choice.checked ? 'anibt' : '' }).then(function (reply) {
+        if (!reply.ok) throw new Error(reply.error || '未能保存设置');
+        if (form.isConnected) status.textContent = '设置已保存，下次季度更新时生效。';
+        return refresh();
+      }).catch(function (error) {
+        if (form.isConnected) status.textContent = error.message || '未能保存设置';
+      }).finally(function () { choice.disabled = submit.disabled = false; });
+    };
+  }
+
   function openBgmAccount() {
+    openDlg('Bangumi 账号', '<p id="bgmAccountLoading" role="status">正在读取账号设置…</p>');
+    var loading = $('#bgmAccountLoading');
     json('/api/token').then(function (config) {
+      if (!loading.isConnected) return;
       openDlg('Bangumi 账号',
         '<form id="bgmAccount"><label class="row"><span>用户名</span><input id="tkUser" value="' + esc(config.user) + '" placeholder="留空可从令牌识别" /></label>' +
         '<label class="row"><span>访问令牌</span><input type="password" autocomplete="new-password" id="tkTok" placeholder="' +
@@ -4130,7 +4435,7 @@
       $('#tkTest').addEventListener('click', function () { submit(true); });
       $('#tkSave').addEventListener('click', function () { submit(false); });
       form.addEventListener('submit', function (event) { event.preventDefault(); submit(true); });
-    }).catch(function () { toast('读取账号设置失败'); });
+    }).catch(function () { if (loading.isConnected) loading.textContent = '读取账号设置失败'; });
   }
 
   function openNickname() {
@@ -4229,7 +4534,7 @@
         '<label id="restoreAppearanceLabel"><input type="checkbox" id="restoreAppearance"> 桌宠外观与聊天偏好</label> ' +
         '<label id="restoreFavoritesLabel"><input type="checkbox" id="restoreFavorites"> 收藏台词</label> ' +
         '<label id="restoreBrowserLabel"><input type="checkbox" id="restoreBrowser"> 当前浏览器的网页偏好</label></fieldset>' +
-        '<p>番库和提醒设置位于安装目录。主题、封面大小、首页、排片显示和番库视图保存在当前浏览器。</p>' +
+        '<p>网页导入会替换番库、观看历史和本机设置，可选恢复备份中的网页偏好。要保留已延后的提醒，请在关闭桌宠和本地服务后复制完整的 data 文件夹。</p>' +
         '<p class="note">选择文件后先预览，再确认恢复。确认时会备份当前数据。自定义立绘需要复制套装文件夹。</p>' +
         '<div id="migrationStatus" role="status"></div>',
         '<button data-close>关闭</button><button type="button" class="primary" id="migrationApply" disabled>确认替换</button>');
@@ -4249,6 +4554,14 @@
       var restoreDesktop = $('#restoreDesktop'), notes = $('#restoreNotes'), appearance = $('#restoreAppearance');
       var favorites = $('#restoreFavorites'), browser = $('#restoreBrowser'), currentBrowser = {};
       var sourceData = null, sourceLabel = '';
+      function retryPreview(error) {
+        message.textContent = (error.message || '无法预览备份') + '。';
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = '保留选择并重新预览';
+        retry.onclick = function () { previewData(sourceData); };
+        message.appendChild(retry);
+      }
       function counts(info) {
         var base = '在追 ' + info.watching + ' 部、待看 ' + (info.planned || 0) + ' 部、暂停 ' + info.paused +
           ' 部、归档 ' + info.archived + ' 部、' + (info.removed ? '已移除 ' + info.removed + ' 部、' : '') + '观看记录 ' + info.history + ' 条';
@@ -4293,10 +4606,11 @@
           var desktop = {};
           if (Array.isArray(state.desktop_notes)) desktop.notes = state.desktop_notes;
           if (Array.isArray(state.favorite_lines)) desktop.favorites = state.favorite_lines;
-          if (entries['state.json'] || values[1].pet_scale != null) desktop.appearance = {
-            shell: state.desktop_shell, theme: state.bubble_theme, size: state.bubble_size,
-            scale: Number(values[1].pet_scale ?? state.pet_scale ?? 1),
-            bubble_time: state.bubble_time, reduce_motion: state.reduce_motion,
+          var committed = values[1].desktop_appearance;
+          if (entries['state.json'] || values[1].pet_scale != null || committed) desktop.appearance = {
+            shell: committed?.shell ?? state.desktop_shell, theme: committed?.theme ?? state.bubble_theme,
+            size: committed?.size ?? state.bubble_size, scale: Number(values[1].pet_scale ?? state.pet_scale ?? 1),
+            bubble_time: committed?.bubble_time ?? state.bubble_time, reduce_motion: committed?.reduce_motion ?? state.reduce_motion,
             idle_chatter: state.idle_chatter, hourly_chatter: state.hourly_chatter
           };
           Object.assign(desktop, unclaimed.desktop);
@@ -4356,7 +4670,7 @@
             '<p>' + (reply.created_at ? '备份日期 ' +
             esc(new Date(reply.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })) + '（北京时间）' : '备份未记录导出日期') + '</p>' +
             '<p>导入前 ' + esc(counts(reply.current)) + '。导入后 ' + esc(counts(reply.incoming)) + '。</p>' +
-            '<p>番库、观看历史和本机设置将采用所选备份。当前数据会先保存到 <code>data/backups/</code>。</p>' +
+            '<p>番库、观看历史和本机设置将采用所选备份。当前数据会先保存到 <code>data/backups/</code>。确认替换后，当前已延后的提醒会失效。</p>' +
             diff +
             '<ul><li>桌面便条 ' + (b ? noteCount(b.current) + ' → ' + noteCount(b.incoming) + '，替换当前便条' : '保留当前便条') + '</li>' +
             '<li>桌宠外观 ' + (a ? look(a.current) + ' → ' + look(a.incoming) : '保留当前外观') + '</li>' +
@@ -4365,7 +4679,7 @@
             (a && a.missing_shell ? '<p class="watch-error">当前目录缺少立绘「' + esc(a.incoming.shell) + '」。确认恢复时使用默认套装，其他外观照常恢复。复制套装后可重新预览。</p>' : '');
           apply.disabled = false;
         }).catch(function (error) {
-          if (ticket === request && message.isConnected) message.textContent = error.message || '文件读取失败';
+          if (ticket === request && message.isConnected) retryPreview(error);
         });
       }
       function review(read) {
@@ -4427,6 +4741,38 @@
         }).catch(function (error) { if (message.isConnected) toast(error.message || '导出失败，请检查番库和观看历史'); })
           .finally(function () { download.disabled = false; });
       };
+      function applyBrowserPreferences(prefs) {
+        saveBrowserPreferences(prefs);
+        if (prefs['kx.theme']) { themeNow = prefs['kx.theme']; applyTheme(themeNow); }
+        if (prefs['kx.cover']) setCover(prefs['kx.cover']);
+        if (Object.hasOwn(prefs, 'tiara.home')) homeView = prefs['tiara.home'];
+        if (prefs['tiara.compactWeek']) compactWeek = prefs['tiara.compactWeek'] === '1';
+        if (prefs['kx.weekAll']) WEEK_ALL = prefs['kx.weekAll'] === '1';
+        if (prefs['tiara.libraryView']) applyLibraryView(prefs['tiara.libraryView']);
+        if (prefs['kx.tab']) switchTab(prefs['kx.tab']);
+      }
+      function reportBrowserRestore(prefs) {
+        if (!Object.keys(prefs).length) return;
+        var status = document.createElement('span');
+        message.appendChild(status);
+        function restore() {
+          try {
+            applyBrowserPreferences(prefs);
+            status.textContent = '已应用当前浏览器的网页偏好。';
+          } catch (error) {
+            status.textContent = '浏览器偏好暂未写入。';
+            var retry = document.createElement('button');
+            retry.type = 'button';
+            retry.textContent = '重试恢复网页偏好';
+            retry.onclick = function () {
+              restore();
+              refresh();
+            };
+            status.appendChild(retry);
+          }
+        }
+        restore();
+      }
       apply.onclick = function () {
         if (!preview || !current) return;
         apply.disabled = file.disabled = folder.disabled = notes.disabled = appearance.disabled = favorites.disabled = browser.disabled = true;
@@ -4434,35 +4780,17 @@
         post('/api/migration', { migration: current, source: preview.source, target: preview.target }).then(function (reply) {
           if (!reply.ok) throw new Error(reply.error || '导入失败');
           file.value = folder.value = ''; sourceData = null; restoreDesktop.hidden = true;
-          var browserStatus = '';
-          if (Object.keys(currentBrowser).length) {
-            try {
-              saveBrowserPreferences(currentBrowser);
-              if (currentBrowser['kx.theme']) { themeNow = currentBrowser['kx.theme']; applyTheme(themeNow); }
-              if (currentBrowser['kx.cover']) setCover(currentBrowser['kx.cover']);
-              if (Object.hasOwn(currentBrowser, 'tiara.home')) homeView = currentBrowser['tiara.home'];
-              if (currentBrowser['tiara.compactWeek']) compactWeek = currentBrowser['tiara.compactWeek'] === '1';
-              if (currentBrowser['kx.weekAll']) WEEK_ALL = currentBrowser['kx.weekAll'] === '1';
-              if (currentBrowser['tiara.libraryView']) applyLibraryView(currentBrowser['tiara.libraryView']);
-              if (currentBrowser['kx.tab']) switchTab(currentBrowser['kx.tab']);
-              browserStatus = '。已应用当前浏览器的网页偏好';
-            } catch (error) { browserStatus = '。本机数据已恢复，浏览器偏好无法写入'; }
-          }
           if (message.isConnected) {
-            message.textContent = '导入成功。导入前的备份在 data/backups/' + reply.backup + browserStatus + '。';
+            message.textContent = '导入成功。导入前的备份在 data/backups/' + reply.backup + '。';
             if (reply.readback) message.textContent += '已重读番库和设置，' + counts(reply.readback) + '。';
             else message.textContent += '本机已写入数据，请重新打开面板核对。';
             if (reply.desktop_pending) message.textContent += '。此目录的桌宠运行时会应用选中的桌宠资料。';
             if (reply.rebuild_error) message.textContent += '。桌宠数据重算失败，请查看诊断。';
           }
+          reportBrowserRestore(currentBrowser);
           refresh();
         }).catch(function (error) {
-          if (!message.isConnected) return;
-          message.textContent = error.message + '。';
-          var retry = document.createElement('button');
-          retry.textContent = '保留选择并重新预览';
-          retry.onclick = function () { if (sourceData) previewData(sourceData); };
-          message.appendChild(retry);
+          if (message.isConnected) retryPreview(error);
         })
           .finally(function () {
             file.disabled = folder.disabled = notes.disabled = appearance.disabled = favorites.disabled = browser.disabled = false;
@@ -4504,6 +4832,14 @@
           '<button data-close>取消</button><button class="primary" id="restoreGo" disabled>确认恢复</button>');
         var version = $('#restoreVersion'), entry = $('#restoreEntry'), diff = $('#restoreDiff'), go = $('#restoreGo');
         var request = 0, preview;
+        function retryPreview(error) {
+          diff.textContent = (error || '读不到备份') + '。';
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.textContent = '保留选择并重新预览';
+          retry.onclick = load;
+          diff.appendChild(retry);
+        }
         function describe(item) {
           if (!item) return '库中无此番';
           return WATCH_STATE_LABEL[item.state] + ' · ' + item.ep_status + '/' + (item.eps || '?') + ' · ' +
@@ -4515,6 +4851,7 @@
           var source = version.selectedOptions[0].textContent;
           var summary = '<p>来源 <strong>' + esc(source) + '</strong> · ' + (id ? '仅恢复选中的番剧' : '恢复整份番库') + '</p>' +
             '<p>目标 v' + esc(preview.target_version) + ' · <code>' + esc(preview.target_root) + '</code></p>' +
+            '<p>仅恢复番库。观看历史、本机设置和当前浏览器偏好会保留。排期或追番状态发生变化时，相关的稍后提醒可能失效。</p>' +
             (preview.recovery ? '<p>恢复前保存当前文件到 <code>' + esc(preview.recovery) + '</code>。</p>' : '');
           diff.innerHTML = summary + (changes.length ? '<ul class="sync-changes">' + changes.map(function (change) {
             return '<li><strong>' + esc((change.to || change.from).name) + '</strong><br />' +
@@ -4531,27 +4868,34 @@
           diff.textContent = '正在读取备份…';
           sendPost('/api/restore', { name: version.value, dry_run: true }).then(function (data) {
             if (seq !== request || !version.isConnected) return;
-            if (!data.ok) { diff.textContent = data.error || '读不到备份'; return; }
+            if (!data.ok) return retryPreview(data.error);
             preview = data;
             entry.innerHTML = '<option value="">整份番库</option>' + (data.current_readable ? data.entries.map(function (row) {
               return '<option value="' + esc(row.id) + '">' + esc(row.name) + '</option>';
             }).join('') : '');
             if (Array.from(entry.options).some(function (option) { return option.value === selectedEntry; })) entry.value = selectedEntry;
             show();
-          }).catch(function () { if (seq === request) diff.textContent = '读不到备份'; });
+          }).catch(function () { if (seq === request && version.isConnected) retryPreview(); });
         }
         version.addEventListener('change', load);
         entry.addEventListener('change', function () { if (preview) show(); });
         go.addEventListener('click', function () {
           if (!preview) return;
-          go.disabled = true;
+          go.disabled = version.disabled = entry.disabled = true;
           post('/api/restore', { name: version.value, id: entry.value || undefined,
             expected_revision: preview.revision, backup_revision: preview.backup_revision }).then(function (applied) {
-            if (!applied.ok) { load(); toast(applied.error || '恢复失败'); return; }
+            if (!applied.ok) {
+              preview = null;
+              if (version.isConnected) retryPreview(applied.error || '恢复失败');
+              return;
+            }
             if (version.isConnected) closeDlg();
             toast((applied.id ? '番剧已恢复' : '番库已恢复') + (applied.recovery ? ' · 已保存恢复点' : ''));
             return refresh();
-          }).catch(function () { go.disabled = false; toast('没有收到恢复结果'); });
+          }).catch(function () {
+            preview = null;
+            if (version.isConnected) retryPreview('没有收到恢复结果');
+          }).finally(function () { version.disabled = entry.disabled = false; });
         });
         load();
       }).catch(function () { if (loading.isConnected) loading.textContent = '读不到备份列表'; });
@@ -4632,7 +4976,8 @@
 
     function openSettingsNav() {
       var groups = [
-        ['同步、备份与迁移', [['sync', '同步 Bangumi', doSync], ['restore', '备份与恢复', openRestore], ['migration', '升级与换机', openMigration]]],
+        ['同步、备份与迁移', [['sync', '同步 Bangumi', doSync], ['seasonSource', '季度资料来源', openSeasonSourceSettings],
+          ['restore', '备份与恢复', openRestore], ['migration', '升级与换机', openMigration]]],
         ['Bangumi', [['account', 'Bangumi 账号', openBgmAccount]]],
         ['日历与导出', [
           ['calendar', '导出日历', openCalendarExport], ['week', '导出周表', function () { location.href = '/api/export?fmt=md'; }],
@@ -4817,7 +5162,10 @@
         if (!menu.contains(e.target)) closeScheduleMenu(menu);
       });
       var target = e.target.closest('[data-new-watch], [data-detail]');
-      if (target) openWatchDetail(target.getAttribute('data-detail'));
+      if (target) {
+        if (target.hasAttribute('data-detail')) keepDialogForReturn(target);
+        openWatchDetail(target.getAttribute('data-detail'));
+      }
       if (e.target.closest('[data-anime-search]')) openAnimeSearch();
       var libraryAction = e.target.closest('[data-resume], [data-archive]');
       if (!libraryAction || libraryAction.disabled) return;
@@ -4931,9 +5279,18 @@
       if (reminderTab) return openReminderCenter(reminderTab === '1' ? 'history' : reminderTab, null, reminderParams.get('event'));
       if (TAB === 'season' && !SEASON) loadSeason(false);
     });
-    setInterval(function () { if (!document.hidden) refresh(); }, 60000);
+    setInterval(function () {
+      if (document.hidden) return;
+      refresh();
+      refreshOpenReminderCenter?.();
+    }, 60000);
     setInterval(checkPanelRevision, 3500);
-    document.addEventListener('visibilitychange', checkPanelRevision);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) flushAllBumps();
+      else checkPanelRevision();
+    });
+    window.addEventListener('beforeunload', prepareToLeave);
+    window.addEventListener('pagehide', flushAllBumps);
     window.addEventListener('focus', checkPanelRevision);
   }
 

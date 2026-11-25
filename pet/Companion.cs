@@ -330,7 +330,7 @@ namespace UkagakaBangumi
 
         void CheckCompanionImport()
         {
-            if (_selfTest || _closing) return;
+            if (_selfTest || _closing || _appearanceSavePending) return;
             string data = Path.Combine(_root, "data");
             string file = Path.Combine(data, "companion-import.json");
             string journal = Path.Combine(data, ".migration-pending.json");

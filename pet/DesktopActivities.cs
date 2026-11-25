@@ -13,14 +13,14 @@ namespace UkagakaBangumi
     public partial class PetWindow
     {
         const int QuickPinLimit = 3;
-        static readonly string[] QuickKeys = { "schedule", "notes", "companion", "focus", "web", "snoozes" };
+        static readonly string[] QuickKeys = { "notes", "companion", "focus", "web" };
         const string ScheduleMenuLabel = "我的排片";
         const string MarkMenuLabel = "记一话";
         const string UndoMenuLabel = "撤销上次进度修改";
         const string AppearanceMenuLabel = "换装与显示";
         const string RecallMenuLabel = "找回桌宠";
         const string ReminderCenterMenuLabel = "提醒中心";
-        static readonly string[] QuickNames = { ScheduleMenuLabel, "桌面便条", "陪伴手账", "专注与安静", "打开网页面板", ReminderCenterMenuLabel };
+        static readonly string[] QuickNames = { "桌面便条", "陪伴手账", "专注与安静", "打开网页面板" };
         readonly List<string> _trayPins = new List<string>();
         readonly List<string> _petPins = new List<string>();
         readonly List<string> _recentQuick = new List<string>();
@@ -44,7 +44,7 @@ namespace UkagakaBangumi
 
         void RecordQuickUse(string action)
         {
-            if (_recentQuick.Count > 0 && _recentQuick[0] == action) return;
+            if (!QuickKeys.Contains(action) || (_recentQuick.Count > 0 && _recentQuick[0] == action)) return;
             _recentQuick.Remove(action);
             _recentQuick.Insert(0, action);
             if (_recentQuick.Count > QuickPinLimit) _recentQuick.RemoveAt(QuickPinLimit);
@@ -69,19 +69,14 @@ namespace UkagakaBangumi
             }
         }
 
-        static IEnumerable<string> PinnedMenuActions(List<string> pins)
-        {
-            return pins.Where(key => key != "schedule");
-        }
-
         string[] RecentMenuActions(List<string> pins)
         {
-            return _recentQuick.Where(key => key != "schedule" && key != "snoozes" && !pins.Contains(key)).ToArray();
+            return _recentQuick.Where(key => !pins.Contains(key)).ToArray();
         }
 
         void AddPetQuickItems(ContextMenu menu, string[] recent)
         {
-            foreach (string key in PinnedMenuActions(_petPins))
+            foreach (string key in _petPins)
             {
                 var pin = Item(QuickName(key), (s, e) => RunQuickAction(key));
                 AutomationProperties.SetAutomationId(pin, "pet-quick-" + key);
@@ -93,7 +88,7 @@ namespace UkagakaBangumi
 
         void AddTrayQuickItems(TrayMenu menu, string[] recent)
         {
-            foreach (string key in PinnedMenuActions(_trayPins)) menu.Items.Add(TrayAction(key));
+            foreach (string key in _trayPins) menu.Items.Add(TrayAction(key));
             if (recent.Length == 0) return;
             var submenu = new TrayMenuItem("最近使用") { Name = "tray-recent-actions" };
             foreach (string key in recent) submenu.DropDownItems.Add(TrayAction(key));
@@ -114,7 +109,7 @@ namespace UkagakaBangumi
             _quickMenuSettings = UtilityWindow("TIARA · 常用菜单", out panel);
             _quickMenuSettings.Closed += delegate { _quickMenuSettings = null; };
             UtilityText(panel, "常用菜单", true);
-            UtilityText(panel, "每处最多固定 3 项，显示在第一层。「我的排片」已固定在两个菜单。");
+            UtilityText(panel, "「我的排片」和「提醒中心」始终显示。每处可以另外固定 3 项常用菜单。");
             QuickSettingsGroup(panel, "托盘", "tray", _trayPins);
             QuickSettingsGroup(panel, "立绘右键", "pet", _petPins);
             _quickMenuSettings.Show();

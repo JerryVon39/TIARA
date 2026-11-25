@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { refreshSeasonFromSources, SEASON_BACKUP } from '../lib/season-source.mjs';
+import { effectiveBgmConfig } from '../lib/bgm-sync.mjs';
 import {
   currentSeason, listCachedSeasons, pruneSeasonCache, readSeasonCache, writeSeasonCache,
   seasonCacheRel, seasonRefreshState, shiftSeason, CATALOG_DIRECTORY, KEEP_SPAN,
@@ -27,6 +29,37 @@ async function rootWith(quarters) {
   }
   return root;
 }
+
+test('备用源只在启用且官方连接失败后调用，独立请求不携带账号或代理凭据', async () => {
+  const calls = [];
+  const failing = Object.assign(new Error('incomplete'), { code: 'season_incomplete' });
+  const fetcher = async options => {
+    calls.push(options);
+    if (options.base !== SEASON_BACKUP.base) throw failing;
+    return { q: options.q, total: 1, items: [{ id: 1 }] };
+  };
+  const official = { officialBase: 'https://api.bgm.tv', officialProxy: 'http://synthetic:secret@127.0.0.1',
+    token: 'synthetic-token', headers: { Authorization: 'Bearer synthetic-token' } };
+  await assert.rejects(refreshSeasonFromSources('2026Q4', official, fetcher), failing);
+  assert.equal(calls.length, 1);
+  calls.length = 0;
+  const result = await refreshSeasonFromSources('2026Q4', { ...official, backup: true }, fetcher);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].proxy, official.officialProxy);
+  assert.equal(calls[1].proxy, '');
+  assert.equal(calls[1].headers, undefined);
+  assert.equal(calls[1].token, undefined);
+  assert.equal(calls[1].redirect, 'error');
+  assert.equal(result.catalog_source, SEASON_BACKUP.label);
+  assert.equal(result.items[0].cover_source, SEASON_BACKUP.id);
+  let attempts = 0;
+  await assert.rejects(refreshSeasonFromSources('2026Q4', { ...official, backup: true }, async () => {
+    attempts++;
+    throw Object.assign(new Error('forbidden'), { status: 403 });
+  }), /forbidden/);
+  assert.equal(attempts, 1, '账号或请求权限错误不换备用源');
+  assert.equal(effectiveBgmConfig({ base: SEASON_BACKUP.base }).base, 'https://api.bgm.tv');
+});
 
 test('currentSeason：按 UTC+8 判季度（12-31 16:30Z 已经是次年 Q1）', () => {
   assert.equal(currentSeason(new Date('2026-11-09T00:00:00+08:00')), '2026Q4');
@@ -115,7 +148,7 @@ test('季末核验按北京时间计算，历史季核验后不因过期而刷�
 test('内置目录能兜底旧缓存漏页，核验结果和附加字段在缓存清理后仍有效', async () => {
   const root = await rootWith([]);
   const q = '2019Q4';
-  const seed = { q, items: [{ id: 1, weekday: 1, time_cst: '21:00' }], total: 1 };
+  const seed = { q, items: [{ id: 1, weekday: 1, time_cst: '21:00' }, { id: 3 }], total: 2 };
   const dir = path.join(root, CATALOG_DIRECTORY);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, q + '.json'), JSON.stringify(seed));
@@ -125,6 +158,11 @@ test('内置目录能兜底旧缓存漏页，核验结果和附加字段在缓�
   await writeSeasonCache(root, { q, total: 1, items: [{ id: 1, eps: 12, weekday: null }] });
   const saved = await readSeasonCache(root, q);
   assert.equal(saved.verified_source, 'Bangumi API');
+  assert.equal(saved.catalog_sources.downloaded.verified_at, saved.verified_at);
+  assert.equal(saved.catalog_sources.builtin.verified_at, null);
+  assert.equal(saved.catalog_sources.builtin.count, 2);
+  assert.equal(saved.catalog_sources.downloaded.count, 1);
+  assert.deepEqual(saved.catalog_sources.retained_ids, ['3']);
   assert.deepEqual([saved.items[0].eps, saved.items[0].weekday, saved.items[0].time_cst], [12, 1, '21:00']);
   assert.deepEqual(await pruneSeasonCache(root, currentSeason()), []);
   assert.ok(await fs.readFile(path.join(root, seasonCacheRel(q)), 'utf8'));

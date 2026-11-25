@@ -233,8 +233,8 @@ namespace UkagakaBangumi
 
         static string ReminderViewingUrl(Dictionary<string, object> entry)
         {
-            object url;
-            return entry != null && entry.TryGetValue("watch_url", out url) && ViewingUri(Str(url)) != null ? Str(url) : null;
+            bool backup;
+            return PlaybackFromEntry(entry, out backup);
         }
 
         void PresentReminderBatch(List<ReminderCandidate> show, Dictionary<string, Dictionary<string, object>> active, long now, bool bubble)

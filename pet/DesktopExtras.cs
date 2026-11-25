@@ -115,6 +115,7 @@ namespace UkagakaBangumi
             string shell = ShellOptions().Contains(requested) ? requested : "master";
             bool changedShell = shell != _shellName;
             _shellName = shell;
+            _previousShellName = null;
             _bubbleThemeIndex = Math.Max(0, Math.Min(BubbleThemes.Length - 1, StateValue<int>(serializer, appearance, "theme")));
             _bubbleSizeIndex = Math.Max(0, Math.Min(BubbleFontFactors.Length - 1, StateValue<int>(serializer, appearance, "size")));
             if (appearance.ContainsKey("bubble_time"))
